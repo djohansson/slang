@@ -151,7 +151,7 @@ target_include_directories(
 #
 
 set(SLANG_LOOKUP_GENERATOR_INPUT_JSON
-    "${slang_SOURCE_DIR}/external/spirv-headers/include/spirv/unified1/extinst.glsl.std.450.grammar.json"
+    "${VCPKG_INCLUDE_DIR}/spirv/unified1/extinst.glsl.std.450.grammar.json"
 )
 set(SLANG_LOOKUP_GENERATOR_OUTPUT_DIR
     "${CMAKE_CURRENT_BINARY_DIR}/slang-lookup-tables/"
@@ -175,7 +175,7 @@ slang_add_target(
     slang-lookup-tables
     OBJECT
     EXPLICIT_SOURCE ${SLANG_LOOKUP_GENERATED_SOURCE}
-    LINK_WITH_PRIVATE core SPIRV-Headers
+    LINK_WITH_PRIVATE core
     EXCLUDE_FROM_ALL
     FOLDER generated
 )
@@ -203,7 +203,6 @@ slang_add_target(
         slang-meta-headers
         slang-reflect-headers
         slang-lookup-tables
-        SPIRV-Headers
     FOLDER generators
 )
 target_compile_definitions(
@@ -251,8 +250,7 @@ slang_add_target(
         slang-capability-defs
         slang-capability-lookup
         slang-reflect-headers
-        slang-lookup-tables
-        SPIRV-Headers
+        slang-lookup-tables        
     # slang.h is in the project root, so include that directory in the interface
     # for slang
     INCLUDE_DIRECTORIES_PUBLIC ${slang_SOURCE_DIR}

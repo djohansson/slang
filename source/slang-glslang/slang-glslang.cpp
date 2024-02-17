@@ -3,15 +3,13 @@
 
 
 #include "glslang/Public/ResourceLimits.h"
-#include "StandAlone/Worklist.h"
+#include "glslang/Include/Worklist.h"
 #include "glslang/Include/ShHandle.h"
 #include "glslang/Public/ShaderLang.h"
-#include "SPIRV/GlslangToSpv.h"
-#include "SPIRV/GLSL.std.450.h"
-#include "SPIRV/doc.h"
-#include "SPIRV/disassemble.h"
-
-#include "OGLCompilersDLL/InitializeDll.h"
+#include "glslang/SPIRV/GlslangToSpv.h"
+#include "glslang/SPIRV/GLSL.std.450.h"
+#include "glslang/SPIRV/doc.h"
+#include "glslang/SPIRV/disassemble.h"
 
 #include "../../slang.h"
 
@@ -815,11 +813,6 @@ int glslang_compile_1_2(glslang_CompileRequest_1_2 * inRequest)
 {
     static ProcessInitializer g_processInitializer;
     if (!g_processInitializer.init())
-    {
-        // Failed
-        return 1;
-    }
-    if (!glslang::InitThread())
     {
         // Failed
         return 1;

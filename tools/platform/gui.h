@@ -5,7 +5,7 @@
 #include "vector-math.h"
 #include "window.h"
 #include "slang-com-ptr.h"
-#include "external/imgui/imgui.h"
+#include <imgui.h>
 #include "source/core/slang-basic.h"
 
 namespace platform {

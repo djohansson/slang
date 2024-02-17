@@ -349,14 +349,3 @@ GUI::~GUI()
 }
 
 } // gfx
-
-#include <imgui.cpp>
-#include <imgui_draw.cpp>
-#include <imgui_widgets.cpp>
-#ifdef _WIN32
-// imgui_impl_win32 defines these, so make sure it doesn't error because
-// they're already there
-#undef WIN32_LEAN_AND_MEAN
-#undef NOMINMAX
-#include <examples/imgui_impl_win32.cpp>
-#endif

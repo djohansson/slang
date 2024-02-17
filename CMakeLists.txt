@@ -45,6 +45,12 @@ include(LLVM)
 include(SlangTarget)
 include(AutoOption)
 
+set(VCPKG_INCLUDE_DIR "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/include")
+set(VCPKG_LIB_DIR "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/lib")
+
+include_directories(${VCPKG_INCLUDE_DIR})
+link_directories(${VCPKG_LIB_DIR})
+
 #
 # Options
 #
@@ -157,7 +163,6 @@ glob_append(
 if(premake_generated_files)
     file(REMOVE ${premake_generated_files})
 endif()
-file(REMOVE external/miniz/miniz_export.h)
 
 #
 # Dependencies, most of these are however handled inside the "auto_option"
@@ -171,8 +176,6 @@ if(SLANG_SLANG_LLVM_FLAVOR STREQUAL "USE_SYSTEM_LLVM")
     find_package(Clang REQUIRED CONFIG)
 endif()
 
-add_subdirectory(external)
-
 #
 # Our targets
 #
@@ -182,7 +185,7 @@ slang_add_target(
     STATIC
     EXCLUDE_FROM_ALL
     USE_EXTRA_WARNINGS
-    LINK_WITH_PRIVATE miniz lz4_static Threads::Threads ${CMAKE_DL_LIBS}
+    LINK_WITH_PRIVATE miniz lz4 Threads::Threads ${CMAKE_DL_LIBS}
     INCLUDE_DIRECTORIES_PUBLIC source
 )
 
@@ -192,7 +195,7 @@ slang_add_target(
     # This compiles 'core' again with the SLANG_RT_DYNAMIC_EXPORT macro defined
     EXTRA_SOURCE_DIRS source/core
     USE_EXTRA_WARNINGS
-    LINK_WITH_PRIVATE miniz lz4_static Threads::Threads ${CMAKE_DL_LIBS}
+    LINK_WITH_PRIVATE miniz lz4 Threads::Threads ${CMAKE_DL_LIBS}
     EXPORT_MACRO_PREFIX SLANG_RT
     INSTALL
 )
@@ -301,7 +304,7 @@ slang_add_target(
     source/slang-glslang
     MODULE
     USE_EXTRA_WARNINGS
-    LINK_WITH_PRIVATE glslang SPIRV SPIRV-Tools-opt
+    LINK_WITH_PRIVATE glslang GenericCodeGen MachineIndependent SPIRV SPIRV-Tools SPIRV-Tools-opt
     INSTALL
 )
 # Our only interface is through what we define in source/slang-glslang, in the
@@ -419,53 +422,100 @@ endif()
 #
 # `platform` contains all the platform abstractions for a GUI application.
 #
-slang_add_target(
-    tools/platform
-    SHARED
-    EXCLUDE_FROM_ALL
-    USE_FEWER_WARNINGS
-    LINK_WITH_PRIVATE
-        core
-        imgui
-        $<$<BOOL:${SLANG_ENABLE_XLIB}>:X11::X11>
-        $<$<PLATFORM_ID:Darwin>:-framework Cocoa>
-        $<$<PLATFORM_ID:Darwin>:-framework QuartzCore>
-        ${CMAKE_DL_LIBS}
-    EXTRA_COMPILE_DEFINITIONS_PRIVATE
-        $<$<BOOL:${SLANG_ENABLE_XLIB}>:SLANG_ENABLE_XLIB>
-    INCLUDE_FROM_PRIVATE gfx
-    INCLUDE_DIRECTORIES_PUBLIC tools/platform
-    EXPORT_MACRO_PREFIX SLANG_PLATFORM
-)
+if(CMAKE_SYSTEM_NAME MATCHES "Darwin")
+    slang_add_target(
+        tools/platform
+        SHARED
+        EXCLUDE_FROM_ALL
+        USE_FEWER_WARNINGS
+        LINK_WITH_PRIVATE
+            core
+            imgui
+            $<$<BOOL:${SLANG_ENABLE_XLIB}>:X11::X11>
+            "-framework Cocoa"
+            "-framework QuartzCore"
+            ${CMAKE_DL_LIBS}
+        EXTRA_COMPILE_DEFINITIONS_PRIVATE
+            $<$<BOOL:${SLANG_ENABLE_XLIB}>:SLANG_ENABLE_XLIB>
+        INCLUDE_FROM_PRIVATE gfx
+        INCLUDE_DIRECTORIES_PUBLIC tools/platform
+        EXPORT_MACRO_PREFIX SLANG_PLATFORM
+    )
+else()
+    slang_add_target(
+        tools/platform
+        SHARED
+        EXCLUDE_FROM_ALL
+        USE_FEWER_WARNINGS
+        LINK_WITH_PRIVATE
+            core
+            imgui
+            $<$<BOOL:${SLANG_ENABLE_XLIB}>:X11::X11>
+            ${CMAKE_DL_LIBS}
+        EXTRA_COMPILE_DEFINITIONS_PRIVATE
+            $<$<BOOL:${SLANG_ENABLE_XLIB}>:SLANG_ENABLE_XLIB>
+        INCLUDE_FROM_PRIVATE gfx
+        INCLUDE_DIRECTORIES_PUBLIC tools/platform
+        EXPORT_MACRO_PREFIX SLANG_PLATFORM
+    )
+endif()
 
 #
 # GFX
 #
-slang_add_target(
-    tools/gfx
-    SHARED
-    USE_FEWER_WARNINGS
-    LINK_WITH_PRIVATE
-        core
-        slang
-        Vulkan-Headers
-        $<$<BOOL:${SLANG_ENABLE_XLIB}>:X11::X11>
-        $<$<BOOL:${SLANG_ENABLE_CUDA}>:CUDA::cudart;CUDA::cuda_driver>
-    EXTRA_COMPILE_DEFINITIONS_PRIVATE
-        $<$<BOOL:${SLANG_ENABLE_CUDA}>:GFX_ENABLE_CUDA>
-        $<$<BOOL:${SLANG_ENABLE_OPTIX}>:GFX_OPTIX>
-        $<$<BOOL:${SLANG_ENABLE_NVAPI}>:GFX_NVAPI>
-        $<$<BOOL:${SLANG_ENABLE_XLIB}>:SLANG_ENABLE_XLIB>
-    # This is a shared library, so we need to set a preprocessor macro to mark
-    # exported symbols
-    EXPORT_MACRO_PREFIX SLANG_GFX
-    # slang-gfx is in this directory, anything which depends on gfx should include
-    # this
-    INCLUDE_DIRECTORIES_PUBLIC .
-    REQUIRES copy-gfx-slang-modules
-    INSTALL
-    FOLDER gfx
-)
+if(CMAKE_SYSTEM_NAME MATCHES "Darwin")
+    slang_add_target(
+        tools/gfx
+        SHARED
+        USE_FEWER_WARNINGS
+        LINK_WITH_PRIVATE
+            core
+            slang
+            $<$<BOOL:${SLANG_ENABLE_XLIB}>:X11::X11>
+            "-framework CoreFoundation"
+            $<$<BOOL:${SLANG_ENABLE_CUDA}>:CUDA::cudart;CUDA::cuda_driver>
+        EXTRA_COMPILE_DEFINITIONS_PRIVATE
+            $<$<BOOL:${SLANG_ENABLE_CUDA}>:GFX_ENABLE_CUDA>
+            $<$<BOOL:${SLANG_ENABLE_OPTIX}>:GFX_OPTIX>
+            $<$<BOOL:${SLANG_ENABLE_NVAPI}>:GFX_NVAPI>
+            $<$<BOOL:${SLANG_ENABLE_XLIB}>:SLANG_ENABLE_XLIB>
+        # This is a shared library, so we need to set a preprocessor macro to mark
+        # exported symbols
+        EXPORT_MACRO_PREFIX SLANG_GFX
+        # slang-gfx is in this directory, anything which depends on gfx should include
+        # this
+        INCLUDE_DIRECTORIES_PUBLIC .
+        REQUIRES copy-gfx-slang-modules
+        INSTALL
+        FOLDER gfx
+    )
+else()
+    slang_add_target(
+        tools/gfx
+        SHARED
+        USE_FEWER_WARNINGS
+        LINK_WITH_PRIVATE
+            core
+            slang
+            $<$<BOOL:${SLANG_ENABLE_XLIB}>:X11::X11>
+            $<$<BOOL:${SLANG_ENABLE_CUDA}>:CUDA::cudart;CUDA::cuda_driver>
+        EXTRA_COMPILE_DEFINITIONS_PRIVATE
+            $<$<BOOL:${SLANG_ENABLE_CUDA}>:GFX_ENABLE_CUDA>
+            $<$<BOOL:${SLANG_ENABLE_OPTIX}>:GFX_OPTIX>
+            $<$<BOOL:${SLANG_ENABLE_NVAPI}>:GFX_NVAPI>
+            $<$<BOOL:${SLANG_ENABLE_XLIB}>:SLANG_ENABLE_XLIB>
+        # This is a shared library, so we need to set a preprocessor macro to mark
+        # exported symbols
+        EXPORT_MACRO_PREFIX SLANG_GFX
+        # slang-gfx is in this directory, anything which depends on gfx should include
+        # this
+        INCLUDE_DIRECTORIES_PUBLIC .
+        REQUIRES copy-gfx-slang-modules
+        INSTALL
+        FOLDER gfx
+    )
+endif()
+
 set(modules_dest_dir $<TARGET_FILE_DIR:slang-test>)
 add_custom_target(
     copy-gfx-slang-modules
@@ -673,7 +723,7 @@ example(examples/autodiff-texture WIN32_EXECUTABLE)
 example(examples/cpu-com-example )
 example(examples/cpu-hello-world )
 example(examples/gpu-printing )
-example(examples/hello-world LINK_WITH_PRIVATE Vulkan-Headers)
+example(examples/hello-world)
 example(examples/model-viewer WIN32_EXECUTABLE)
 example(examples/platform-test WIN32_EXECUTABLE)
 example(examples/ray-tracing WIN32_EXECUTABLE)

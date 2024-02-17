@@ -4,7 +4,7 @@
 #include "window.h"
 
 #define TINYOBJLOADER_IMPLEMENTATION
-#include "../../external/tinyobjloader/tiny_obj_loader.h"
+#include <tiny_obj_loader.h>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "../../external/stb/stb_image.h"
@@ -12,9 +12,9 @@
 #define STB_IMAGE_RESIZE_IMPLEMENTATION
 #include "../../external/stb/stb_image_resize.h"
 
-#include "../../external/glm/glm/glm.hpp"
-#include "../../external/glm/glm/gtc/matrix_transform.hpp"
-#include "../../external/glm/glm/gtc/constants.hpp"
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/constants.hpp>
 
 #include <memory>
 #include <unordered_map>
@@ -225,20 +225,24 @@ SlangResult ModelLoader::load(
         baseDir = makeString(inputPath, lastSlash);
     }
 
-    std::string diagnostics;
+    std::string warn, err;
     bool shouldTriangulate = true;
     bool success = tinyobj::LoadObj(
         &objVertexAttributes,
         &objShapes,
         &objMaterials,
-        &diagnostics,
+        &warn, &err,
         inputPath,
         baseDir.size() ? baseDir.c_str() : nullptr,
         shouldTriangulate);
 
-    if(!diagnostics.empty())
+    if(!warn.empty())
     {
-        printf("%s", diagnostics.c_str());
+        printf("%s", warn.c_str());
+    }
+    if(!err.empty())
+    {
+        printf("%s", err.c_str());
     }
     if(!success)
     {

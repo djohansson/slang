@@ -9,7 +9,8 @@
 #include "slang-ir-specialize-function-call.h"
 #include "slang-ir-util.h"
 #include "slang-glsl-extension-tracker.h"
-#include "../../external/spirv-headers/include/spirv/unified1/spirv.h"
+
+#include <spirv/unified1/spirv.h>
 
 namespace Slang
 {
