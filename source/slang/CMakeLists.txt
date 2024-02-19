@@ -27,7 +27,7 @@ add_custom_command(
     OUTPUT ${SLANG_STDLIB_META_GENERATED_HEADERS}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${SLANG_STDLIB_META_OUTPUT_DIR}
     COMMAND
-        slang-generate ${SLANG_STDLIB_META_SOURCE} --target-directory
+        ${CMAKE_BINARY_DIR}/generators/$<CONFIG>/${runtime_subdir}/slang-generate ${SLANG_STDLIB_META_SOURCE} --target-directory
         ${SLANG_STDLIB_META_OUTPUT_DIR}
     DEPENDS ${SLANG_STDLIB_META_SOURCE} slang-generate
     WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}
@@ -66,7 +66,7 @@ add_custom_command(
     OUTPUT ${SLANG_CAPABILITY_GENERATED_SOURCE}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${SLANG_CAPABILITY_OUTPUT_DIR}
     COMMAND
-        slang-capability-generator ${SLANG_CAPABILITY_SOURCE} --target-directory
+        ${CMAKE_BINARY_DIR}/generators/$<CONFIG>/${runtime_subdir}/slang-capability-generator ${SLANG_CAPABILITY_SOURCE} --target-directory
         ${SLANG_CAPABILITY_OUTPUT_DIR}
     DEPENDS ${SLANG_CAPABILITY_SOURCE} slang-capability-generator
     WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}
@@ -127,7 +127,7 @@ add_custom_command(
     OUTPUT ${SLANG_REFLECT_GENERATED_HEADERS}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${SLANG_REFLECT_OUTPUT_DIR}
     COMMAND
-        slang-cpp-extractor ${SLANG_REFLECT_INPUT} -strip-prefix slang- -o
+        ${CMAKE_BINARY_DIR}/generators/$<CONFIG>/${runtime_subdir}/slang-cpp-extractor ${SLANG_REFLECT_INPUT} -strip-prefix slang- -o
         ${SLANG_REFLECT_OUTPUT_DIR}/slang-generated -output-fields -mark-suffix
         _CLASS
     DEPENDS ${SLANG_REFLECT_INPUT} slang-cpp-extractor
@@ -164,7 +164,7 @@ add_custom_command(
     COMMAND
         ${CMAKE_COMMAND} -E make_directory ${SLANG_LOOKUP_GENERATOR_OUTPUT_DIR}
     COMMAND
-        slang-lookup-generator ${SLANG_LOOKUP_GENERATOR_INPUT_JSON}
+        ${CMAKE_BINARY_DIR}/generators/$<CONFIG>/${runtime_subdir}/slang-lookup-generator ${SLANG_LOOKUP_GENERATOR_INPUT_JSON}
         ${SLANG_LOOKUP_GENERATED_SOURCE} "GLSLstd450" "GLSLstd450"
         "spirv/unified1/GLSL.std.450.h"
     DEPENDS ${SLANG_LOOKUP_GENERATOR_INPUT_JSON} slang-lookup-generator
@@ -220,7 +220,7 @@ set(SLANG_STDLIB_GENERATED_HEADER
 add_custom_command(
     OUTPUT ${SLANG_STDLIB_GENERATED_HEADER}
     COMMAND
-        slang-bootstrap -archive-type riff-lz4 -save-stdlib-bin-source
+        ${CMAKE_BINARY_DIR}/generators/$<CONFIG>/${runtime_subdir}/slang-bootstrap -archive-type riff-lz4 -save-stdlib-bin-source
         ${SLANG_STDLIB_GENERATED_HEADER}
     DEPENDS slang-bootstrap
     VERBATIM
