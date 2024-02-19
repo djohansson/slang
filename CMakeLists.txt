@@ -282,7 +282,6 @@ slang_add_target(
     tools/slangd
     EXECUTABLE
     LINK_WITH_PRIVATE
-        core
         slang
         slang-reflect-headers
         slang-capability-defs
@@ -293,7 +292,10 @@ slang_add_target(
     source/slangc
     EXECUTABLE
     USE_FEWER_WARNINGS
-    LINK_WITH_PRIVATE core slang Threads::Threads
+    LINK_WITH_PRIVATE
+        core
+        slang
+        Threads::Threads
     INSTALL
 )
 
@@ -395,7 +397,10 @@ elseif(SLANG_SLANG_LLVM_FLAVOR STREQUAL "USE_SYSTEM_LLVM")
     slang_add_target(
         source/slang-llvm
         MODULE
-        LINK_WITH_PRIVATE core compiler-core llvm-dep clang-dep
+        LINK_WITH_PRIVATE
+            compiler-core
+            llvm-dep
+            clang-dep
         # We include slang.h, but don't need to link with it
         INCLUDE_FROM_PRIVATE slang
         # This uses the SLANG_DLL_EXPORT macro from slang.h, so make sure to set
@@ -563,14 +568,17 @@ slang_add_target(
     tools/test-server
     EXECUTABLE
     EXCLUDE_FROM_ALL
-    LINK_WITH_PRIVATE core compiler-core slang
+    LINK_WITH_PRIVATE
+        compiler-core
+        slang
     FOLDER test
 )
 slang_add_target(
     tools/test-process
     EXECUTABLE
     EXCLUDE_FROM_ALL
-    LINK_WITH_PRIVATE core compiler-core
+    LINK_WITH_PRIVATE
+        compiler-core
     FOLDER test
 )
 
@@ -578,7 +586,11 @@ slang_add_target(
     tools/slang-test
     EXECUTABLE
     USE_FEWER_WARNINGS
-    LINK_WITH_PRIVATE core compiler-core slang ${CMAKE_DL_LIBS} Threads::Threads
+    LINK_WITH_PRIVATE
+        compiler-core
+        slang
+        ${CMAKE_DL_LIBS}
+        Threads::Threads
     REQUIRES
         # Shared libraries dlopened by slang-test
         slang-reflection-test
@@ -621,7 +633,12 @@ slang_add_target(
     EXCLUDE_FROM_ALL
     EXTRA_COMPILE_DEFINITIONS_PRIVATE SLANG_SHARED_LIBRARY_TOOL
     USE_FEWER_WARNINGS
-    LINK_WITH_PRIVATE core slang unit-test gfx gfx-util platform
+    LINK_WITH_PRIVATE
+        slang
+        unit-test
+        gfx
+        gfx-util
+        platform
     OUTPUT_NAME gfx-unit-test-tool
     FOLDER test/tools
 )
@@ -631,7 +648,11 @@ slang_add_target(
     EXCLUDE_FROM_ALL
     EXTRA_COMPILE_DEFINITIONS_PRIVATE SLANG_SHARED_LIBRARY_TOOL
     USE_FEWER_WARNINGS
-    LINK_WITH_PRIVATE core compiler-core unit-test slang Threads::Threads
+    LINK_WITH_PRIVATE
+        compiler-core
+        unit-test
+        slang
+        Threads::Threads
     OUTPUT_NAME slang-unit-test-tool
     FOLDER test/tools
 )
@@ -641,7 +662,10 @@ slang_add_target(
     EXCLUDE_FROM_ALL
     EXTRA_COMPILE_DEFINITIONS_PRIVATE SLANG_SHARED_LIBRARY_TOOL
     USE_FEWER_WARNINGS
-    LINK_WITH_PRIVATE core slang Threads::Threads
+    LINK_WITH_PRIVATE
+        core
+        slang
+        Threads::Threads
     OUTPUT_NAME slang-reflection-test-tool
     FOLDER test/tools
 )
@@ -652,7 +676,6 @@ slang_add_target(
     EXTRA_COMPILE_DEFINITIONS_PRIVATE SLANG_SHARED_LIBRARY_TOOL
     USE_FEWER_WARNINGS
     LINK_WITH_PRIVATE
-        core
         compiler-core
         slang
         gfx
@@ -670,7 +693,8 @@ slang_add_target(
     tools/slang-profile
     EXECUTABLE
     EXCLUDE_FROM_ALL
-    LINK_WITH_PRIVATE core slang
+    LINK_WITH_PRIVATE
+        slang
     FOLDER test
 )
 
@@ -683,7 +707,6 @@ slang_add_target(
     STATIC
     EXCLUDE_FROM_ALL
     LINK_WITH_PRIVATE
-        core
         slang
         gfx
         platform
@@ -703,7 +726,6 @@ function(example dir)
         EXCLUDE_FROM_ALL
         USE_FEWER_WARNINGS
         LINK_WITH_PRIVATE
-            core
             example-base
             slang
             gfx
