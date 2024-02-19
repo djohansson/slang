@@ -11,7 +11,7 @@ foreach(input ${SLANG_PRELUDE_HEADERS})
     set(output "${CMAKE_CURRENT_BINARY_DIR}/${input_name}.cpp")
     add_custom_command(
         OUTPUT ${output}
-        COMMAND slang-embed "${input}" ${output}
+        COMMAND ${slang_SOURCE_DIR}/build/generators/$<CONFIG>/${runtime_subdir}/slang-embed "${input}" ${output}
         DEPENDS ${input} slang-embed
         VERBATIM
     )
