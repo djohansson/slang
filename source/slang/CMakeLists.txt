@@ -179,7 +179,7 @@ add_custom_command(
 )
 
 set(SLANG_SPIRV_CORE_SOURCE_JSON
-    "${slang_SOURCE_DIR}/external/spirv-headers/include/spirv/unified1/spirv.core.grammar.json"
+    "${VCPKG_INCLUDE_DIR}/spirv/unified1/spirv.core.grammar.json"
 )
 set(SLANG_SPIRV_CORE_GRAMMAR_SOURCE
     "${SLANG_LOOKUP_GENERATOR_OUTPUT_DIR}/slang-spirv-core-grammar-embed.cpp"
