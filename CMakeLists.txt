@@ -319,6 +319,7 @@ if(SLANG_ENABLE_SLANGD)
             slang-capability-defs
             Threads::Threads
         INCLUDE_FROM_PRIVATE slang
+        INCLUDE_DIRECTORIES_PRIVATE include
         INSTALL
     )
 endif()
