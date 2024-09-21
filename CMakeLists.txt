@@ -590,6 +590,8 @@ if(SLANG_ENABLE_TESTS)
         LINK_WITH_PRIVATE
             compiler-core
             slang
+        INCLUDE_FROM_PRIVATE slang
+        INCLUDE_DIRECTORIES_PRIVATE include
         FOLDER test
     )
     slang_add_target(
