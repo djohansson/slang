@@ -1,7 +1,7 @@
 // slang-ir-obfuscate-loc.cpp
 #include "slang-ir-obfuscate-loc.h"
 
-#include "../../slang.h"
+#include "slang.h"
 
 #include "../core/slang-random-generator.h"
 #include "../core/slang-stable-hash.h"
@@ -68,6 +68,11 @@ SlangResult obfuscateModuleLocs(IRModule* module, SourceManager* sourceManager)
 
     // Find all of the instructions with source locs
     _findInstsRec(module->getModuleInst(), instWithLocs);
+    if (instWithLocs.getCount() == 0)
+    {
+        // Nothing to do
+        return SLANG_OK;
+    }
 
     // Sort them
     instWithLocs.sort();
@@ -233,8 +238,8 @@ SlangResult obfuscateModuleLocs(IRModule* module, SourceManager* sourceManager)
     }
 
     // We can now just set all the new locs in the instructions
+    if(const LocPair* curPair = locPairs.getBuffer())
     {
-        const LocPair* curPair = locPairs.getBuffer();
         LocPair pair = *curPair;
 
         for (const auto& instWithLoc : instWithLocs)

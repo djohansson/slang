@@ -22,19 +22,19 @@
 namespace renderer_test {
 using namespace Slang;
 
-static gfx::DeviceType _toRenderType(Slang::RenderApiType apiType)
+static rhi::DeviceType _toRenderType(Slang::RenderApiType apiType)
 {
     using namespace Slang;
     switch (apiType)
     {
-    case RenderApiType::D3D11:  return gfx::DeviceType::DirectX11;
-    case RenderApiType::D3D12:  return gfx::DeviceType::DirectX12;
-    case RenderApiType::OpenGl: return gfx::DeviceType::OpenGl;
-    case RenderApiType::Vulkan: return gfx::DeviceType::Vulkan;
-    case RenderApiType::CPU:    return gfx::DeviceType::CPU;
-    case RenderApiType::CUDA:   return gfx::DeviceType::CUDA;
+    case RenderApiType::D3D11:  return rhi::DeviceType::D3D11;
+    case RenderApiType::D3D12:  return rhi::DeviceType::D3D12;
+    case RenderApiType::Vulkan: return rhi::DeviceType::Vulkan;
+    case RenderApiType::Metal:  return rhi::DeviceType::Metal;
+    case RenderApiType::CPU:    return rhi::DeviceType::CPU;
+    case RenderApiType::CUDA:   return rhi::DeviceType::CUDA;
     default:
-        return gfx::DeviceType::Unknown;
+        return rhi::DeviceType::Default;
     }
 }
 
@@ -62,7 +62,6 @@ static gfx::DeviceType _toRenderType(Slang::RenderApiType apiType)
     {
         args.setArgs(argv, argc);
     }
-
     SLANG_RETURN_ON_FAIL(outOptions.downstreamArgs.stripDownstreamArgs(args, 0, &sink));
 
     CommandLineReader reader(&args, &sink);
@@ -223,6 +222,10 @@ static gfx::DeviceType _toRenderType(Slang::RenderApiType apiType)
             //
             // TODO: At some point we could warn/error and deprecate this option.
         }
+        else if (argValue == "-g0")
+        {
+            outOptions.disableDebugInfo = true;
+        }
         else if (argValue == "-allow-glsl")
         {
             outOptions.allowGLSL = true;
@@ -241,7 +244,7 @@ static gfx::DeviceType _toRenderType(Slang::RenderApiType apiType)
                 UnownedStringSlice argName = argSlice.tail(1);
                 DeviceType deviceType = _toRenderType(RenderApiUtil::findApiTypeByName(argName));
 
-                if (deviceType != DeviceType::Unknown)
+                if (deviceType != DeviceType::Default)
                 {
                     outOptions.deviceType = deviceType;
                     continue;
@@ -250,7 +253,7 @@ static gfx::DeviceType _toRenderType(Slang::RenderApiType apiType)
                 // Lookup the target language type
                 DeviceType targetLanguageDeviceType = _toRenderType(RenderApiUtil::findImplicitLanguageRenderApiType(argName));
                     
-                if (targetLanguageDeviceType != DeviceType::Unknown)
+                if (targetLanguageDeviceType != DeviceType::Default || argName == "glsl")
                 {
                     outOptions.targetLanguageDeviceType = targetLanguageDeviceType;
                     outOptions.inputLanguageID = (argName == "hlsl" || argName == "glsl" || argName == "cpp" || argName == "cxx" || argName == "c") ?  InputLanguageID::Native : InputLanguageID::Slang;
@@ -263,7 +266,7 @@ static gfx::DeviceType _toRenderType(Slang::RenderApiType apiType)
     }
 
     // If a render option isn't set use defaultRenderType 
-    outOptions.deviceType = (outOptions.deviceType == DeviceType::Unknown)
+    outOptions.deviceType = (outOptions.deviceType == DeviceType::Default)
                                 ? outOptions.targetLanguageDeviceType
                                 : outOptions.deviceType;
 

@@ -28,6 +28,7 @@ DIAGNOSTIC(-1, Note, implicitParameterMatchingFailedBecauseShaderDoesNotDefineCo
 DIAGNOSTIC(-1, Note, implicitParameterMatchingFailedBecauseTypeMismatch, "implicit parameter matching failed because the component of the same name does not match parameter type '$0'.")
 DIAGNOSTIC(-1, Note, noteShaderIsTargetingPipeine, "shader '$0' is targeting pipeline '$1'")
 DIAGNOSTIC(-1, Note, seeDefinitionOf, "see definition of '$0'")
+DIAGNOSTIC(-1, Note, seeConstantBufferDefinition, "see constant buffer definition.")
 DIAGNOSTIC(-1, Note, seeInterfaceDefinitionOf, "see interface definition of '$0'")
 DIAGNOSTIC(-1, Note, seeUsingOf, "see using of '$0'")
 DIAGNOSTIC(-1, Note, seeDefinitionOfShader, "see definition of shader '$0'")
@@ -47,6 +48,8 @@ DIAGNOSTIC(-1, Note, declaredHere, "declared here")
 DIAGNOSTIC(-1, Note, seeOtherDeclarationOf, "see other declaration of '$0'")
 DIAGNOSTIC(-1, Note, seePreviousDeclarationOf, "see previous declaration of '$0'")
 DIAGNOSTIC(-1, Note, includeOutput, "include $0")
+DIAGNOSTIC(-1, Note, genericSignatureTried, "see declaration of $0")
+DIAGNOSTIC(-1, Note, entryPointCandidate, "see candidate declaration for entry point '$0'")
 
 //
 // 0xxxx -  Command line and interaction with host platform APIs.
@@ -236,6 +239,7 @@ DIAGNOSTIC(20012, Error, invalidSPIRVVersion, "Expecting SPIR-V version as eithe
 DIAGNOSTIC(20013, Error, invalidCUDASMVersion, "Expecting CUDA SM version as either 'major.minor', or quoted if has patch (eg for '7.0' or \"7.0\"')")
 DIAGNOSTIC(20014, Error, classIsReservedKeyword, "'class' is a reserved keyword in this context; use 'struct' instead.")
 DIAGNOSTIC(20015, Error, unknownSPIRVCapability, "unknown SPIR-V capability '$0'.")
+DIAGNOSTIC(20016, Error, missingLayoutBindingModifier, "Expecting 'binding' modifier in the layout qualifier here")
 
 DIAGNOSTIC(20101, Warning, unintendedEmptyStatement, "potentially unintended empty statement at this location; use {} instead.")
 
@@ -279,8 +283,8 @@ DIAGNOSTIC(30012, Error, noApplicationUnaryOperator, "no overload found for oper
 DIAGNOSTIC(30012, Error, noOverloadFoundForBinOperatorOnTypes, "no overload found for operator $0  ($1, $2).")
 DIAGNOSTIC(30013, Error, subscriptNonArray, "no subscript operation found for type '$0'")
 DIAGNOSTIC(30014, Error, subscriptIndexNonInteger, "index expression must evaluate to int.")
+DIAGNOSTIC(30016, Error, callOperatorNotFound, "no call operation found for type '$0'")
 DIAGNOSTIC(30015, Error, undefinedIdentifier2, "undefined identifier '$0'.")
-DIAGNOSTIC(30018, Error, typeNotInTheSameHierarchy, "invalid use of 'as' operator: expression evaluates to '$0', which is not in the same type hierarchy as target type '$1'.")
 DIAGNOSTIC(30019, Error, typeMismatch, "expected an expression of type '$0', got '$1'")
 DIAGNOSTIC(30021, Error, noApplicationFunction, "$0: no overload takes arguments ($1)")
 DIAGNOSTIC(30022, Error, invalidTypeCast, "invalid type cast between \"$0\" and \"$1\".")
@@ -296,6 +300,7 @@ DIAGNOSTIC(30035, Error, componentOverloadTypeMismatch, "'$0': type of overloade
 DIAGNOSTIC(30041, Error, bitOperationNonIntegral, "bit operation: operand must be integral type.")
 DIAGNOSTIC(30043, Error, getStringHashRequiresStringLiteral, "getStringHash parameter can only accept a string literal")
 DIAGNOSTIC(30047, Error, argumentExpectedLValue, "argument passed to parameter '$0' must be l-value.")
+DIAGNOSTIC(30048, Error, argumentHasMoreMemoryQualifiersThanParam, "argument passed in to parameter has a memory qualifier the parameter type is missing: '$0'")
 
 DIAGNOSTIC(30049, Note, thisIsImmutableByDefault, "a 'this' parameter is an immutable parameter by default in Slang; apply the `[mutating]` attribute to the function declaration to opt in to a mutable `this`")
 DIAGNOSTIC(30050, Error, mutatingMethodOnImmutableValue, "mutating method '$0' cannot be called on an immutable value")
@@ -322,7 +327,13 @@ DIAGNOSTIC(30066, Error, classCanOnlyBeInitializedWithNew, "a class can only be 
 DIAGNOSTIC(30067, Error, mutatingMethodOnFunctionInputParameterError, "mutating method '$0' called on `in` parameter '$1'; changes will not be visible to caller. copy the parameter into a local variable if this behavior is intended")
 DIAGNOSTIC(30068, Warning, mutatingMethodOnFunctionInputParameterWarning, "mutating method '$0' called on `in` parameter '$1'; changes will not be visible to caller. copy the parameter into a local variable if this behavior is intended")
 
+DIAGNOSTIC(30070, Error, unsizedMemberMustAppearLast, "member with unknown size at compile time can only appear as the last member in a composite type.")
+DIAGNOSTIC(30071, Error, varCannotBeUnsized, "cannot instantiate a variable of unsized type.")
+
+DIAGNOSTIC(30075, Error, cannotSpecializeGeneric, "cannot specialize generic '$0' with the provided arguments.")
+
 DIAGNOSTIC(30100, Error, staticRefToNonStaticMember, "type '$0' cannot be used to refer to non-static member '$1'")
+DIAGNOSTIC(30101, Error, cannotDereferenceType, "cannot dereference type '$0', do you mean to use '.'?")
 
 DIAGNOSTIC(30200, Error, redeclaration, "declaration of '$0' conflicts with existing declaration")
 DIAGNOSTIC(30201, Error, functionRedefinition, "function '$0' already has a body")
@@ -349,6 +360,18 @@ DIAGNOSTIC(30097, Error, functionNotMarkedAsDifferentiable, "function '$0' is no
 DIAGNOSTIC(30098, Error, nonStaticMemberFunctionNotAllowedAsDiffOperand, "non-static function reference '$0' is not allowed here.")
 
 DIAGNOSTIC(30099, Error, sizeOfArgumentIsInvalid, "argument to sizeof is invalid")
+DIAGNOSTIC(30083, Error, countOfArgumentIsInvalid, "argument to countof can only be a type pack or tuple")
+
+
+DIAGNOSTIC(30101, Error, readingFromWriteOnly, "cannot read from writeonly, check modifiers.")
+DIAGNOSTIC(30102, Error, differentiableMemberShouldHaveCorrespondingFieldInDiffType, "differentiable member '$0' should have a corresponding field in '$1'. Use [DerivativeMember($1.<field-name>)] or mark as no_diff")
+
+DIAGNOSTIC(30103, Error, expectTypePackAfterEach, "expected a type pack or a tuple after 'each'.")
+DIAGNOSTIC(30104, Error, eachExprMustBeInsideExpandExpr, "'each' expression must be inside 'expand' expression.")
+DIAGNOSTIC(30105, Error, expandTermCapturesNoTypePacks, "'expand' term captures no type packs. At least one type pack must be referenced via an 'each' term inside an 'expand' term.")
+DIAGNOSTIC(30106, Error, improperUseOfType, "type '$0' cannot be used in this context.")
+DIAGNOSTIC(30107, Error, parameterPackMustBeConst, "a parameter pack must be declared as 'const'.")
+
 
 // Include
 DIAGNOSTIC(30500, Error, includedFileMissingImplementing, "missing 'implementing' declaration in the included source file '$0'.")
@@ -367,21 +390,28 @@ DIAGNOSTIC(30604, Error, useOfLessVisibleType, "'$0' references less visible typ
 DIAGNOSTIC(36005, Error, invalidVisibilityModifierOnTypeOfDecl, "visibility modifier is not allowed on '$0'.")
 
 // Capability
-DIAGNOSTIC(36100, Error, conflictingCapabilityDueToUseOfDecl, "'$0' requires capability '$1' that is conflicting with the '$2''s current capability requirement '$3'.")
-DIAGNOSTIC(36101, Error, conflictingCapabilityDueToStatement, "statement requires capability '$0' that is conflicting with the '$1''s current capability requirement '$2'.")
+DIAGNOSTIC(36100, Error, conflictingCapabilityDueToUseOfDecl, "'$0' requires capability '$1' that is conflicting with the '$2's current capability requirement '$3'.")
+DIAGNOSTIC(36101, Error, conflictingCapabilityDueToStatement, "statement requires capability '$0' that is conflicting with the '$1's current capability requirement '$2'.")
 DIAGNOSTIC(36102, Error, conflictingCapabilityDueToStatementEnclosingFunc, "statement requires capability '$0' that is conflicting with the current function's capability requirement '$1'.")
-DIAGNOSTIC(36103, Error, missingCapabilityRequirementOnPublicDecl, "public symbol '$0' is missing capability requirement declaration.")
+DIAGNOSTIC(36103, Warning, missingCapabilityRequirementOnPublicDecl, "public symbol '$0' is missing capability requirement declaration, the symbol is assumed to require inferred capabilities '$1'.")
 DIAGNOSTIC(36104, Error, useOfUndeclaredCapability, "'$0' uses undeclared capability '$1'.")
 DIAGNOSTIC(36104, Error, useOfUndeclaredCapabilityOfInterfaceRequirement, "'$0' uses capability '$1' that is missing from the interface requirement.")
 DIAGNOSTIC(36105, Error, unknownCapability, "unknown capability name '$0'.")
 DIAGNOSTIC(36106, Error, expectCapability, "expect a capability name.")
-DIAGNOSTIC(36107, Error, entryPointUsesUnavailableCapability, "entrypoint '$0' requires capability '$1', which is incompatible with the current compilation target '$2'.")
-DIAGNOSTIC(36108, Error, declHasDependenciesNotDefinedOnTarget, "'$0' has dependencies that are not defined on the required target '$1'.")
+DIAGNOSTIC(36107, Error, entryPointUsesUnavailableCapability, "entrypoint '$0' does not support compilation target '$1' with stage '$2'")
+DIAGNOSTIC(36108, Error, declHasDependenciesNotCompatibleOnTarget, "'$0' has dependencies that are not compatible on the required target '$1'.")
 DIAGNOSTIC(36109, Error, invalidTargetSwitchCase, "'$0' cannot be used as a target_switch case.")
-DIAGNOSTIC(36110, Error, stageIsInCompatibleWithCapabilityDefinition, "'$0' is defined for stage '$1', which is incompatible with the declared capability set '$2'.")
+DIAGNOSTIC(36110, Error, stageIsIncompatibleWithCapabilityDefinition, "'$0' is defined for stage '$1', which is incompatible with the declared capability set '$2'.")
+DIAGNOSTIC(36111, Error, unexpectedCapability, "'$0' resolves into a disallowed `$1` Capability.")
+DIAGNOSTIC(36112, Warning, entryPointAndProfileAreIncompatible, "'$0' is defined for stage '$1', which is incompatible with the declared profile '$2'.")
+DIAGNOSTIC(36113, Warning, usingInternalCapabilityName, "'$0' resolves into a '_Internal' '_$1' Capability, use '$1' instead.")
+DIAGNOSTIC(36114, Warning, incompatibleWithPrecompileLib, "Precompiled library requires '$0', has `$1`, implicitly upgrading capabilities.")
+DIAGNOSTIC(36115, Error, incompatibleWithPrecompileLibRestrictive, "Precompiled library requires '$0', has `$1`.")
+DIAGNOSTIC(36116, Error, capabilityHasMultipleStages, "Capability '$0' is targeting stages '$1', only allowed to use 1 unique stage here.")
+
 
 // Attributes
-DIAGNOSTIC(31000, Error, unknownAttributeName, "unknown attribute '$0'")
+DIAGNOSTIC(31000, Warning, unknownAttributeName, "unknown attribute '$0'")
 DIAGNOSTIC(31001, Error, attributeArgumentCountMismatch, "attribute '$0' expects $1 arguments ($2 provided)")
 DIAGNOSTIC(31002, Error, attributeNotApplicable, "attribute '$0' is not valid here")
 
@@ -399,6 +429,8 @@ DIAGNOSTIC(31100, Error, unknownStageName, "unknown stage name '$0'")
 DIAGNOSTIC(31101, Error, unknownImageFormatName, "unknown image format '$0'")
 DIAGNOSTIC(31101, Error, unknownDiagnosticName, "unknown diagnostic '$0'")
 DIAGNOSTIC(31102, Error, nonPositiveNumThreads, "expected a positive integer in 'numthreads' attribute, got '$0'")
+DIAGNOSTIC(31103, Error, invalidWaveSize, "expected a power of 2 between 4 and 128, inclusive, in 'WaveSize' attribute, got '$0'")
+DIAGNOSTIC(31104, Warning, explicitUniformLocation, "Explicit binding of uniform locations is discouraged. Prefer 'ConstantBuffer<$0>' over 'uniform $0'")
 
 DIAGNOSTIC(31120, Error, invalidAttributeTarget, "invalid syntax target for user defined attribute")
 
@@ -436,6 +468,18 @@ DIAGNOSTIC(31155, Error, customDerivativeNotAllowedForMemberFunctionsOfDifferent
 DIAGNOSTIC(31200, Warning, deprecatedUsage, "$0 has been deprecated: $1")
 DIAGNOSTIC(31201, Error, modifierNotAllowed, "modifier '$0' is not allowed here.")
 DIAGNOSTIC(31202, Error, duplicateModifier, "modifier '$0' is redundant or conflicting with existing modifier '$1'")
+DIAGNOSTIC(31203, Error, cannotExportIncompleteType, "cannot export incomplete type '$0'")
+DIAGNOSTIC(31204, Error, incompleteTypeCannotBeUsedInBuffer, "incomplete type '$0' cannot be used in a buffer")
+DIAGNOSTIC(31205, Error, incompleteTypeCannotBeUsedInUniformParameter, "incomplete type '$0' cannot be used in a uniform parameter")
+DIAGNOSTIC(31206, Error, memoryQualifierNotAllowedOnANonImageTypeParameter, "modifier $0 is not allowed on a non image type parameter.")
+DIAGNOSTIC(31208, Error, requireInputDecoratedVarForParameter, "$0 expects for argument $1 a type which is a shader input (`in`) variable.")
+DIAGNOSTIC(31210, Error, derivativeGroupQuadMustBeMultiple2ForXYThreads, "compute derivative group quad requires thread dispatch count of X and Y to each be at a multiple of 2")
+DIAGNOSTIC(31211, Error, derivativeGroupLinearMustBeMultiple4ForTotalThreadCount, "compute derivative group linear requires total thread dispatch count to be at a multiple of 4")
+DIAGNOSTIC(31212, Error, onlyOneOfDerivativeGroupLinearOrQuadCanBeSet, "cannot set compute derivative group linear and compute derivative group quad at the same time")
+DIAGNOSTIC(31213, Error, cudaKernelMustReturnVoid, "return type of a CUDA kernel function cannot be non-void.")
+DIAGNOSTIC(31214, Error, differentiableKernelEntryPointCannotHaveDifferentiableParams, "differentiable kernel entry point cannot have differentiable parameters. Consider using DiffTensorView to pass differentiable data, or marking this parameter with 'no_diff'")
+DIAGNOSTIC(31215, Error, cannotUseUnsizedTypeInConstantBuffer, "cannot use unsized type '$0' in a constant buffer.")
+
 // Enums
 
 DIAGNOSTIC(32000, Error, invalidEnumTagType,        "invalid tag type for 'enum': '$0'")
@@ -460,14 +504,22 @@ DIAGNOSTIC(30504, Warning, forLoopTerminatesInFewerIterationsThanMaxIters, "the 
 DIAGNOSTIC(30505, Warning, loopRunsForZeroIterations, "the loop runs for 0 iterations and will be removed.")
 DIAGNOSTIC(30510, Error, loopInDiffFuncRequireUnrollOrMaxIters, "loops inside a differentiable function need to provide either '[MaxIters(n)]' or '[ForceUnroll]' attribute.")
 
+// Switch
+DIAGNOSTIC(30600, Error, switchMultipleDefault, "multiple 'default' cases not allowed within a 'switch' statement")
+DIAGNOSTIC(30601, Error, switchDuplicateCases, "duplicate cases not allowed within a 'switch' statement")
+
 // TODO: need to assign numbers to all these extra diagnostics...
 DIAGNOSTIC(39999, Fatal, cyclicReference, "cyclic reference '$0'.")
+DIAGNOSTIC(39999, Error, cyclicReferenceInInheritance, "cyclic reference in inheritance graph '$0'.")
+
 DIAGNOSTIC(39999, Error, localVariableUsedBeforeDeclared, "local variable '$0' is being used before its declaration.")
 DIAGNOSTIC(39999, Error, variableUsedInItsOwnDefinition, "the initial-value expression for variable '$0' depends on the value of the variable itself")
 DIAGNOSTIC(39901, Fatal , cannotProcessInclude, "internal compiler error: cannot process '__include' in the current semantic checking context.")
 
 // 304xx: generics
 DIAGNOSTIC(30400, Error, genericTypeNeedsArgs, "generic type '$0' used without argument")
+DIAGNOSTIC(30401, Error, invalidTypeForConstraint, "type '$0' cannot be used as a constraint.")
+DIAGNOSTIC(30402, Error, invalidConstraintSubType, "type '$0' is not a valid left hand side of a type constraint.")
 
 // 305xx: initializer lists
 DIAGNOSTIC(30500, Error, tooManyInitializers, "too many initializers (expected $0, got $1)")
@@ -476,10 +528,11 @@ DIAGNOSTIC(30502, Error, cannotUseInitializerListForVectorOfUnknownSize, "cannot
 DIAGNOSTIC(30503, Error, cannotUseInitializerListForMatrixOfUnknownSize, "cannot use initializer list for matrix of statically unknown size '$0' rows")
 DIAGNOSTIC(30504, Error, cannotUseInitializerListForType, "cannot use initializer list for type '$0'")
 
-// 306xx: variables
-DIAGNOSTIC(30600, Error, varWithoutTypeMustHaveInitializer, "a variable declaration without an initial-value expression must be given an explicit type")
+// 3062x: variables
+DIAGNOSTIC(30620, Error, varWithoutTypeMustHaveInitializer, "a variable declaration without an initial-value expression must be given an explicit type")
+DIAGNOSTIC(30622, Error, ambiguousDefaultInitializerForType, "more than one default initializer was found for type '$0'")
+DIAGNOSTIC(30623, Error, cannotHaveInitializer, "'$0' cannot have an initializer because it is $1")
 
-DIAGNOSTIC(30610, Error, ambiguousDefaultInitializerForType, "more than one default initializer was found for type '$0'")
 
 // 307xx: parameters
 DIAGNOSTIC(30700, Error, outputParameterCannotHaveDefaultValue, "an 'out' or 'inout' parameter cannot have a default-value expression")
@@ -490,6 +543,7 @@ DIAGNOSTIC(30811, Error, baseOfStructMustBeStructOrInterface, "struct '$0' canno
 DIAGNOSTIC(30812, Error, baseOfEnumMustBeIntegerOrInterface, "enum '$0' cannot inherit from type '$1' that is neither an interface not a builtin integer type")
 DIAGNOSTIC(30813, Error, baseOfExtensionMustBeInterface, "extension cannot inherit from non-interface type '$1'")
 DIAGNOSTIC(30814, Error, baseOfClassMustBeClassOrInterface, "class '$0' cannot inherit from type '$1' that is neither a class nor an interface")
+DIAGNOSTIC(30815, Error, circularityInExtension, "circular extension is not allowed.")
 
 DIAGNOSTIC(30820, Error, baseStructMustBeListedFirst, "a struct type may only inherit from one other struct type, and that type must appear first in the list of bases")
 DIAGNOSTIC(30821, Error, tagTypeMustBeListedFirst, "an unum type may only have a single tag type, and that type must be listed first in the list of bases")
@@ -500,6 +554,8 @@ DIAGNOSTIC(30831, Error, cannotInheritFromImplicitlySealedDeclarationInAnotherMo
 DIAGNOSTIC(30832, Error, invalidTypeForInheritance, "type '$0' cannot be used for inheritance")
 
 DIAGNOSTIC(30850, Error, invalidExtensionOnType, "type '$0' cannot be extended. `extension` can only be used to extend a nominal type.")
+DIAGNOSTIC(30851, Error, invalidMemberTypeInExtension, "$0 cannot be a part of an `extension`")
+DIAGNOSTIC(30852, Error, invalidExtensionOnInterface, "cannot extend interface type '$0'. consider using a generic extension: `extension<T:$0> T {...}`.")
 
 // 309xx: subscripts
 DIAGNOSTIC(30900, Error, multiDimensionalArrayNotSupported, "multi-dimensional array is not supported.")
@@ -513,11 +569,17 @@ DIAGNOSTIC(31101, Error, nonSetAccessorMustNotHaveParams, "accessors other than 
 DIAGNOSTIC(31102, Error, setAccessorMayNotHaveMoreThanOneParam, "a 'set' accessor may not have more than one parameter")
 DIAGNOSTIC(31102, Error, setAccessorParamWrongType, "'set' parameter '$0' has type '$1' which does not match the expected type '$2'")
 
+// 313xx: bit fields
+DIAGNOSTIC(31300, Error, bitFieldTooWide, "bit-field size ($0) exceeds the width of its type $1 ($2)")
+DIAGNOSTIC(31301, Error, bitFieldNonIntegral, "bit-field type ($0) must be an integral type")
+
 // 39999 waiting to be placed in the right range
 
 DIAGNOSTIC(39999, Error, expectedIntegerConstantWrongType, "expected integer constant (found: '$0')")
 DIAGNOSTIC(39999, Error, expectedIntegerConstantNotConstant, "expression does not evaluate to a compile-time constant")
 DIAGNOSTIC(39999, Error, expectedIntegerConstantNotLiteral, "could not extract value from integer constant")
+
+DIAGNOSTIC(39999, Error, expectedRayTracingPayloadObjectAtLocationButMissing, "raytracing payload expected at location $0 but it is missing")
 
 DIAGNOSTIC(39999, Error, noApplicableOverloadForNameWithArgs, "no overload for '$0' applicable to arguments of type $1")
 DIAGNOSTIC(39999, Error, noApplicableWithArgs, "no overload applicable to arguments of type $0")
@@ -536,7 +598,6 @@ DIAGNOSTIC(39999, Error, defaultOutsideSwitch, "'default' not allowed outside of
 DIAGNOSTIC(39999, Error, expectedAGeneric, "expected a generic when using '<...>' (found: '$0')")
 
 DIAGNOSTIC(39999, Error, genericArgumentInferenceFailed, "could not specialize generic for arguments of type $0")
-DIAGNOSTIC(39999, Note, genericSignatureTried, "see declaration of $0")
 
 DIAGNOSTIC(39999, Error, ambiguousReference, "ambiguous reference to '$0'")
 DIAGNOSTIC(39999, Error, ambiguousExpression, "ambiguous reference")
@@ -560,11 +621,10 @@ DIAGNOSTIC(39999, Error, unableToFindSymbolInModule, "unable to find the mangled
 
 DIAGNOSTIC(39999, Error, overloadedParameterToHigherOrderFunction, "passing overloaded functions to higher order functions is not supported")
 
-// 38xxx 
+// 38xxx
 
 DIAGNOSTIC(38000, Error, entryPointFunctionNotFound, "no function found matching entry point name '$0'")
 DIAGNOSTIC(38001, Error, ambiguousEntryPoint, "more than one function matches entry point name '$0'")
-DIAGNOSTIC(38002, Note, entryPointCandidate, "see candidate declaration for entry point '$0'")
 DIAGNOSTIC(38003, Error, entryPointSymbolNotAFunction, "entry point '$0' must be declared as a function")
 
 DIAGNOSTIC(38004, Error, entryPointTypeParameterNotFound, "no type found matching entry-point type parameter name '$0'")
@@ -607,7 +667,8 @@ DIAGNOSTIC(38033, Error, cannotUseNoDiffInNonDifferentiableFunc, "cannot use 'no
 DIAGNOSTIC(38034, Error, cannotUseConstRefOnDifferentiableParameter, "cannot use '__constref' on a differentiable parameter.")
 DIAGNOSTIC(38034, Error, cannotUseConstRefOnDifferentiableMemberMethod, "cannot use '[constref]' on a differentiable member method of a differentiable type.")
 
-DIAGNOSTIC(38040, Error, nonUniformEntryPointParameterMustHaveSemantic, "non-uniform parameter '$0' must have a system-value semantic.")
+DIAGNOSTIC(38040, Warning, nonUniformEntryPointParameterTreatedAsUniform, "parameter '$0' is treated as 'uniform' because it does not have a system-value semantic.")
+
 
 DIAGNOSTIC(38200, Error, recursiveModuleImport, "module `$0` recursively imports itself")
 DIAGNOSTIC(39999, Error, errorInImportedModule, "import of module '$0' failed because of a compilation error")
@@ -654,6 +715,12 @@ DIAGNOSTIC(39024, Warning, cannotInferVulkanBindingWithoutRegisterModifier, "sha
 
 DIAGNOSTIC(39025, Error, conflictingVulkanInferredBindingForParameter, "conflicting vulkan inferred binding for parameter '$0' overlap is $1 and $2")
 
+DIAGNOSTIC(39026, Error, matrixLayoutModifierOnNonMatrixType, "matrix layout modifier cannot be used on non-matrix type '$0'.")
+
+DIAGNOSTIC(39027, Error, getAttributeAtVertexMustReferToPerVertexInput, "'GetAttributeAtVertex' must reference a vertex input directly, and the vertex input must be decorated with 'pervertex' or 'nointerpolation'.")
+
+DIAGNOSTIC(39028, Error, notValidVaryingParameter, "parameter '$0' is not a valid varying parameter.")
+
 //
 
 // 4xxxx - IL code generation.
@@ -663,6 +730,7 @@ DIAGNOSTIC(40002, Error, invalidBindingValue, "binding location '$0' is out of v
 DIAGNOSTIC(40003, Error, bindingExceedsLimit, "binding location '$0' assigned to component '$1' exceeds maximum limit.")
 DIAGNOSTIC(40004, Error, bindingAlreadyOccupiedByModule, "DescriptorSet ID '$0' is already occupied by module instance '$1'.")
 DIAGNOSTIC(40005, Error, topLevelModuleUsedWithoutSpecifyingBinding, "top level module '$0' is being used without specifying binding location. Use [Binding: \"index\"] attribute to provide a binding location.")
+DIAGNOSTIC(40006, Error, unimplementedSystemValueSemantic, "unknown system-value semantic '$0'")
 
 
 DIAGNOSTIC(49999, Error, unknownSystemValueSemantic, "unknown system-value semantic '$0'")
@@ -678,6 +746,7 @@ DIAGNOSTIC(40010, Note, seeInterfaceUsage, "see usage of interface '$0'.")
 
 DIAGNOSTIC(40011, Error, unconstrainedGenericParameterNotAllowedInDynamicFunction, "unconstrained generic paramter '$0' is not allowed in a dynamic function.")
 
+
 DIAGNOSTIC(40020, Error, cannotUnrollLoop, "loop does not terminate within the limited number of iterations, unrolling is aborted.")
 
 DIAGNOSTIC(40030, Fatal, functionNeverReturnsFatal, "function '$0' never returns, compilation ceased.")
@@ -685,11 +754,21 @@ DIAGNOSTIC(40030, Fatal, functionNeverReturnsFatal, "function '$0' never returns
 // 41000 - IR-level validation issues
 
 DIAGNOSTIC(41000, Warning, unreachableCode, "unreachable code detected")
+DIAGNOSTIC(41001, Error, recursiveType, "type '$0' contains cyclic reference to itself.")
 
 DIAGNOSTIC(41010, Warning, missingReturn, "control flow may reach end of non-'void' function")
-DIAGNOSTIC(41015, Error, usingUninitializedValue, "use of uninitialized value '$0'")
-DIAGNOSTIC(41016, Warning, returningWithUninitializedOut, "returning without initializing out parameter '$0'")
-DIAGNOSTIC(41017, Warning, returningWithPartiallyUninitializedOut, "returning without fully initializing out parameter '$0'")
+DIAGNOSTIC(41011, Error, profileIncompatibleWithTargetSwitch, "__target_switch has no compatable target with current profile '$0'")
+DIAGNOSTIC(41012, Warning, profileImplicitlyUpgraded, "entry point '$0' uses additional capabilities that are not part of the specified profile '$1'. The profile setting is automatically updated to include these capabilities: '$2'")
+DIAGNOSTIC(41012, Error, profileImplicitlyUpgradedRestrictive, "entry point '$0' uses capabilities that are not part of the specified profile '$1'. Missing capabilities are: '$2'")
+DIAGNOSTIC(41015, Warning, usingUninitializedOut, "use of uninitialized out parameter '$0'")
+DIAGNOSTIC(41016, Warning, usingUninitializedVariable, "use of uninitialized variable '$0'")
+DIAGNOSTIC(41017, Warning, usingUninitializedGlobalVariable, "use of uninitialized global variable '$0'")
+DIAGNOSTIC(41018, Warning, returningWithUninitializedOut, "returning without initializing out parameter '$0'")
+DIAGNOSTIC(41019, Warning, returningWithPartiallyUninitializedOut, "returning without fully initializing out parameter '$0'")
+DIAGNOSTIC(41020, Warning, constructorUninitializedField, "exiting constructor without initializing field '$0'")
+DIAGNOSTIC(41021, Warning, fieldNotDefaultInitialized, "default initializer for '$0' will not initialize field '$1'")
+DIAGNOSTIC(41022, Warning, inOutNeverStoredInto, "inout parameter '$0' is never written to")
+DIAGNOSTIC(41023, Warning, methodNeverMutates, "method marked `[mutable]` but never modifies `this`")
 
 DIAGNOSTIC(41011, Error, typeDoesNotFitAnyValueSize, "type '$0' does not fit in the size required by its conforming interface.")
 DIAGNOSTIC(41012, Note, typeAndLimit, "sizeof($0) is $1, limit is $2")
@@ -701,6 +780,8 @@ DIAGNOSTIC(41021, Error, differentiableFuncMustHaveOutput, "a differentiable fun
 DIAGNOSTIC(41022, Error, differentiableFuncMustHaveInput, "a differentiable function must have at least one differentiable input.")
 DIAGNOSTIC(41023, Error, getStringHashMustBeOnStringLiteral, "getStringHash can only be called when argument is statically resolvable to a string literal")
 
+DIAGNOSTIC(41030, Warning, operatorShiftLeftOverflow, "left shift amount exceeds the number of bits and the result will be always zero, (`$0` << `$1`).")
+
 DIAGNOSTIC(41901, Error, unsupportedUseOfLValueForAutoDiff, "unsupported use of L-value for auto differentiation.")
 DIAGNOSTIC(41902, Error, cannotDifferentiateDynamicallyIndexedData, "cannot auto-differentiate mixed read/write access to dynamically indexed data in '$0'.")
 
@@ -709,12 +790,32 @@ DIAGNOSTIC(41904, Error, unableToAlignOf, "alignof could not be performed for ty
 
 DIAGNOSTIC(42001, Error, invalidUseOfTorchTensorTypeInDeviceFunc, "invalid use of TorchTensor type in device/kernel functions. use `TensorView` instead.")
 
+DIAGNOSTIC(42050, Warning, potentialIssuesWithPreferRecomputeOnSideEffectMethod, "$0 has [PreferRecompute] and may have side effects. side effects may execute multiple times. use [PreferRecompute(SideEffectBehavior.Allow)], or mark function with [NoSideEffect]")
+
+DIAGNOSTIC(45001, Error, unresolvedSymbol, "unresolved external symbol '$0'.")
+
+DIAGNOSTIC(41201, Warning, expectDynamicUniformArgument, "argument for '$0' might not be a dynamic uniform, use `asDynamicUniform()` to silence this warning.")
+DIAGNOSTIC(41201, Warning, expectDynamicUniformValue, "value stored at this location must be dynamic uniform, use `asDynamicUniform()` to silence this warning.")
+
+
+DIAGNOSTIC(41202, Error, notEqualBitCastSize, "invalid to bit_cast differently sized types: '$0' with size '$1' casted into '$2' with size '$3'")
+DIAGNOSTIC(41203, Warning, notEqualReinterpretCastSize, "reinterpret<> into not equally sized types: '$0' with size '$1' casted into '$2' with size '$3'")
+
+DIAGNOSTIC(41300, Error, byteAddressBufferUnaligned, "invalid alignment `$0` specified for the byte address buffer resource with the element size of `$1`")
+
+DIAGNOSTIC(41400, Error, staticAssertionFailure, "static assertion failed, $0")
+DIAGNOSTIC(41401, Error, staticAssertionFailureWithoutMessage, "static assertion failed.")
+DIAGNOSTIC(41402, Error, staticAssertionConditionNotConstant, "condition for static assertion cannot be evaluated at the compile-time.")
+
+DIAGNOSTIC(41402, Error, multiSampledTextureDoesNotAllowWrites, "cannot write to a multisampled texture with target '$0'.")
+
 //
 // 5xxxx - Target code generation.
 //
 
 DIAGNOSTIC(50010, Internal, missingExistentialBindingsForParameter, "missing argument for existential parameter slot")
-
+DIAGNOSTIC(50011, Warning, spirvVersionNotSupported, "Slang's SPIR-V backend only supports SPIR-V version 1.3 and later."
+                                                   " Use `-emit-spirv-via-glsl` option to produce SPIR-V 1.0 through 1.2.")
 DIAGNOSTIC(50020, Error, invalidTessCoordType, "TessCoord must have vec2 or vec3 type.")
 DIAGNOSTIC(50020, Error, invalidFragCoordType, "FragCoord must be a vec4.")
 DIAGNOSTIC(50020, Error, invalidInvocationIdType, "InvocationId must have int type.")
@@ -766,7 +867,7 @@ DIAGNOSTIC(52007, Error, typeCannotBeUsedInDynamicDispatch, "failed to generate 
 DIAGNOSTIC(52008, Error, dynamicDispatchOnSpecializeOnlyInterface, "type '$0' is marked for specialization only, but dynamic dispatch is needed for the call.")
 DIAGNOSTIC(53001, Error, invalidTypeMarshallingForImportedDLLSymbol, "invalid type marshalling in imported func $0.")
 
-DIAGNOSTIC(54001, Error, meshOutputMustBeOut, "Mesh shader outputs must be declared with 'out'.")
+DIAGNOSTIC(54001, Warning, meshOutputMustBeOut, "Mesh shader outputs must be declared with 'out'.")
 DIAGNOSTIC(54002, Error, meshOutputMustBeArray, "HLSL style mesh shader outputs must be arrays")
 DIAGNOSTIC(54003, Error, meshOutputArrayMustHaveSize, "HLSL style mesh shader output arrays must have a length specified")
 DIAGNOSTIC(54004, Warning, unnecessaryHLSLMeshOutputModifier, "Unnecessary HLSL style mesh shader output modifier")
@@ -774,13 +875,31 @@ DIAGNOSTIC(54004, Warning, unnecessaryHLSLMeshOutputModifier, "Unnecessary HLSL 
 DIAGNOSTIC(55101, Error, invalidTorchKernelReturnType, "'$0' is not a valid return type for a pytorch kernel function.")
 DIAGNOSTIC(55102, Error, invalidTorchKernelParamType, "'$0' is not a valid parameter type for a pytorch kernel function.")
 
+DIAGNOSTIC(55200, Error, unsupportedBuiltinType, "'$0' is not a supported builtin type for the target.")
+DIAGNOSTIC(55201, Error, unsupportedRecursion, "recursion detected in call to '$0', but the current code generation target does not allow recursion.")
+DIAGNOSTIC(55202, Error, systemValueAttributeNotSupported, "system value semantic '$0' is not supported for the current target.")
+DIAGNOSTIC(55203, Error, systemValueTypeIncompatible, "system value semantic '$0' should have type '$1' or be convertible to type '$1'.")
 DIAGNOSTIC(56001, Error, unableToAutoMapCUDATypeToHostType, "Could not automatically map '$0' to a host type. Automatic binding generation failed for '$1'")
+DIAGNOSTIC(56002, Error, attemptToQuerySizeOfUnsizedArray, "cannot obtain the size of an unsized array.")
+
+// Metal
+DIAGNOSTIC(56100, Error, constantBufferInParameterBlockNotAllowedOnMetal, "nested 'ConstantBuffer' inside a 'ParameterBlock' is not supported on Metal, use 'ParameterBlock' instead.")
 
 DIAGNOSTIC(57001, Warning, spirvOptFailed, "spirv-opt failed. $0")
+DIAGNOSTIC(57002, Error, unknownPatchConstantParameter, "unknown patch constant parameter '$0'.")
+DIAGNOSTIC(57003, Error, unknownTessPartitioning, "unknown tessellation partitioning '$0'.")
 
 // GLSL Compatibility
 DIAGNOSTIC(58001, Error, entryPointMustReturnVoidWhenGlobalOutputPresent, "entry point must return 'void' when global output variables are present.")
 DIAGNOSTIC(58002, Error, unhandledGLSLSSBOType, "Unhandled GLSL Shader Storage Buffer Object contents, unsized arrays as a final parameter must be the only parameter")
+
+DIAGNOSTIC(58003, Error, inconsistentPointerAddressSpace, "'$0': use of pointer with inconsistent address space.")
+
+// Autodiff checkpoint reporting
+DIAGNOSTIC(-1, Note, reportCheckpointIntermediates, "checkpointing context of $1 bytes associated with function: '$0'")
+DIAGNOSTIC(-1, Note, reportCheckpointVariable, "$0 bytes ($1) used to checkpoint the following item:")
+DIAGNOSTIC(-1, Note, reportCheckpointCounter, "$0 bytes ($1) used for a loop counter here:")
+DIAGNOSTIC(-1, Note, reportCheckpointNone, "no checkpoint contexts to report")
 
 //
 // 8xxxx - Issues specific to a particular library/technology/platform/etc.
@@ -800,7 +919,7 @@ DIAGNOSTIC(99999, Internal, internalCompilerError, "Slang internal compiler erro
 DIAGNOSTIC(99999, Error, compilationAborted, "Slang compilation aborted due to internal error")
 DIAGNOSTIC(99999, Error, compilationAbortedDueToException, "Slang compilation aborted due to an exception of $0: $1")
 DIAGNOSTIC(99999, Internal, serialDebugVerificationFailed, "Verification of serial debug information failed.")
-DIAGNOSTIC(99999, Internal, spirvValidationFailed, "Validation of generated SPIR-V failed.")
+DIAGNOSTIC(99999, Internal, spirvValidationFailed, "Validation of generated SPIR-V failed. SPIRV generated: \n$0")
 
 DIAGNOSTIC(99999, Internal, noBlocksOrIntrinsic, "no blocks found for function definition, is there a '$0' intrinsic missing?")
 

@@ -3,6 +3,7 @@
 
 #include "../core/slang-writer.h"
 
+#include "slang-ir-util.h"
 #include "slang-emit-source-writer.h"
 #include "slang-mangled-lexer.h"
 
@@ -36,7 +37,7 @@ void HLSLSourceEmitter::_emitHLSLDecorationSingleInt(const char* name, IRFunc* e
     m_writer->emit(")]\n");
 }
 
-void HLSLSourceEmitter::_emitHLSLRegisterSemantic(LayoutResourceKind kind, EmitVarChain* chain, char const* uniformSemanticSpelling)
+void HLSLSourceEmitter::_emitHLSLRegisterSemantic(LayoutResourceKind kind, EmitVarChain* chain, IRInst* inst, char const* uniformSemanticSpelling)
 {
     if (!chain)
         return;
@@ -91,6 +92,14 @@ void HLSLSourceEmitter::_emitHLSLRegisterSemantic(LayoutResourceKind kind, EmitV
         }
         break;
 
+        case LayoutResourceKind::InputAttachmentIndex:
+        {
+            m_writer->emit("[[vk::input_attachment_index("); 
+            m_writer->emit(index);
+            m_writer->emit(")]]");
+        }
+        break;
+
         case LayoutResourceKind::RegisterSpace:
         case LayoutResourceKind::GenericResource:
         case LayoutResourceKind::ExistentialTypeParam:
@@ -99,6 +108,16 @@ void HLSLSourceEmitter::_emitHLSLRegisterSemantic(LayoutResourceKind kind, EmitV
             break;
         default:
         {
+            if (m_codeGenContext->getTargetProgram()->getOptionSet().getBoolOption(CompilerOptionName::NoHLSLBinding))
+            {
+                // If we are told not to emit hlsl binding, and the user has not provided explicit binding,
+                // then skip emitting the `: register` semantics here.
+                //
+                if (!inst || !inst->findDecoration<IRHasExplicitHLSLBindingDecoration>())
+                {
+                    break;
+                }
+            }
             m_writer->emit(" : register(");
             switch (kind)
             {
@@ -129,7 +148,7 @@ void HLSLSourceEmitter::_emitHLSLRegisterSemantic(LayoutResourceKind kind, EmitV
     }
 }
 
-void HLSLSourceEmitter::_emitHLSLRegisterSemantics(EmitVarChain* chain, char const* uniformSemanticSpelling)
+void HLSLSourceEmitter::_emitHLSLRegisterSemantics(EmitVarChain* chain, IRInst* inst, char const* uniformSemanticSpelling, EmitLayoutSemanticOption layoutSemanticOption)
 {
     if (!chain) return;
 
@@ -146,17 +165,20 @@ void HLSLSourceEmitter::_emitHLSLRegisterSemantics(EmitVarChain* chain, char con
 
     for (auto rr : layout->getOffsetAttrs())
     {
-        _emitHLSLRegisterSemantic(rr->getResourceKind(), chain, uniformSemanticSpelling);
+        if (layoutSemanticOption == EmitLayoutSemanticOption::kPreType
+            && rr->getResourceKind() != LayoutResourceKind::InputAttachmentIndex)
+            continue;
+        _emitHLSLRegisterSemantic(rr->getResourceKind(), chain, inst, uniformSemanticSpelling);
     }
 }
 
-void HLSLSourceEmitter::_emitHLSLRegisterSemantics(IRVarLayout* varLayout, char const* uniformSemanticSpelling)
+void HLSLSourceEmitter::_emitHLSLRegisterSemantics(IRVarLayout* varLayout, IRInst* inst, char const* uniformSemanticSpelling, EmitLayoutSemanticOption layoutSemanticOption)
 {
     if (!varLayout)
         return;
 
     EmitVarChain chain(varLayout);
-    _emitHLSLRegisterSemantics(&chain, uniformSemanticSpelling);
+    _emitHLSLRegisterSemantics(&chain, inst, uniformSemanticSpelling, layoutSemanticOption);
 }
 
 void HLSLSourceEmitter::_emitHLSLParameterGroupFieldLayoutSemantics(EmitVarChain* chain)
@@ -167,7 +189,7 @@ void HLSLSourceEmitter::_emitHLSLParameterGroupFieldLayoutSemantics(EmitVarChain
     auto layout = chain->varLayout;
     for (auto rr : layout->getOffsetAttrs())
     {
-        _emitHLSLRegisterSemantic(rr->getResourceKind(), chain, "packoffset");
+        _emitHLSLRegisterSemantic(rr->getResourceKind(), chain, nullptr, "packoffset");
     }
 }
 
@@ -179,8 +201,10 @@ void HLSLSourceEmitter::_emitHLSLParameterGroupFieldLayoutSemantics(IRVarLayout*
 
 void HLSLSourceEmitter::_emitHLSLParameterGroup(IRGlobalParam* varDecl, IRUniformParameterGroupType* type)
 {
+    LayoutResourceKind layoutResourceKind = LayoutResourceKind::ConstantBuffer;
     if (as<IRTextureBufferType>(type))
     {
+        layoutResourceKind = LayoutResourceKind::ShaderResource;
         m_writer->emit("tbuffer ");
     }
     else
@@ -206,12 +230,13 @@ void HLSLSourceEmitter::_emitHLSLParameterGroup(IRGlobalParam* varDecl, IRUnifor
         typeLayout = parameterGroupTypeLayout->getElementVarLayout()->getTypeLayout();
     }
 
-    _emitHLSLRegisterSemantic(LayoutResourceKind::ConstantBuffer, &containerChain);
+    _emitHLSLRegisterSemantic(layoutResourceKind, &containerChain, varDecl, "register");
 
     auto elementType = type->getElementType();
-    if (hasExplicitConstantBufferOffset(type))
+    if (shouldForceUnpackConstantBufferElements(type) || hasExplicitConstantBufferOffset(type))
     {
         // If the user has provided any explicit `packoffset` modifiers,
+        // or the user has explicitly requested for cbuffer fields to be unpacked,
         // we have to unwrap the struct and emit the fields directly.
         emitStructDeclarationsBlock(as<IRStructType>(elementType), true);
         m_writer->emit("\n");
@@ -293,12 +318,24 @@ void HLSLSourceEmitter::_emitHLSLTextureType(IRTextureTypeBase* texType)
     m_writer->emit(" >");
 }
 
-void HLSLSourceEmitter::emitLayoutSemanticsImpl(IRInst* inst, char const* uniformSemanticSpelling)
+void HLSLSourceEmitter::_emitHLSLSubpassInputType(IRSubpassInputType* subpassType)
+{
+    m_writer->emit("SubpassInput");
+    if (subpassType->isMultisample())
+    {
+        m_writer->emit("MS");
+    }
+    m_writer->emit("<");
+    emitType(subpassType->getElementType());
+    m_writer->emit(">");
+}
+
+void HLSLSourceEmitter::emitLayoutSemanticsImpl(IRInst* inst, char const* uniformSemanticSpelling, EmitLayoutSemanticOption layoutSemanticOption)
 {
     auto layout = getVarLayout(inst); 
     if (layout)
     {
-        _emitHLSLRegisterSemantics(layout, uniformSemanticSpelling);
+        _emitHLSLRegisterSemantics(layout, inst, uniformSemanticSpelling, layoutSemanticOption);
     }
 }
 
@@ -340,10 +377,22 @@ void HLSLSourceEmitter::emitEntryPointAttributesImpl(IRFunc* irFunc, IREntryPoin
             m_writer->emit(")]\n");
         };
 
+    auto emitWaveSizeAttribute = [&]()
+        {
+            Int waveSize;
+            if (getComputeWaveSize(irFunc, &waveSize))
+            {
+                m_writer->emit("[WaveSize(");
+                m_writer->emit(waveSize);
+                m_writer->emit(")]\n");
+            }
+        };
+
     switch (stage)
     {
         case Stage::Compute:
         {
+            emitWaveSizeAttribute();
             emitNumThreadsAttribute();
         }
         break;
@@ -447,10 +496,180 @@ void HLSLSourceEmitter::emitEntryPointAttributesImpl(IRFunc* irFunc, IREntryPoin
     }
 }
 
+bool HLSLSourceEmitter::tryEmitInstStmtImpl(IRInst* inst)
+{
+    switch (inst->getOp())
+    {
+    case kIROp_AtomicLoad:
+    {
+        emitInstResultDecl(inst);
+        emitDereferenceOperand(inst->getOperand(0), getInfo(EmitOp::General));
+        m_writer->emit(";\n");
+        return true;
+    }
+    case kIROp_AtomicStore:
+    {
+        emitDereferenceOperand(inst->getOperand(0), getInfo(EmitOp::General));
+        m_writer->emit(" = ");
+        emitOperand(inst->getOperand(1), getInfo(EmitOp::General));
+        m_writer->emit(";\n");
+        return true;
+    }
+    case kIROp_AtomicExchange:
+    {
+        emitType(inst->getDataType(), getName(inst));
+        m_writer->emit(";\n");
+        m_writer->emit("InterlockedExchange(");
+        emitOperand(inst->getOperand(0), getInfo(EmitOp::General));
+        m_writer->emit(", ");
+        emitOperand(inst->getOperand(1), getInfo(EmitOp::General));
+        m_writer->emit(", ");
+        m_writer->emit(getName(inst));
+        m_writer->emit(");\n");
+        return true;
+    }
+    case kIROp_AtomicCompareExchange:
+    {
+        emitType(inst->getDataType(), getName(inst));
+        m_writer->emit(";\n");
+        m_writer->emit("InterlockedCompareExchange(");
+        emitOperand(inst->getOperand(0), getInfo(EmitOp::General));
+        m_writer->emit(", ");
+        emitOperand(inst->getOperand(1), getInfo(EmitOp::General));
+        m_writer->emit(", ");
+        emitOperand(inst->getOperand(2), getInfo(EmitOp::General));
+        m_writer->emit(", ");
+        m_writer->emit(getName(inst));
+        m_writer->emit(");\n");
+        return true;
+    }
+    case kIROp_AtomicAdd:
+    {
+        emitType(inst->getDataType(), getName(inst));
+        m_writer->emit(";\n");
+        m_writer->emit("InterlockedAdd(");
+        emitOperand(inst->getOperand(0), getInfo(EmitOp::General));
+        m_writer->emit(", ");
+        emitOperand(inst->getOperand(1), getInfo(EmitOp::General));
+        m_writer->emit(", ");
+        m_writer->emit(getName(inst));
+        m_writer->emit(");\n");
+        return true;
+    }
+    case kIROp_AtomicSub:
+    {
+        emitType(inst->getDataType(), getName(inst));
+        m_writer->emit(";\n");
+        m_writer->emit("InterlockedAdd(");
+        emitOperand(inst->getOperand(0), getInfo(EmitOp::General));
+        m_writer->emit(", -(");
+        emitOperand(inst->getOperand(1), getInfo(EmitOp::General));
+        m_writer->emit("), ");
+        m_writer->emit(getName(inst));
+        m_writer->emit(");\n");
+        return true;
+    }
+    case kIROp_AtomicAnd:
+    {
+        emitType(inst->getDataType(), getName(inst));
+        m_writer->emit(";\n");
+        m_writer->emit("InterlockedAnd(");
+        emitOperand(inst->getOperand(0), getInfo(EmitOp::General));
+        m_writer->emit(", ");
+        emitOperand(inst->getOperand(1), getInfo(EmitOp::General));
+        m_writer->emit(", ");
+        m_writer->emit(getName(inst));
+        m_writer->emit(");\n");
+        return true;
+    }
+    case kIROp_AtomicOr:
+    {
+        emitType(inst->getDataType(), getName(inst));
+        m_writer->emit(";\n");
+        m_writer->emit("InterlockedOr(");
+        emitOperand(inst->getOperand(0), getInfo(EmitOp::General));
+        m_writer->emit(", ");
+        emitOperand(inst->getOperand(1), getInfo(EmitOp::General));
+        m_writer->emit(", ");
+        m_writer->emit(getName(inst));
+        m_writer->emit(");\n");
+        return true;
+    }
+    case kIROp_AtomicXor:
+    {
+        emitType(inst->getDataType(), getName(inst));
+        m_writer->emit(";\n");
+        m_writer->emit("InterlockedXor(");
+        emitOperand(inst->getOperand(0), getInfo(EmitOp::General));
+        m_writer->emit(", ");
+        emitOperand(inst->getOperand(1), getInfo(EmitOp::General));
+        m_writer->emit(", ");
+        m_writer->emit(getName(inst));
+        m_writer->emit(");\n");
+        return true;
+    }
+    case kIROp_AtomicMin:
+    {
+        emitType(inst->getDataType(), getName(inst));
+        m_writer->emit(";\n");
+        m_writer->emit("InterlockedMin(");
+        emitOperand(inst->getOperand(0), getInfo(EmitOp::General));
+        m_writer->emit(", ");
+        emitOperand(inst->getOperand(1), getInfo(EmitOp::General));
+        m_writer->emit(", ");
+        m_writer->emit(getName(inst));
+        m_writer->emit(");\n");
+        return true;
+    }
+    case kIROp_AtomicMax:
+    {
+        emitType(inst->getDataType(), getName(inst));
+        m_writer->emit(";\n");
+        m_writer->emit("InterlockedMax(");
+        emitOperand(inst->getOperand(0), getInfo(EmitOp::General));
+        m_writer->emit(", ");
+        emitOperand(inst->getOperand(1), getInfo(EmitOp::General));
+        m_writer->emit(", ");
+        m_writer->emit(getName(inst));
+        m_writer->emit(");\n");
+        return true;
+    }
+    case kIROp_AtomicInc:
+    {
+        emitType(inst->getDataType(), getName(inst));
+        m_writer->emit(";\n");
+        m_writer->emit("InterlockedAdd(");
+        emitOperand(inst->getOperand(0), getInfo(EmitOp::General));
+        m_writer->emit(", 1, ");
+        m_writer->emit(getName(inst));
+        m_writer->emit(");\n");
+        return true;
+    }
+    case kIROp_AtomicDec:
+    {
+        emitType(inst->getDataType(), getName(inst));
+        m_writer->emit(";\n");
+        m_writer->emit("InterlockedAdd(");
+        emitOperand(inst->getOperand(0), getInfo(EmitOp::General));
+        m_writer->emit(", -1, ");
+        m_writer->emit(getName(inst));
+        m_writer->emit(");");
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+
 bool HLSLSourceEmitter::tryEmitInstExprImpl(IRInst* inst, const EmitOpInfo& inOuterPrec)
 {
     switch (inst->getOp())
     {
+        case kIROp_ControlBarrier:
+        {
+            m_writer->emit("GroupMemoryBatrierWithGroupSync();\n");
+            return true;
+        }
         case kIROp_MakeVector:
         case kIROp_MakeMatrix:
         {
@@ -677,7 +896,7 @@ bool HLSLSourceEmitter::tryEmitInstExprImpl(IRInst* inst, const EmitOpInfo& inOu
                 m_writer->emit("(");
                 emitOperand(inst->getOperand(1), getInfo(EmitOp::General));
                 m_writer->emit(", ");
-                emitOperand(inst->getOperand(2), getInfo(EmitOp::General));
+                emitOperand(inst->getOperand(inst->getOperandCount() - 1), getInfo(EmitOp::General));
                 m_writer->emit(")");
 
                 maybeCloseParens(needClose);
@@ -689,7 +908,18 @@ bool HLSLSourceEmitter::tryEmitInstExprImpl(IRInst* inst, const EmitOpInfo& inOu
             return false;
         }
         break;
+        case kIROp_NonUniformResourceIndex:
+        {
+            // Need to emit as a Function call for HLSL
+            m_writer->emit("NonUniformResourceIndex");
+            m_writer->emit("(");
+            emitOperand(inst->getOperand(0), getInfo(EmitOp::General));
+            m_writer->emit(")");
 
+            // Handled
+            return true;
+        }
+        break;
         default: break;
     }
     // Not handled
@@ -755,7 +985,7 @@ static bool _canEmitExport(const Profile& profile)
 /* virtual */void HLSLSourceEmitter::emitFuncDecorationsImpl(IRFunc* func)
 {
     // Specially handle export, as we don't want to emit it multiple times
-    if (getTargetReq()->isWholeProgramRequest() && 
+    if (getTargetProgram()->getOptionSet().getBoolOption(CompilerOptionName::GenerateWholeProgram) && 
         _canEmitExport(m_effectiveProfile))
     {
         for (auto decoration : func->getDecorations())
@@ -893,15 +1123,37 @@ void HLSLSourceEmitter::emitSimpleTypeImpl(IRType* type)
         case kIROp_MatrixType:
         {
             auto matType = (IRMatrixType*)type;
-
-            // TODO(tfoley): should really emit these with sugar
-            m_writer->emit("matrix<");
-            emitType(matType->getElementType());
-            m_writer->emit(",");
-            emitVal(matType->getRowCount(), getInfo(EmitOp::General));
-            m_writer->emit(",");
-            emitVal(matType->getColumnCount(), getInfo(EmitOp::General));
-            m_writer->emit("> ");           
+            bool canUseSugar = true;
+            switch (matType->getElementType()->getOp())
+            {
+            case kIROp_IntType:
+            case kIROp_UIntType:
+            case kIROp_FloatType:
+                canUseSugar = true;
+                break;
+            default:
+                canUseSugar = false;
+                break;
+            }
+            if (!as<IRIntLit>(matType->getRowCount()) || !as<IRIntLit>(matType->getColumnCount()))
+                canUseSugar = false;
+            if (canUseSugar)
+            {
+                emitType(matType->getElementType());
+                m_writer->emitInt64(getIntVal(matType->getRowCount()));
+                m_writer->emit("x");
+                m_writer->emitInt64(getIntVal(matType->getColumnCount()));
+            }
+            else
+            {
+                m_writer->emit("matrix<");
+                emitType(matType->getElementType());
+                m_writer->emit(",");
+                emitVal(matType->getRowCount(), getInfo(EmitOp::General));
+                m_writer->emit(",");
+                emitVal(matType->getColumnCount(), getInfo(EmitOp::General));
+                m_writer->emit("> ");
+            }
             return;
         }
         case kIROp_SamplerStateType:
@@ -942,6 +1194,11 @@ void HLSLSourceEmitter::emitSimpleTypeImpl(IRType* type)
             m_writer->emit("uint4");
             return;
         }
+        case kIROp_AtomicType:
+        {
+            emitSimpleTypeImpl(cast<IRAtomicType>(type)->getElementType());
+            return;
+        }
         default: break;
     }
 
@@ -956,6 +1213,11 @@ void HLSLSourceEmitter::emitSimpleTypeImpl(IRType* type)
     else if (auto imageType = as<IRGLSLImageType>(type))
     {
         _emitHLSLTextureType(imageType);
+        return;
+    }
+    else if (auto subpassType = as<IRSubpassInputType>(type))
+    {
+        _emitHLSLSubpassInputType(subpassType);
         return;
     }
     else if (auto structuredBufferType = as<IRHLSLStructuredBufferTypeBase>(type))
@@ -987,7 +1249,6 @@ void HLSLSourceEmitter::emitSimpleTypeImpl(IRType* type)
             case kIROp_HLSLRWByteAddressBufferType:                 m_writer->emit("RWByteAddressBuffer");                break;
             case kIROp_HLSLRasterizerOrderedByteAddressBufferType:  m_writer->emit("RasterizerOrderedByteAddressBuffer"); break;
             case kIROp_RaytracingAccelerationStructureType:         m_writer->emit("RaytracingAccelerationStructure");    break;
-
             default:
                 SLANG_DIAGNOSE_UNEXPECTED(getSink(), SourceLoc(), "unhandled buffer type");
                 break;
@@ -1031,7 +1292,7 @@ void HLSLSourceEmitter::emitSimpleTypeImpl(IRType* type)
     }
 }
 
-void HLSLSourceEmitter::emitRateQualifiersAndAddressSpaceImpl(IRRate* rate, [[maybe_unused]] IRIntegerValue addressSpace)
+void HLSLSourceEmitter::emitRateQualifiersAndAddressSpaceImpl(IRRate* rate, [[maybe_unused]] AddressSpace addressSpace)
 {
     if (as<IRGroupSharedRate>(rate))
     {
@@ -1206,10 +1467,11 @@ void HLSLSourceEmitter::emitMeshShaderModifiersImpl(IRInst* varInst)
 {
     if(auto modifier = varInst->findDecoration<IRMeshOutputDecoration>())
     {
+        // DXC requires that mesh payload parameters have "out" specified
         const char* s =
-              as<IRVerticesDecoration>(modifier)   ? "vertices "
-            : as<IRIndicesDecoration>(modifier)    ? "indices "
-            : as<IRPrimitivesDecoration>(modifier) ? "primitives "
+              as<IRVerticesDecoration>(modifier)   ? "out vertices "
+            : as<IRIndicesDecoration>(modifier)    ? "out indices "
+            : as<IRPrimitivesDecoration>(modifier) ? "out primitives "
             : nullptr;
         SLANG_ASSERT(s && "Unhandled type of mesh output decoration");
         m_writer->emit(s);
@@ -1223,31 +1485,36 @@ void HLSLSourceEmitter::emitMeshShaderModifiersImpl(IRInst* varInst)
 
 void HLSLSourceEmitter::emitVarDecorationsImpl(IRInst* varDecl)
 {
-    if (varDecl->findDecoration<IRGloballyCoherentDecoration>())
+    for(auto decoration : varDecl->getDecorations())
     {
-        m_writer->emit("globallycoherent\n");
+        if (auto collection = as<IRMemoryQualifierSetDecoration>(decoration))
+        {
+            auto flags = collection->getMemoryQualifierBit();
+            if(flags & MemoryQualifierSetModifier::Flags::kCoherent)
+                m_writer->emit("globallycoherent\n");
+            continue;
+        }
     }
 }
 
-void HLSLSourceEmitter::emitMatrixLayoutModifiersImpl(IRVarLayout* layout)
+void HLSLSourceEmitter::emitMatrixLayoutModifiersImpl(IRType* type)
 {
-    // When a variable has a matrix type, we want to emit an explicit
-    // layout qualifier based on what the layout has been computed to be.
-    //
-
-    auto typeLayout = layout->getTypeLayout()->unwrapArray();
-
-    if (auto matrixTypeLayout = as<IRMatrixTypeLayout>(typeLayout))
+    auto matType = as<IRMatrixType>(type);
+    if (!matType)
+        return;
+    auto matrixLayout = getIntVal(matType->getLayout());
+    if (getTargetProgram()->getOptionSet().getMatrixLayoutMode() != (MatrixLayoutMode)matrixLayout)
     {
-        switch (matrixTypeLayout->getMode())
+        switch (matrixLayout)
         {
-            case kMatrixLayoutMode_ColumnMajor:
-                m_writer->emit("column_major ");
-                break;
-
-            case kMatrixLayoutMode_RowMajor:
-                m_writer->emit("row_major ");
-                break;
+        case SLANG_MATRIX_LAYOUT_COLUMN_MAJOR:
+            m_writer->emit("column_major ");
+            break;
+        case SLANG_MATRIX_LAYOUT_ROW_MAJOR:
+            m_writer->emit("row_major ");
+            break;
+        default:
+            break;
         }
     }
 }
@@ -1260,7 +1527,7 @@ void HLSLSourceEmitter::handleRequiredCapabilitiesImpl(IRInst* inst)
     }
 }
 
-void HLSLSourceEmitter::emitFrontMatterImpl(TargetRequest* targetReq) 
+void HLSLSourceEmitter::emitFrontMatterImpl(TargetRequest*) 
 {
     if (m_extensionTracker->m_requiresNVAPI)
     {
@@ -1314,7 +1581,7 @@ void HLSLSourceEmitter::emitFrontMatterImpl(TargetRequest* targetReq)
 
     // Emit any layout declarations
 
-    switch (targetReq->getDefaultMatrixLayoutMode())
+    switch (getTargetProgram()->getOptionSet().getMatrixLayoutMode())
     {
     case kMatrixLayoutMode_RowMajor:
     default:

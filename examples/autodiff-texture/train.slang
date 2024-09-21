@@ -2,12 +2,12 @@
 
 // This class encapsulates a differentiable texture object that uses
 // hardware sampling for the primal version, but substitutes a reference
-// interpolation implementation to generate backward pass. 
-// 
+// interpolation implementation to generate backward pass.
+//
 // This specific implementation also makes the choice to use fast fixed point
 // atomics to accumulate the derivative (suitable for this example, but maybe
 // not in general)
-// 
+//
 struct DifferentiableTexture
 {
     RWStructuredBuffer<int> accumulateBuffer; // Per-mip-level accumulate buffer
@@ -15,12 +15,12 @@ struct DifferentiableTexture
     float minLOD;
 
     [BackwardDerivative(bwd_LoadTexel)]
-    float4 LoadTexel(int3 location, int2 offset, uint dLayerW, uint dMipOffset)
+    float4 LoadTexel(int3 location, constexpr int2 offset, uint dLayerW, uint dMipOffset)
     {
         return texture.Load(location, offset);
     }
 
-    void bwd_LoadTexel(int3 location, int2 offset, uint dLayerW, uint dMipOffset, float4 val)
+    void bwd_LoadTexel(int3 location, constexpr int2 offset, uint dLayerW, uint dMipOffset, float4 val)
     {
         // Ignore alpha dimension for this example..
         int4 uval = int4(int3(val.xyz * 65536), 1);

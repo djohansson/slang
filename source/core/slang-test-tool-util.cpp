@@ -1,7 +1,7 @@
 
 #include "slang-test-tool-util.h"
 
-#include "../../slang-com-helper.h"
+#include "slang-com-helper.h"
 
 #include "slang-io.h"
 #include "slang-string-util.h"
@@ -71,7 +71,12 @@ namespace Slang
 static SlangResult _addCPPPrelude(const String& rootPath, slang::IGlobalSession* session)
 {
     String includePath;
-    SLANG_RETURN_ON_FAIL(TestToolUtil::getIncludePath(rootPath, "prelude/slang-cpp-prelude.h", includePath));
+    SlangResult res = SLANG_FAIL;
+    if (SLANG_FAILED(res))
+        res = TestToolUtil::getIncludePath(Path::combine(rootPath, "include"), "slang-cpp-prelude.h", includePath);
+    if (SLANG_FAILED(res))
+        res = TestToolUtil::getIncludePath(rootPath, "prelude/slang-cpp-prelude.h", includePath);
+    SLANG_RETURN_ON_FAIL(res);
     StringBuilder prelude;
     prelude << "#include \"" << includePath << "\"\n\n";
     session->setLanguagePrelude(SLANG_SOURCE_LANGUAGE_CPP, prelude.getBuffer());
@@ -81,7 +86,12 @@ static SlangResult _addCPPPrelude(const String& rootPath, slang::IGlobalSession*
 static SlangResult _addCUDAPrelude(const String& rootPath, slang::IGlobalSession* session)
 {
     String includePath;
-    SLANG_RETURN_ON_FAIL(TestToolUtil::getIncludePath(rootPath, "prelude/slang-cuda-prelude.h", includePath));
+    SlangResult res = SLANG_FAIL;
+    if (SLANG_FAILED(res))
+        res = TestToolUtil::getIncludePath(Path::combine(rootPath, "include"), "slang-cuda-prelude.h", includePath);
+    if (SLANG_FAILED(res))
+        res = TestToolUtil::getIncludePath(rootPath, "prelude/slang-cuda-prelude.h", includePath);
+    SLANG_RETURN_ON_FAIL(res);
     StringBuilder prelude;
     prelude << "#include \"" << includePath << "\"\n\n";
     session->setLanguagePrelude(SLANG_SOURCE_LANGUAGE_CUDA, prelude.getBuffer());
@@ -97,6 +107,24 @@ static SlangResult _addCUDAPrelude(const String& rootPath, slang::IGlobalSession
     return SLANG_OK;
 }
 
+/* static */SlangResult TestToolUtil::getDllDirectoryPath(const char* exePath, String& outDllDirectoryPath)
+{
+    String canonicalPath;
+    SLANG_RETURN_ON_FAIL(Path::getCanonical(exePath, canonicalPath));
+
+    // Get the directory
+    String binPath = Path::getParentDirectory(canonicalPath);
+
+    // Windows puts the dlls in the same directory as the exe, while on other platforms they are in a 'lib' directory
+#ifdef _WIN32
+    outDllDirectoryPath = binPath;
+#else
+    String binaryRootPath = Path::getParentDirectory(binPath);
+    outDllDirectoryPath = Path::combine(binaryRootPath, "lib");
+#endif
+    return SLANG_OK;
+}
+
 /* static */SlangResult TestToolUtil::getRootPath(const char* inExePath, String& outExePath)
 {
     // Get the directory holding the exe
@@ -109,6 +137,8 @@ static SlangResult _addCUDAPrelude(const String& rootPath, slang::IGlobalSession
     SLANG_RETURN_ON_FAIL(Path::getCanonical(parentPath, rootRelPath));
     do
     {
+        if(File::exists(Path::combine(rootRelPath, "include/slang-cpp-prelude.h")))
+            break;
         if(File::exists(Path::combine(rootRelPath, "prelude/slang-cpp-prelude.h")))
             break;
 

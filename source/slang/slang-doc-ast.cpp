@@ -3,6 +3,7 @@
 
 #include "../core/slang-string-util.h"
 
+#include "slang/slang-ast-support-types.h"
 //#include "slang-ast-builder.h"
 //#include "slang-ast-print.h"
 
@@ -47,9 +48,14 @@ namespace Slang {
     }
 }
 
+bool shouldDocumentDecl(Decl* decl)
+{
+    return !getText(decl->getName()).startsWith("$__syn") && !decl->hasModifier<SynthesizedModifier>();
+}
+
 static void _addDeclRec(Decl* decl, List<Decl*>& outDecls)
 {
-    if (decl == nullptr)
+    if (decl == nullptr || !shouldDocumentDecl(decl))
     {
         return;
     }
@@ -107,6 +113,10 @@ SlangResult ASTMarkupUtil::extract(ModuleDecl* moduleDecl, SourceManager* source
             SLANG_ASSERT(item.sourceLoc.isValid());
 
             item.searchStyle = getSearchStyle(decl);
+
+            // Don't generate documentation for synthesized members.
+            if (!shouldDocumentDecl(decl))
+                item.searchStyle = DocMarkupExtractor::SearchStyle::None;
         }
 
         DocMarkupExtractor extractor;

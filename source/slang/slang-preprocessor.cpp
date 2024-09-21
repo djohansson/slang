@@ -857,6 +857,11 @@ struct ExpansionInputStream : InputStream
 
     TokenType peekRawTokenType() { return peekRawToken().type; }
 
+    void setInitiatingMacroSourceLoc(SourceLoc loc)
+    {
+        m_initiatingMacroInvocationLoc = loc;
+        m_isInExpansion = true;
+    }
 private:
         /// The base stream that macro expansion is being applied to
     InputStream*   m_base = nullptr;
@@ -867,6 +872,10 @@ private:
         /// Location of the "iniating" macro invocation in cases where multiple
         /// nested macro invocations might be in flight.
     SourceLoc m_initiatingMacroInvocationLoc;
+
+        /// Whether this ExpansionStream is created in the middle of
+        /// another macro expansion.
+    bool m_isInExpansion = false;
 
         /// One token of lookahead
     Token m_lookaheadToken;
@@ -1014,6 +1023,9 @@ struct Preprocessor
 
         /// Stores the initiating macro source location.
     SourceLoc                               initiatingMacroSourceLoc;
+
+        /// Detected source language.
+    SourceLanguage                          language = SourceLanguage::Unknown;
 
         /// Stores macro definition and invocation info for language server.
     PreprocessorContentAssistInfo* contentAssistInfo = nullptr;
@@ -1426,7 +1438,7 @@ void ExpansionInputStream::_maybeBeginMacroInvocation()
         // invocation location for things like `__LINE__` uses inside
         // of macro bodies.
         //
-        if(activeStream == m_base)
+        if(!m_isInExpansion && activeStream == m_base)
         {
             m_initiatingMacroInvocationLoc = token.loc;
         }
@@ -2107,6 +2119,7 @@ void MacroInvocation::_initCurrentOpStream()
             // applies macro expansion to them.
             //
             ExpansionInputStream* expansion = new ExpansionInputStream(m_preprocessor, stream);
+            expansion->setInitiatingMacroSourceLoc(m_initiatingMacroInvocationLoc);
             m_currentOpStreams.push(expansion);
         }
         break;
@@ -2567,7 +2580,40 @@ static PreprocessorExpressionValue ParseAndEvaluateUnaryExpression(PreprocessorD
 
                 return LookupMacro(context, name) != NULL;
             }
+            else if (token.getContent() == "__has_feature")
+            {
+                // handle `defined(someName)`
 
+                // Possibly parse a `(`
+                Token leftParen;
+                if (PeekRawTokenType(context) == TokenType::LParent)
+                {
+                    leftParen = AdvanceRawToken(context);
+                }
+
+                // Expect an identifier
+                Token nameToken;
+                if (!ExpectRaw(context, TokenType::Identifier, Diagnostics::expectedTokenInDefinedExpression, &nameToken))
+                {
+                    return 0;
+                }
+                
+                // If we saw an opening `(`, then expect one to close
+                if (leftParen.type != TokenType::Unknown)
+                {
+                    if (!ExpectRaw(context, TokenType::RParent, Diagnostics::expectedTokenInDefinedExpression))
+                    {
+                        GetSink(context)->diagnose(leftParen.loc, Diagnostics::seeOpeningToken, leftParen);
+                        return 0;
+                    }
+                }
+
+                if (nameToken.getContent() == "hlsl_vk_buffer_pointer")
+                {
+                    return 1;
+                }
+                return 0;
+            }
             // An identifier here means it was not defined as a macro (or
             // it is defined, but as a function-like macro. These should
             // just evaluate to zero (possibly with a warning)
@@ -2991,10 +3037,25 @@ static void HandleIncludeDirective(PreprocessorDirectiveContext* context)
     AdvanceRawToken(context);
 
     Token pathToken;
-    if(!Expect(context, TokenType::StringLiteral, Diagnostics::expectedTokenInPreprocessorDirective, &pathToken))
-        return;
-
-    String path = getFileNameTokenValue(pathToken);
+    String path;
+    if (PeekRawTokenType(context) == TokenType::OpLess)
+    {
+        StringBuilder pathSB;
+        Expect(context, TokenType::OpLess, Diagnostics::expectedTokenInPreprocessorDirective, &pathToken);
+        while (PeekRawTokenType(context) != TokenType::OpGreater &&
+            PeekRawTokenType(context) != TokenType::EndOfFile)
+        {
+            pathSB << AdvanceRawToken(context).getContent();
+        }
+        if (!Expect(context, TokenType::OpGreater, Diagnostics::expectedTokenInPreprocessorDirective))
+            return;
+        path = pathSB.produceString();
+    }
+    else
+    {
+        Expect(context, TokenType::StringLiteral, Diagnostics::expectedTokenInPreprocessorDirective, &pathToken);
+        path = getFileNameTokenValue(pathToken);
+    }
 
     auto directiveLoc = GetDirectiveLoc(context);
     
@@ -3655,6 +3716,7 @@ static void HandleVersionDirective(PreprocessorDirectiveContext* context)
     }
 
     SkipToEndOfLine(context);
+    context->m_preprocessor->language = SourceLanguage::GLSL;
     // TODO, just skip the version for now
 }
 
@@ -4022,6 +4084,7 @@ TokenList preprocessSource(
     IncludeSystem*                      includeSystem,
     Dictionary<String, String> const&   defines,
     Linkage*                            linkage,
+    SourceLanguage&                     outDetectedLanguage,
     PreprocessorHandler*                handler)
 {
     PreprocessorDesc desc;
@@ -4040,12 +4103,13 @@ TokenList preprocessSource(
     {
         desc.contentAssistInfo = &linkage->contentAssistInfo.preprocessorInfo;
     }
-    return preprocessSource(file, desc);
+    return preprocessSource(file, desc, outDetectedLanguage);
 }
 
 TokenList preprocessSource(
     SourceFile*             file,
-    PreprocessorDesc const& desc)
+    PreprocessorDesc const& desc,
+    SourceLanguage          &outDetectedLanguage)
 {
     using namespace preprocessor;
 
@@ -4131,6 +4195,8 @@ TokenList preprocessSource(
 
     String s = sb.produceString();
 #endif
+
+    outDetectedLanguage = preprocessor.language;
 
     return tokens;
 }

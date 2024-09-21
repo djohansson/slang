@@ -320,8 +320,34 @@ struct DiffTransposePass
                     // Old cond block becomes new pre-break block.
                     IRBlock* revBreakBlock = revBlockMap[currentBlock];
 
-                    // Old true-side starting block becomes loop end block.
+                    // Old true-side starting block becomes loop end block...
                     IRBlock* revLoopEndBlock = revBlockMap[trueBlock];
+
+                    // ... unless the true block has multiple successors, in which 
+                    // case revLoopEndBlock is the merge block for some other if-else region
+                    // 
+                    // We will insert a new block after revLookEndBlock, which will serve as the
+                    // actual end block.
+                    // 
+                    HashSet<IRBlock*> uniqueSuccessors;
+                    for (auto successor : trueBlock->getSuccessors())
+                        uniqueSuccessors.add(successor);
+                    if (uniqueSuccessors.getCount() > 1)
+                    {
+                        auto revLookPreEndBlock = revLoopEndBlock;
+                        builder.setInsertAfter(revLookPreEndBlock);
+                        revLoopEndBlock = builder.emitBlock();
+
+                        if (isDifferentialInst(trueBlock))
+                        {
+                            builder.markInstAsDifferential(revLoopEndBlock);
+                        }
+
+                        builder.setInsertInto(revLookPreEndBlock);
+                        builder.emitBranch(revLoopEndBlock);
+                    }
+                    
+                    // Then, branch from the new loop end block to the new cond block.
                     builder.setInsertInto(revLoopEndBlock);
                     builder.emitBranch(
                         revCondBlock,
@@ -583,6 +609,8 @@ struct DiffTransposePass
                 auto nextInst = inst->getNextInst();
                 if (auto varInst = as<IRVar>(inst))
                 {
+                    IRBuilderSourceLocRAII sourceLocationScope(&builder, varInst->sourceLoc);
+
                     if (isDifferentialInst(varInst) && tryGetPrimalTypeFromDiffInst(varInst))
                     {
                         if (auto ptrPrimalType = as<IRPtrTypeBase>(tryGetPrimalTypeFromDiffInst(varInst)))
@@ -666,7 +694,11 @@ struct DiffTransposePass
         SLANG_ASSERT(lastRevBlock->getTerminator() == nullptr);
 
         builder.setInsertInto(lastRevBlock);
-        builder.emitReturn();
+
+        {
+            IRBuilderSourceLocRAII sourceLocationScope(&builder, revDiffFunc->sourceLoc);
+            builder.emitReturn();
+        }
 
         // Remove fwd-mode blocks.
         for (auto block : workList)
@@ -677,6 +709,8 @@ struct DiffTransposePass
 
     IRInst* extractAccumulatorVarGradient(IRBuilder* builder, IRInst* fwdInst)
     {
+        IRBuilderSourceLocRAII sourceLocationScope(builder, fwdInst->sourceLoc);
+
         if (auto accVar = getOrCreateAccumulatorVar(fwdInst))
         {
             auto gradValue = builder->emitLoad(accVar);
@@ -705,6 +739,7 @@ struct DiffTransposePass
             return revAccumulatorVarMap[fwdInst];
         
         IRBuilder tempVarBuilder(autodiffContext->moduleInst->getModule());
+        IRBuilderSourceLocRAII sourceLocationSCope(&tempVarBuilder, fwdInst->sourceLoc);
         
         IRBlock* firstDiffBlock = firstRevDiffBlockMap[as<IRFunc>(fwdInst->getParent()->getParent())];
 
@@ -759,6 +794,8 @@ struct DiffTransposePass
             for (UIndex ii = 0; ii < branchInst->getArgCount(); ii++)
             {
                 auto arg = branchInst->getArg(ii);
+
+                IRBuilderSourceLocRAII sourceLocationScope(&builder, arg->sourceLoc);
                 if (isDifferentialInst(arg))
                 {
                     // If the arg is a differential, emit a parameter
@@ -859,6 +896,8 @@ struct DiffTransposePass
         List<IRInst*> phiParamRevGradInsts;
         for (IRParam* param = fwdBlock->getFirstParam(); param; param = param->getNextParam())
         {
+            IRBuilderSourceLocRAII sourceLocationScope(&builder, param->sourceLoc);
+
             if (isDifferentialInst(param))
             {
                 // This param might be used outside this block.
@@ -923,6 +962,8 @@ struct DiffTransposePass
 
             if (auto accVar = getOrCreateAccumulatorVar(externInst))
             {
+                IRBuilderSourceLocRAII sourceLocationScope(&builder, externInst->sourceLoc);
+
                 // Accumulate all gradients, including our accumulator variable,
                 // into one inst.
                 //
@@ -1024,6 +1065,7 @@ struct DiffTransposePass
         
         // Emit the aggregate of all the gradients here. 
         // This will form the total derivative for this inst.
+        IRBuilderSourceLocRAII sourceLocationScope(builder, inst->sourceLoc);
         auto revValue = emitAggregateValue(builder, primalType, gradients);
 
         auto transposeResult = transposeInst(builder, inst, revValue);
@@ -1460,6 +1502,9 @@ struct DiffTransposePass
                 return transposeMakeStruct(builder, fwdInst, revValue);
             case kIROp_MakeArray:
                 return transposeMakeArray(builder, fwdInst, revValue);
+            case kIROp_MakeTuple:
+            case kIROp_MakeValuePack:
+                return transposeMakeTuple(builder, fwdInst, revValue);
             case kIROp_MakeArrayFromElement:
                 return transposeMakeArrayFromElement(builder, fwdInst, revValue);
 
@@ -1872,6 +1917,29 @@ struct DiffTransposePass
         return TranspositionResult(gradients);
     }
 
+    TranspositionResult transposeMakeTuple(IRBuilder* builder, IRInst* fwdMakeTuple, IRInst* revValue)
+    {
+        List<RevGradient> gradients;
+        auto type = fwdMakeTuple->getDataType();
+        for (UInt ii = 0; ii < type->getOperandCount(); ii++)
+        {
+            auto elementType = (IRType*)type->getOperand(ii);
+            auto gradAtField = builder->emitGetTupleElement(
+                elementType,
+                revValue,
+                ii);
+            SLANG_RELEASE_ASSERT(ii < fwdMakeTuple->getOperandCount());
+            gradients.add(RevGradient(
+                RevGradient::Flavor::Simple,
+                fwdMakeTuple->getOperand(ii),
+                gradAtField,
+                fwdMakeTuple));
+        }
+
+        // (A = MakeTuple(F1, F2, F3)) -> [(dF1 += dA.F1), (dF2 += dA.F2), (dF3 += dA.F3)]
+        return TranspositionResult(gradients);
+    }
+
     TranspositionResult transposeMakeStruct(IRBuilder* builder, IRInst* fwdMakeStruct, IRInst* revValue)
     {
         List<RevGradient> gradients;
@@ -1964,7 +2032,7 @@ struct DiffTransposePass
         SLANG_ASSERT(diffZero);
         auto revRest = builder->emitUpdateElement(
             revValue,
-            accessChain,
+            accessChain.getArrayView(),
             diffZero);
         gradients.add(RevGradient(
             RevGradient::Flavor::Simple,
@@ -2048,7 +2116,8 @@ struct DiffTransposePass
         // If we reach this point, revValue must be a differentiable type.
         auto revTypeWitness = diffTypeContext.tryGetDifferentiableWitness(
             builder,
-            primalType);
+            primalType,
+            DiffConformanceKind::Value);
         SLANG_ASSERT(revTypeWitness);
 
         auto baseExistential = fwdInst->getOperand(0);
@@ -2403,24 +2472,37 @@ struct DiffTransposePass
         auto baseType = firstFwdSwizzleInst->getBase()->getDataType();
 
         IRIntegerValue elementCount = 0;
-        IRType* elementType = nullptr;
-        IRType* primalElementType = nullptr;
+        List<IRType*> elementTypes;
+        List<IRType*> primalElementTypes;
         bool isVectorType = false;
-
+        bool isTupleType = false;
         if (auto vectorType = as<IRVectorType>(baseType))
         {
             IRInst* elementCountInst = vectorType->getElementCount();
-            elementType = vectorType->getElementType();
-            primalElementType = as<IRVectorType>(aggPrimalType)->getElementType();
-            SLANG_ASSERT(as<IRIntLit>(elementCountInst));
             elementCount = as<IRIntLit>(elementCountInst)->getValue();
+            for (IRIntegerValue i = 0; i < elementCount; i++)
+            {
+                elementTypes.add(vectorType->getElementType());
+                primalElementTypes.add(as<IRVectorType>(aggPrimalType)->getElementType());
+            }
+            SLANG_ASSERT(as<IRIntLit>(elementCountInst));
             isVectorType = true;
         }
         else if (auto basicType = as<IRBasicType>(baseType))
         {
-            elementType = basicType;
-            primalElementType = aggPrimalType;
+            elementTypes.add(basicType);
+            primalElementTypes.add(aggPrimalType);
             elementCount = 1;
+        }
+        else if (as<IRTupleType>(baseType) || as<IRTypePack>(baseType))
+        {
+            isTupleType = true;
+            elementCount = baseType->getOperandCount();
+            for (UInt i = 0; i < baseType->getOperandCount(); i++)
+            {
+                elementTypes.add((IRType*)baseType->getOperand(i));
+                primalElementTypes.add((IRType*)(aggPrimalType->getOperand(i)));
+            }
         }
         else
         {
@@ -2430,18 +2512,22 @@ struct DiffTransposePass
         IRInst* targetInst = firstGradient.targetInst;
 
         // Make a list of zeros of the base type.
-        auto zeroElement = emitDZeroOfDiffInstType(builder, primalElementType);
 
         List<IRInst*> elementGrads;
+        List<IRInst*> zeroElements;
         for (Index i = 0; i < elementCount; ++i)
+        {
+            auto zeroElement = emitDZeroOfDiffInstType(builder, primalElementTypes[i]);
             elementGrads.add(zeroElement);
+            zeroElements.add(zeroElement);
+        }
         
         auto accGrad = [&](UIndex i, IRInst* grad)
         {
-            if (elementGrads[i] == zeroElement)
+            if (elementGrads[i] == zeroElements[i])
                 elementGrads[i] = grad;
             else
-                elementGrads[i] = emitDAddOfDiffInstType(builder, primalElementType, elementGrads[i], grad);
+                elementGrads[i] = emitDAddOfDiffInstType(builder, primalElementTypes[i], elementGrads[i], grad);
         };
 
         for (auto gradient : gradients)
@@ -2467,12 +2553,19 @@ struct DiffTransposePass
                 else if (isVectorType)
                     accGrad((UIndex)targetIndex,
                         builder->emitElementExtract(
-                            elementType,
+                            elementTypes[(UIndex)targetIndex],
                             gradient.revGradInst,
                             builder->getIntValue(
                                 builder->getIntType(),
                                 sourceIndex)));
-                // Case 3: Swizzled input is a scalar.
+                // Case 3: swizzled output is a tuple.
+                else if (isTupleType)
+                    accGrad((UIndex)targetIndex,
+                        builder->emitGetTupleElement(
+                            elementTypes[(UIndex)targetIndex],
+                            gradient.revGradInst,
+                            (UInt)sourceIndex));
+                // Case 4: Swizzled input is a scalar.
                 else
                     accGrad((UIndex)targetIndex, gradient.revGradInst);
             }
@@ -2483,6 +2576,17 @@ struct DiffTransposePass
                 targetInst,
                 builder->emitMakeVector(baseType, (UInt)elementCount, elementGrads.getBuffer()),
                 nullptr);
+        else if (isTupleType)
+        {
+            return RevGradient(
+                targetInst,
+                builder->emitIntrinsicInst(
+                    baseType,
+                    baseType->getOp()==kIROp_TupleType ? kIROp_MakeTuple : kIROp_MakeValuePack,
+                    (UInt)elementCount,
+                    elementGrads.getBuffer()),
+                nullptr);
+        }
         else
             return RevGradient(
                 targetInst,
@@ -2651,7 +2755,6 @@ struct DiffTransposePass
                 gradient.revGradInst,
                 gradient.fwdGradInst
             ));
-
         }
 
         for (auto pair : bucketedGradients)

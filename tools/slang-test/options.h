@@ -53,7 +53,7 @@ struct Options
     Slang::String binDir;
 
     // only run test cases with names have one of these prefixes.
-    Slang::List<const char *> testPrefixes;
+    Slang::List<Slang::String> testPrefixes;
 
     // generate extra output (notably: command lines we run)
     bool shouldBeVerbose = false;
@@ -104,10 +104,9 @@ struct Options
 
     // By default we potentially synthesize test for all 
     // TODO: Vulkan is disabled by default for now as the majority as vulkan synthesized tests
-    // OpenGL is disabled for now
     // CPU is disabled by default
     // CUDA is disabled by default
-    Slang::RenderApiFlags synthesizedTestApis = Slang::RenderApiFlag::AllOf & ~(Slang::RenderApiFlag::Vulkan | Slang::RenderApiFlag::OpenGl | Slang::RenderApiFlag::CPU); 
+    Slang::RenderApiFlags synthesizedTestApis = Slang::RenderApiFlag::AllOf & ~(Slang::RenderApiFlag::Vulkan | Slang::RenderApiFlag::CPU); 
 
     // The adapter to use. If empty will match first found adapter.
     Slang::String adapter;
@@ -115,7 +114,7 @@ struct Options
     // Maximum number of test servers to run.
     int serverCount = 1;
 
-    bool emitSPIRVDirectly = false;
+    bool emitSPIRVDirectly = true;
 
     Slang::HashSet<Slang::String> expectedFailureList;
 

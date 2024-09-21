@@ -9,6 +9,8 @@ namespace Slang
 {
     struct LoweredElementTypeContext
     {
+        static const IRIntegerValue kMaxArraySizeToUnroll = 32;
+
         struct LoweredElementTypeInfo
         {
             IRType* originalType;
@@ -23,10 +25,11 @@ namespace Slang
         Dictionary<IRType*, LoweredElementTypeInfo> mapLoweredTypeToInfo[(int)IRTypeLayoutRuleName::_Count];
 
         SlangMatrixLayoutMode defaultMatrixLayout = SLANG_MATRIX_LAYOUT_ROW_MAJOR;
-        TargetRequest* target;
+        TargetProgram* target;
+        bool lowerBufferPointer = false;
 
-        LoweredElementTypeContext(TargetRequest* target, SlangMatrixLayoutMode inDefaultMatrixLayout)
-            : target(target), defaultMatrixLayout(inDefaultMatrixLayout)
+        LoweredElementTypeContext(TargetProgram* target, bool lowerBufferPointer, SlangMatrixLayoutMode inDefaultMatrixLayout)
+            : target(target), defaultMatrixLayout(inDefaultMatrixLayout), lowerBufferPointer(lowerBufferPointer)
         {}
 
         IRFunc* createMatrixUnpackFunc(
@@ -160,17 +163,42 @@ namespace Slang
             auto packedParam = builder.emitParam(structType);
             auto packedArray = builder.emitFieldExtract(innerArrayType, packedParam, dataKey);
             auto count = getIntVal(arrayType->getElementCount());
-            List<IRInst*> args;
-            args.setCount((Index)count);
-            for (IRIntegerValue ii = 0; ii < count; ++ii)
+            IRInst* result = nullptr;
+            if (count <= kMaxArraySizeToUnroll)
             {
-                auto packedElement = builder.emitElementExtract(packedArray, ii);
+                // If the array is small enough, just process each element directly.
+                List<IRInst*> args;
+                args.setCount((Index)count);
+                for (IRIntegerValue ii = 0; ii < count; ++ii)
+                {
+                    auto packedElement = builder.emitElementExtract(packedArray, ii);
+                    auto originalElement = innerTypeInfo.convertLoweredToOriginal
+                        ? builder.emitCallInst(innerTypeInfo.originalType, innerTypeInfo.convertLoweredToOriginal, 1, &packedElement)
+                        : packedElement;
+                    args[(Index)ii] = originalElement;
+                }
+                result = builder.emitMakeArray(arrayType, (UInt)args.getCount(), args.getBuffer());
+                
+            }
+            else
+            {
+                // The general case for large arrays is to emit a loop through the elements.
+                IRVar* resultVar = builder.emitVar(arrayType);
+                IRBlock* loopBodyBlock;
+                IRBlock* loopBreakBlock;
+                auto loopParam = emitLoopBlocks(&builder, builder.getIntValue(builder.getIntType(), 0), builder.getIntValue(builder.getIntType(), count),
+                    loopBodyBlock, loopBreakBlock);
+
+                builder.setInsertBefore(loopBodyBlock->getFirstOrdinaryInst());
+                auto packedElement = builder.emitElementExtract(packedArray, loopParam);
                 auto originalElement = innerTypeInfo.convertLoweredToOriginal
                     ? builder.emitCallInst(innerTypeInfo.originalType, innerTypeInfo.convertLoweredToOriginal, 1, &packedElement)
                     : packedElement;
-                args[(Index)ii] = originalElement;
+                auto varPtr = builder.emitElementAddress(resultVar, loopParam);
+                builder.emitStore(varPtr, originalElement);
+                builder.setInsertInto(loopBreakBlock);
+                result = builder.emitLoad(resultVar);
             }
-            auto result = builder.emitMakeArray(arrayType, (UInt)args.getCount(), args.getBuffer());
             builder.emitReturn(result);
             return func;
         }
@@ -190,18 +218,43 @@ namespace Slang
             builder.setInsertInto(func);
             builder.emitBlock();
             auto originalParam = builder.emitParam(arrayType);
+            IRInst* packedArray = nullptr;
             auto count = getIntVal(arrayType->getElementCount());
-            List<IRInst*> args;
-            args.setCount((Index)count);
-            for (IRIntegerValue ii = 0; ii < count; ++ii)
+            if (count <= kMaxArraySizeToUnroll)
             {
-                auto originalElement = builder.emitElementExtract(originalParam, ii);
+                // If the array is small enough, just process each element directly.
+                List<IRInst*> args;
+                args.setCount((Index)count);
+                for (IRIntegerValue ii = 0; ii < count; ++ii)
+                {
+                    auto originalElement = builder.emitElementExtract(originalParam, ii);
+                    auto packedElement = innerTypeInfo.convertOriginalToLowered
+                        ? builder.emitCallInst(innerTypeInfo.loweredType, innerTypeInfo.convertOriginalToLowered, 1, &originalElement)
+                        : originalElement;
+                    args[(Index)ii] = packedElement;
+                }
+                packedArray = builder.emitMakeArray(innerArrayType, (UInt)args.getCount(), args.getBuffer());
+            }
+            else
+            {
+                // The general case for large arrays is to emit a loop through the elements.
+                IRVar* packedArrayVar = builder.emitVar(innerArrayType);
+                IRBlock* loopBodyBlock;
+                IRBlock* loopBreakBlock;
+                auto loopParam = emitLoopBlocks(&builder, builder.getIntValue(builder.getIntType(), 0), builder.getIntValue(builder.getIntType(), count),
+                                            loopBodyBlock, loopBreakBlock);
+
+                builder.setInsertBefore(loopBodyBlock->getFirstOrdinaryInst());
+                auto originalElement = builder.emitElementExtract(originalParam, loopParam);
                 auto packedElement = innerTypeInfo.convertOriginalToLowered
                     ? builder.emitCallInst(innerTypeInfo.loweredType, innerTypeInfo.convertOriginalToLowered, 1, &originalElement)
                     : originalElement;
-                args[(Index)ii] = packedElement;
+                auto varPtr = builder.emitElementAddress(packedArrayVar, loopParam);
+                builder.emitStore(varPtr, packedElement);
+                builder.setInsertInto(loopBreakBlock);
+                packedArray = builder.emitLoad(packedArrayVar);
             }
-            auto packedArray = builder.emitMakeArray(innerArrayType, (UInt)args.getCount(), args.getBuffer());
+          
             auto result = builder.emitMakeStruct(structType, 1, &packedArray);
             builder.emitReturn(result);
             return func;
@@ -257,7 +310,7 @@ namespace Slang
                 auto vectorType = builder.getVectorType(matrixType->getElementType(),
                     isColMajor?matrixType->getRowCount():matrixType->getColumnCount());
                 IRSizeAndAlignment elementSizeAlignment;
-                getSizeAndAlignment(target, rules, vectorType, &elementSizeAlignment);
+                getSizeAndAlignment(target->getOptionSet(), rules, vectorType, &elementSizeAlignment);
                 elementSizeAlignment = rules->alignCompositeElement(elementSizeAlignment);
 
                 auto arrayType = builder.getArrayType(
@@ -297,7 +350,7 @@ namespace Slang
                 auto structKey = builder.createStructKey();
                 builder.addNameHintDecoration(structKey, UnownedStringSlice("data"));
                 IRSizeAndAlignment elementSizeAlignment;
-                getSizeAndAlignment(target, rules, loweredInnerTypeInfo.loweredType, &elementSizeAlignment);
+                getSizeAndAlignment(target->getOptionSet(), rules, loweredInnerTypeInfo.loweredType, &elementSizeAlignment);
                 elementSizeAlignment = rules->alignCompositeElement(elementSizeAlignment);
                 auto innerArrayType = builder.getArrayType(
                     loweredInnerTypeInfo.loweredType,
@@ -405,7 +458,7 @@ namespace Slang
 
             if (target->shouldEmitSPIRVDirectly())
             {
-                switch (target->getTarget())
+                switch (target->getTargetReq()->getTarget())
                 {
                 case CodeGenTarget::SPIRV:
                 case CodeGenTarget::SPIRVAssembly:
@@ -460,12 +513,20 @@ namespace Slang
 
         LoweredElementTypeInfo getLoweredTypeInfo(IRType* type, IRTypeLayoutRules* rules)
         {
+            // If `type` is already a lowered type, no more lowering is required.
             LoweredElementTypeInfo info;
+            if (mapLoweredTypeToInfo->tryGetValue(type))
+            {
+                info.originalType = type;
+                info.loweredType = type;
+                return info;
+            }
+
             if (loweredTypeInfo[(int)rules->ruleName].tryGetValue(type, info))
                 return info;
             info = getLoweredTypeInfoImpl(type, rules);
             IRSizeAndAlignment sizeAlignment;
-            getSizeAndAlignment(target, rules, info.loweredType, &sizeAlignment);
+            getSizeAndAlignment(target->getOptionSet(), rules, info.loweredType, &sizeAlignment);
             loweredTypeInfo[(int)rules->ruleName].set(type, info);
             mapLoweredTypeToInfo[(int)rules->ruleName].set(info.loweredType, info);
             return info;
@@ -477,7 +538,11 @@ namespace Slang
             {
                 IRBuilder builder(newElementType);
                 builder.setInsertAfter(newElementType);
-                return builder.getType(originalPtrLikeType->getOp(), newElementType);
+                ShortList<IRInst*> operands;
+                for (UInt i = 0; i < originalPtrLikeType->getOperandCount(); i++)
+                    operands.add(originalPtrLikeType->getOperand(i));
+                operands[0] = newElementType;
+                return builder.getType(originalPtrLikeType->getOp(), (UInt)operands.getCount(), operands.getArrayView().getBuffer());
             }
             SLANG_UNREACHABLE("unhandled ptr like or buffer type");
         }
@@ -509,10 +574,21 @@ namespace Slang
             for (auto globalInst : module->getGlobalInsts())
             {
                 IRType* elementType = nullptr;
-                if (auto structBuffer = as<IRHLSLStructuredBufferTypeBase>(globalInst))
-                    elementType = structBuffer->getElementType();
-                else if (auto constBuffer = as<IRUniformParameterGroupType>(globalInst))
-                    elementType = constBuffer->getElementType();
+                if (lowerBufferPointer)
+                {
+                    if (auto ptrType = as<IRPtrType>(globalInst))
+                    {
+                        if (ptrType->getAddressSpace() == AddressSpace::UserPointer)
+                            elementType = ptrType->getValueType();
+                    }
+                }
+                else
+                {
+                    if (auto structBuffer = as<IRHLSLStructuredBufferTypeBase>(globalInst))
+                        elementType = structBuffer->getElementType();
+                    else if (auto constBuffer = as<IRUniformParameterGroupType>(globalInst))
+                        elementType = constBuffer->getElementType();
+                }
                 if (as<IRTextureBufferType>(globalInst))
                     continue;
                 if (!as<IRStructType>(elementType) && !as<IRMatrixType>(elementType) && !as<IRArrayType>(elementType) && !as<IRBoolType>(elementType))
@@ -538,9 +614,14 @@ namespace Slang
 
                 builder.setInsertBefore(bufferType);
 
+                ShortList<IRInst*> typeOperands;
+                for (UInt i = 0; i < bufferType->getOperandCount(); i++)
+                    typeOperands.add(bufferType->getOperand(i));
+                typeOperands[0] = loweredBufferElementTypeInfo.loweredType;
                 auto loweredBufferType = builder.getType(
                     bufferType->getOp(),
-                    loweredBufferElementTypeInfo.loweredType);
+                    (UInt)typeOperands.getCount(),
+                    typeOperands.getArrayView().getBuffer());
 
                 // We treat a value of a buffer type as a pointer, and use a work list to translate
                 // all loads and stores through the pointer values that needs lowering.
@@ -645,17 +726,19 @@ namespace Slang
                                 }
                                 break;
                             case kIROp_RWStructuredBufferGetElementPtr:
+                            case kIROp_GetOffsetPtr:
                                 ptrValsWorkList.add(user);
                                 break;
                             case kIROp_StructuredBufferGetDimensions:
                                 break;
                             case kIROp_Call:
                                 {
-                                    // If a structured buffer typed value is used directly as an argument,
+                                    // If a structured buffer or pointer typed value is used directly as an argument,
                                     // we don't need to do any marshalling here.
                                     if (as<IRHLSLStructuredBufferTypeBase>(ptrVal->getDataType()))
                                         break;
-
+                                    if (lowerBufferPointer && as<IRPtrType>(ptrVal->getDataType()))
+                                        break;
                                     // If we are calling a function with an l-value pointer from buffer access,
                                     // we need to materialize the object as a local variable, and pass the address
                                     // of the local variable to the function.
@@ -672,7 +755,6 @@ namespace Slang
                                 }
                                 break;
                             default:
-                                SLANG_UNREACHABLE("unhandled inst of a buffer/pointer value that needs storage lowering.");
                                 break;
                             }
                         });
@@ -715,7 +797,7 @@ namespace Slang
                             {
                                 IRInst* resultInst = nullptr;
                                 auto dataPtr = builder.emitFieldAddress(
-                                    builder.getPtrType(matrixTypeInfo->loweredInnerArrayType),
+                                    getLoweredPtrLikeType(majorAddr->getDataType(), matrixTypeInfo->loweredInnerArrayType),
                                     majorGEP->getBase(),
                                     matrixTypeInfo->loweredInnerStructKey);
                                 if (getIntVal(matrixType->getLayout()) == SLANG_MATRIX_LAYOUT_COLUMN_MAJOR)
@@ -744,7 +826,7 @@ namespace Slang
                                 if (storeInst->getOperand(0) != majorAddr)
                                     break;
                                 auto dataPtr = builder.emitFieldAddress(
-                                    builder.getPtrType(matrixTypeInfo->loweredInnerArrayType),
+                                    getLoweredPtrLikeType(majorAddr->getDataType(), matrixTypeInfo->loweredInnerArrayType),
                                     majorGEP->getBase(),
                                     matrixTypeInfo->loweredInnerStructKey);
                                 if (getIntVal(matrixType->getLayout()) == SLANG_MATRIX_LAYOUT_COLUMN_MAJOR)
@@ -774,7 +856,7 @@ namespace Slang
                                     Swap(rowIndex, colIndex);
                                 }
                                 auto dataPtr = builder.emitFieldAddress(
-                                    builder.getPtrType(matrixTypeInfo->loweredInnerArrayType),
+                                    getLoweredPtrLikeType(majorAddr->getDataType(), matrixTypeInfo->loweredInnerArrayType),
                                     majorGEP->getBase(),
                                     matrixTypeInfo->loweredInnerStructKey);
                                 auto vectorAddr = builder.emitElementAddress(dataPtr, rowIndex);
@@ -792,28 +874,43 @@ namespace Slang
         }
     };
 
-    void lowerBufferElementTypeToStorageType(TargetRequest* target, IRModule* module)
+    void lowerBufferElementTypeToStorageType(TargetProgram* target, IRModule* module, bool lowerBufferPointer)
     {
-        SlangMatrixLayoutMode defaultMatrixMode = (SlangMatrixLayoutMode)target->getDefaultMatrixLayoutMode();
-        if (defaultMatrixMode == SLANG_MATRIX_LAYOUT_MODE_UNKNOWN)
+        SlangMatrixLayoutMode defaultMatrixMode = (SlangMatrixLayoutMode)target->getOptionSet().getMatrixLayoutMode();
+        if ((isCPUTarget(target->getTargetReq()) || isCUDATarget(target->getTargetReq()) || isMetalTarget(target->getTargetReq())))
             defaultMatrixMode = SLANG_MATRIX_LAYOUT_ROW_MAJOR;
-        LoweredElementTypeContext context(target, defaultMatrixMode);
+        else if (defaultMatrixMode == SLANG_MATRIX_LAYOUT_MODE_UNKNOWN)
+            defaultMatrixMode = SLANG_MATRIX_LAYOUT_ROW_MAJOR;
+        LoweredElementTypeContext context(target, lowerBufferPointer, defaultMatrixMode);
         context.processModule(module);
     }
 
 
-    IRTypeLayoutRules* getTypeLayoutRuleForBuffer(TargetRequest* target, IRType* bufferType)
+    IRTypeLayoutRules* getTypeLayoutRuleForBuffer(TargetProgram* target, IRType* bufferType)
     {
-        if (!isKhronosTarget(target))
-            return IRTypeLayoutRules::getNatural();
+        if (target->getTargetReq()->getTarget() != CodeGenTarget::WGSL)
+        {
+            if (!isKhronosTarget(target->getTargetReq()))
+                return IRTypeLayoutRules::getNatural();
 
-        // If we are just emitting GLSL, we can just use the general layout rule.
-        if (!target->shouldEmitSPIRVDirectly())
-            return IRTypeLayoutRules::getNatural();
+            // If we are just emitting GLSL, we can just use the general layout rule.
+            if (!target->shouldEmitSPIRVDirectly())
+                return IRTypeLayoutRules::getNatural();
 
-        // If the user specified a scalar buffer layout, then just use that.
-        if (target->getForceGLSLScalarBufferLayout())
-            return IRTypeLayoutRules::getNatural();
+            // If the user specified a scalar buffer layout, then just use that.
+            if (target->getOptionSet().shouldUseScalarLayout())
+                return IRTypeLayoutRules::getNatural();
+        }
+
+        if (target->getOptionSet().shouldUseDXLayout())
+        {
+            if (as<IRUniformParameterGroupType>(bufferType))
+            {
+                return IRTypeLayoutRules::getConstantBuffer();
+            }
+            else
+                return IRTypeLayoutRules::getNatural();
+        }
 
         // The default behavior is to use std140 for constant buffers and std430 for other buffers.
         switch (bufferType->getOp())
@@ -823,10 +920,29 @@ namespace Slang
         case kIROp_HLSLAppendStructuredBufferType:
         case kIROp_HLSLConsumeStructuredBufferType:
         case kIROp_HLSLRasterizerOrderedStructuredBufferType:
+        {
+            auto structBufferType = as<IRHLSLStructuredBufferTypeBase>(bufferType);
+            auto layoutTypeOp = structBufferType->getDataLayout()
+                ? structBufferType->getDataLayout()->getOp()
+                : kIROp_DefaultBufferLayoutType;
+            switch (layoutTypeOp)
+            {
+            case kIROp_DefaultBufferLayoutType:
+                return IRTypeLayoutRules::getStd430();
+            case kIROp_Std140BufferLayoutType:
+                return IRTypeLayoutRules::getStd140();
+            case kIROp_Std430BufferLayoutType:
+                return IRTypeLayoutRules::getStd430();
+            case kIROp_ScalarBufferLayoutType:
+                return IRTypeLayoutRules::getNatural();
+            }
             return IRTypeLayoutRules::getStd430();
+        }
         case kIROp_ConstantBufferType:
         case kIROp_ParameterBlockType:
             return IRTypeLayoutRules::getStd140();
+        case kIROp_PtrType:
+            return IRTypeLayoutRules::getNatural();
         }
         return IRTypeLayoutRules::getNatural();
     }

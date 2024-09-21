@@ -182,7 +182,8 @@ namespace Slang
 
     void stripWrapExistential(IRModule* module)
     {
-        auto& workList = *module->getContainerPool().getList<IRInst>();
+        InstWorkList workList(module);
+
         workList.add(module->getModuleInst());
         for (Index i = 0; i < workList.getCount(); i++)
         {
@@ -205,19 +206,19 @@ namespace Slang
     }
 
     void lowerGenerics(
-        TargetRequest*          targetReq,
+        TargetProgram*          targetProgram,
         IRModule*               module,
         DiagnosticSink*         sink)
     {
         SLANG_PROFILE;
 
         SharedGenericsLoweringContext sharedContext(module);
-        sharedContext.targetReq = targetReq;
+        sharedContext.targetProgram = targetProgram;
         sharedContext.sink = sink;
 
         checkTypeConformanceExists(&sharedContext);
 
-        inferAnyValueSizeWhereNecessary(targetReq, module);
+        inferAnyValueSizeWhereNecessary(targetProgram, module);
 
         // Replace all `makeExistential` insts with `makeExistentialWithRTTI`
         // before making any other changes. This is necessary because a parameter of
@@ -228,7 +229,6 @@ namespace Slang
         // can be translated into an RTTI object during `lower-generic-type`,
         // and used to create a tuple representing the existential value.
         augmentMakeExistentialInsts(module);
-
 
         lowerGenericFunctions(&sharedContext);
         if (sink->getErrorCount() != 0)
@@ -255,7 +255,7 @@ namespace Slang
         // real RTTI objects and witness tables.
         specializeRTTIObjects(&sharedContext, sink);
 
-        simplifyIR(sharedContext.targetReq, module, IRSimplificationOptions::getFast());
+        simplifyIR(sharedContext.targetProgram, module, IRSimplificationOptions::getFast(sharedContext.targetProgram));
 
         lowerTuples(module, sink);
         if (sink->getErrorCount() != 0)
@@ -271,4 +271,28 @@ namespace Slang
         // We should remove them now.
         stripWrapExistential(module);
     }
+
+    void cleanupGenerics(TargetProgram* program, IRModule* module, DiagnosticSink* sink)
+    {
+        SharedGenericsLoweringContext sharedContext(module);
+        sharedContext.targetProgram = program;
+        sharedContext.sink = sink;
+
+        specializeRTTIObjects(&sharedContext, sink);
+
+        lowerTuples(module, sink);
+        if (sink->getErrorCount() != 0)
+            return;
+
+        generateAnyValueMarshallingFunctions(&sharedContext);
+        if (sink->getErrorCount() != 0)
+            return;
+
+        // At this point, we should no longer need to care any `WrapExistential` insts,
+        // although they could still exist in the IR in order to call generic stdlib functions,
+        // e.g. RWStucturedBuffer.Load(WrapExistential(sbuffer, type), index).
+        // We should remove them now.
+        stripWrapExistential(module);
+    }
+
 } // namespace Slang

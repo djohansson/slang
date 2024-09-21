@@ -14,7 +14,7 @@
 // its header. We have set up the build options for this project
 // so that it is as simple as:
 //
-#include <slang.h>
+#include "slang.h"
 //
 // Other build setups are possible, and Slang doesn't assume that
 // its include directory must be added to your global include
@@ -41,6 +41,8 @@
 
 using namespace gfx;
 using namespace Slang;
+
+static const ExampleResources resourceBase("triangle");
 
 // For the purposes of a small example, we will define the vertex data for a
 // single triangle directly in the source file. It should be easy to extend
@@ -112,7 +114,8 @@ gfx::Result loadShaderProgram(
     // already been loaded previously, that would be used directly.
     //
     ComPtr<slang::IBlob> diagnosticsBlob;
-    slang::IModule* module = slangSession->loadModule("shaders", diagnosticsBlob.writeRef());
+    Slang::String path = resourceBase.resolveResource("shaders.slang");
+    slang::IModule* module = slangSession->loadModule(path.getBuffer(), diagnosticsBlob.writeRef());
     diagnoseIfNeeded(diagnosticsBlob);
     if(!module)
         return SLANG_FAIL;
@@ -183,6 +186,11 @@ gfx::Result loadShaderProgram(
     gfx::IShaderProgram::Desc programDesc = {};
     programDesc.slangGlobalScope = linkedProgram;
     SLANG_RETURN_ON_FAIL(device->createProgram(programDesc, outProgram));
+
+    if (isTestMode())
+    {
+        printEntrypointHashes(entryPointCount, 1, linkedProgram);
+    }
 
     return SLANG_OK;
 }
@@ -384,9 +392,12 @@ virtual void renderFrame(int frameBufferIndex) override
     commandBuffer->close();
     gQueue->executeCommandBuffer(commandBuffer);
 
-    // With that, we are done drawing for one frame, and ready for the next.
-    //
-    gSwapchain->present();
+    if (!isTestMode())
+    {
+        // With that, we are done drawing for one frame, and ready for the next.
+        //
+        gSwapchain->present();
+    }
 }
 
 };

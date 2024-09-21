@@ -2,7 +2,11 @@
 
 // Test that a simple mesh shader compiles
 
-//TEST:CROSS_COMPILE:-target spirv -profile glsl_450+spirv_1_4 -entry main -stage mesh
+//TEST:SIMPLE(filecheck=SPV_CHECK):-target spirv -profile glsl_450+spirv_1_4 -entry main -stage mesh
+
+//SPV_CHECK-NOT: SPV_NV_mesh_shader
+//SPV_CHECK: SPV_EXT_mesh_shader
+//SPV_CHECK: CullPrimitiveEXT
 
 const static float2 positions[3] = {
     float2(0.0, -0.5),
@@ -36,9 +40,9 @@ const static uint MAX_PRIMS = 1;
 [numthreads(3, 1, 1)]
 void main(
     in uint tig : SV_GroupIndex,
-    out Indices<uint3, MAX_PRIMS> triangles,
-    out Vertices<Vertex, MAX_VERTS> verts,
-    out Primitives<Prim, MAX_PRIMS> primitives
+    OutputIndices<uint3, MAX_PRIMS> triangles,
+    OutputVertices<Vertex, MAX_VERTS> verts,
+    OutputPrimitives<Prim, MAX_PRIMS> primitives
     )
 {
     const uint numVertices = 3;

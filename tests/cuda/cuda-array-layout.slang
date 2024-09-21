@@ -10,7 +10,7 @@ struct PadLadenStruct
 };
 
 // This is to check if the last half can be inserted 'inside' the spare padding of a. It should not be
-struct StructWithArray
+struct StructWithArray : IDefaultInitializable
 {
     PadLadenStruct a[1];
     uint8_t b;
@@ -29,4 +29,6 @@ void computeMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     outputBuffer[2] = __offsetOf(s, s.b);
     outputBuffer[3] = __offsetOf(s, s.c);
     outputBuffer[4] = __offsetOf(s, s.d);
+
+    outputBuffer[5] = __sizeOf<int>();
 }

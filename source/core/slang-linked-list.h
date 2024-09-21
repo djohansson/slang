@@ -1,7 +1,7 @@
 #ifndef SLANG_CORE_LINKED_LIST_H
 #define SLANG_CORE_LINKED_LIST_H
 
-#include "../../slang.h"
+#include "../../include/slang.h"
 
 #include "slang-allocator.h"
 #include <type_traits>
@@ -323,7 +323,7 @@ public:
         }
         return rs;
     }
-    int getCount() { return count; }
+    int getCount() const { return count; }
 };
 } // namespace Slang
 #endif

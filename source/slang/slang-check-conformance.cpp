@@ -51,19 +51,26 @@ namespace Slang
 
     SubtypeWitness* SemanticsVisitor::isSubtype(
         Type* subType,
-        Type* superType)
+        Type* superType,
+        IsSubTypeOptions isSubTypeOptions
+    )
     {
         SubtypeWitness* result = nullptr;
         if (getShared()->tryGetSubtypeWitnessFromCache(subType, superType, result))
             return result;
-        result = checkAndConstructSubtypeWitness(subType, superType);
+        result = checkAndConstructSubtypeWitness(subType, superType, isSubTypeOptions);
+        
+        if(!result && (int(isSubTypeOptions) & int(IsSubTypeOptions::NoCaching)))
+            return result;    
+        
         getShared()->cacheSubtypeWitness(subType, superType, result);
         return result;
     }
 
     SubtypeWitness* SemanticsVisitor::checkAndConstructSubtypeWitness(
         Type*                   subType,
-        Type*                   superType)
+        Type*                   superType,
+        IsSubTypeOptions          isSubTypeOptions)
     {
         // TODO: The Slang codebase is currently being quite slippery by conflating
         // multiple concepts, all under the banner of a "subtype" test:
@@ -105,11 +112,14 @@ namespace Slang
         // tangling convertibility into it.
 
         // First, make sure both sub type and super type decl are ready for lookup.
-        if (auto subDeclRefType = as<DeclRefType>(subType))
+        if ( !(int(isSubTypeOptions) & int(IsSubTypeOptions::NoCaching)) )
         {
-            ensureDecl(subDeclRefType->getDeclRef().getDecl(), DeclCheckState::ReadyForLookup);
+            if (auto subDeclRefType = as<DeclRefType>(subType))
+            {
+                ensureDecl(subDeclRefType->getDeclRef().getDecl(), DeclCheckState::ReadyForLookup);
+            }
         }
-        if (auto superDeclRefType = as<DeclRefType>(subType))
+        if (auto superDeclRefType = as<DeclRefType>(superType))
         {
             ensureDecl(superDeclRefType->getDeclRef().getDecl(), DeclCheckState::ReadyForLookup);
         }
@@ -189,10 +199,10 @@ namespace Slang
             // We therefore simply recursively test both `T <: L`
             // and `T <: R`.
             //
-            auto leftWitness = isSubtype(subType, conjunctionSuperType->getLeft());
+            auto leftWitness = isSubtype(subType, conjunctionSuperType->getLeft(), IsSubTypeOptions::None);
             if (!leftWitness) return nullptr;
             //
-            auto rightWitness = isSubtype(subType, conjunctionSuperType->getRight());
+            auto rightWitness = isSubtype(subType, conjunctionSuperType->getRight(), IsSubTypeOptions::None);
             if (!rightWitness) return nullptr;
 
             // If both of the sub-relationships hold, we can construct
@@ -222,31 +232,137 @@ namespace Slang
             }
             return nullptr;
         }
-
+        else if (auto subTypePack = as<ConcreteTypePack>(subType))
+        {
+            // A type pack (T0, T1, ...) is a subtype of supType, if each of its elements
+            // is a subtype of the supType.
+            ShortList<SubtypeWitness*> elementWitnesses;
+            for (Index i = 0; i < subTypePack->getTypeCount(); i++)
+            {
+                auto elementWitness = isSubtype(subTypePack->getElementType(i), superType, IsSubTypeOptions::None);
+                if (!elementWitness)
+                    return nullptr;
+                elementWitnesses.add(elementWitness);
+            }
+            return m_astBuilder->getSubtypeWitnessPack(subType, superType, elementWitnesses.getArrayView().arrayView);
+        }
+        else if (auto expandType = as<ExpandType>(subType))
+        {
+            // A expand type `expand patternType, captureList` is a subtype of supType, if patternType is a subtype of supType.
+            auto elementWitness = isSubtype(expandType->getPatternType(), superType, IsSubTypeOptions::None);
+            if (!elementWitness)
+                return nullptr;
+            return m_astBuilder->getExpandSubtypeWitness(subType, superType, elementWitness);
+        }
+        else if (auto eachType = as<EachType>(subType))
+        {
+            auto elementWitness = isSubtype(eachType->getElementType(), superType, IsSubTypeOptions::None);
+            if (!elementWitness)
+                return nullptr;
+            return m_astBuilder->getEachSubtypeWitness(subType, superType, elementWitness);
+        }
         // default is failure
         return nullptr;
     }
 
-    bool SemanticsVisitor::isInterfaceType(Type* type)
+    bool SemanticsVisitor::isValidGenericConstraintType(Type* type)
     {
+        if (auto andType = as<AndType>(type))
+        {
+            return isValidGenericConstraintType(andType->getLeft()) && isValidGenericConstraintType(andType->getRight());
+        }
+        return isInterfaceType(type);
+    }
+
+    SubtypeWitness* SemanticsVisitor::isTypeDifferentiable(Type* type)
+    {
+        if (auto valueWitness = isSubtype(type, m_astBuilder->getDiffInterfaceType(), IsSubTypeOptions::None))
+            return valueWitness;
+        else if (auto ptrWitness = isSubtype(type, m_astBuilder->getDifferentiableRefInterfaceType(), IsSubTypeOptions::None))
+            return ptrWitness;
+        
+        return nullptr;
+    }
+
+    bool SemanticsVisitor::doesTypeHaveTag(Type* type, TypeTag tag)
+    {
+        if (auto arrayType = as<ArrayExpressionType>(type))
+        {
+            return doesTypeHaveTag(arrayType->getElementType(), tag);
+        }
+        if (auto modifiedType = as<ModifiedType>(type))
+        {
+            return doesTypeHaveTag(modifiedType->getBase(), tag);
+        }
         if (auto declRefType = as<DeclRefType>(type))
         {
-            if (auto interfaceDeclRef = declRefType->getDeclRef().as<InterfaceDecl>())
-                return true;
+            if (auto aggTypeDecl = as<AggTypeDecl>(declRefType->getDeclRef()))
+                return aggTypeDecl.getDecl()->hasTag(tag);
         }
         return false;
     }
 
-    bool SemanticsVisitor::isTypeDifferentiable(Type* type)
+    TypeTag SemanticsVisitor::getTypeTags(Type* type)
     {
-        return isSubtype(type, m_astBuilder->getDiffInterfaceType());
+        if (auto arrayType = as<ArrayExpressionType>(type))
+        {
+            auto typeTag = getTypeTags(arrayType->getElementType());
+            bool sized = false;
+            if (auto cint = as<ConstantIntVal>(arrayType->getElementCount()))
+            {
+                if (cint->getValue() != kUnsizedArrayMagicLength)
+                {
+                    sized = true;
+                }
+            }
+            else if (arrayType->getElementCount())
+            {
+                sized = true;
+                typeTag = (TypeTag)((int)typeTag | (int)TypeTag::LinkTimeSized);
+            }
+            if (!sized)
+                typeTag = (TypeTag)((int)typeTag | (int)TypeTag::Unsized);
+
+            return typeTag;
+        }
+        if (auto modifiedType = as<ModifiedType>(type))
+        {
+            return getTypeTags(modifiedType->getBase());
+        }
+        if (auto parameterGroupType = as<UniformParameterGroupType>(type))
+        {
+            auto elementTags = getTypeTags(parameterGroupType->getElementType());
+            elementTags = (TypeTag)((int)elementTags & ~(int)TypeTag::Unsized);
+            return elementTags;
+        }
+        else if (auto declRefType = as<DeclRefType>(type))
+        {
+            if (auto aggTypeDecl = as<AggTypeDecl>(declRefType->getDeclRef()))
+                return aggTypeDecl.getDecl()->typeTags;
+        }
+        return TypeTag::None;
     }
+
+
+    Type* SemanticsVisitor::getConstantBufferElementType(Type* type)
+    {
+        if (auto arrType = as<ArrayExpressionType>(type))
+            return getConstantBufferElementType(arrType->getElementType());
+        if (auto modifiedType = as<ModifiedType>(type))
+            return getConstantBufferElementType(modifiedType->getBase());
+        if (auto constantBuffer = as<ConstantBufferType>(type))
+            return constantBuffer->getElementType();
+        if (auto parameterBlock = as<ParameterBlockType>(type))
+            return parameterBlock->getElementType();
+        return nullptr;
+    }
+
 
     SubtypeWitness* SemanticsVisitor::tryGetInterfaceConformanceWitness(
         Type*   type,
         Type*   interfaceType)
     {
-        return isSubtype(type, interfaceType);
+        return isSubtype(type, interfaceType, IsSubTypeOptions::None);
     }
 
     TypeEqualityWitness* SemanticsVisitor::createTypeEqualityWitness(

@@ -1,5 +1,6 @@
-//TEST(compute):COMPARE_COMPUTE_EX(filecheck-buffer=CHECK): -mesh -output-using-type -dx12 -use-dxil -profile sm_6_6 -render-features mesh-shader
-//TEST(compute):COMPARE_COMPUTE_EX(filecheck-buffer=CHECK): -mesh -output-using-type -vk -profile glsl_450+spirv_1_4 -render-features mesh-shader
+//T-EST(compute):COMPARE_COMPUTE_EX(filecheck-buffer=CHECK): -mesh -output-using-type -dx12 -use-dxil -profile sm_6_6 -render-features mesh-shader
+//T-EST(compute):COMPARE_COMPUTE_EX(filecheck-buffer=CHECK): -mesh -output-using-type -vk -render-features mesh-shader
+//TEST(compute):COMPARE_COMPUTE_EX(filecheck-buffer=CHECK): -mesh -output-using-type -vk -profile sm_6_5 -render-features mesh-shader
 
 // To test a simple mesh shader, we'll generate 4 triangles, the vertices of
 // each one will hold the triangle index and a value (the square). The fragment
@@ -50,8 +51,8 @@ const static uint MAX_PRIMS = 4;
 [numthreads(12, 1, 1)]
 void meshMain(
     in uint tig : SV_GroupIndex,
-    out Vertices<Vertex, MAX_VERTS> verts,
-    out Indices<uint3, MAX_PRIMS> triangles)
+    OutputVertices<Vertex, MAX_VERTS> verts,
+    OutputIndices<uint3, MAX_PRIMS> triangles)
 {
     const uint numVertices = 12;
     const uint numPrimitives = 4;

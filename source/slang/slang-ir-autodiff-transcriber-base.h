@@ -91,11 +91,7 @@ struct AutoDiffTranscriberBase
 
     void maybeMigrateDifferentiableDictionaryFromDerivativeFunc(IRBuilder* builder, IRInst* origFunc);
 
-    // Get or construct `:IDifferentiable` conformance for a DifferentiablePair.
-    IRWitnessTable* getDifferentialPairWitness(IRBuilder* builder, IRInst* inOriginalDiffPairType, IRInst* inPrimalDiffPairType);
-    IRWitnessTable* getArrayWitness(IRBuilder* builder, IRInst* inOriginalArrayType, IRInst* inPrimalArrayType);
-
-    IRInst* tryGetDifferentiableWitness(IRBuilder* builder, IRInst* originalType);
+    IRInst* tryGetDifferentiableWitness(IRBuilder* builder, IRInst* originalType, DiffConformanceKind kind);
 
     IRType* getOrCreateDiffPairType(IRBuilder* builder, IRInst* primalType, IRInst* witness);
 
@@ -123,8 +119,14 @@ struct AutoDiffTranscriberBase
 
     InstPair transcribeBlock(IRBuilder* builder, IRBlock* origBlock)
     {
-        HashSet<IRInst*> emptySet;
-        return transcribeBlockImpl(builder, origBlock, emptySet);
+        HashSet<IRInst*> ignore;
+        for (auto inst = origBlock->getFirstInst(); inst; inst = inst->next)
+        {
+            if (inst->m_op == kIROp_Unmodified)
+                ignore.add(inst);
+        }
+
+        return transcribeBlockImpl(builder, origBlock, ignore);
     }
 
     // Transcribe a generic definition
@@ -150,6 +152,10 @@ struct AutoDiffTranscriberBase
     virtual InstPair transcribeInstImpl(IRBuilder* builder, IRInst* origInst) = 0;
 
     virtual IROp getInterfaceRequirementDerivativeDecorationOp() = 0;
+
+    void markDiffTypeInst(IRBuilder* builder, IRInst* inst, IRType* primalType);
+
+    void markDiffPairTypeInst(IRBuilder* builder, IRInst* inst, IRType* primalType);
 };
 
 }

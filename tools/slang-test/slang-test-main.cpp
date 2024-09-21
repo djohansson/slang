@@ -11,7 +11,7 @@
 #include "../../source/compiler-core/slang-artifact-desc-util.h"
 #include "../../source/compiler-core/slang-artifact-helper.h"
 
-#include "../../slang-com-helper.h"
+#include "slang-com-helper.h"
 
 #include "../../source/core/slang-string-util.h"
 #include "../../source/core/slang-string-escape-util.h"
@@ -967,6 +967,8 @@ static PassThroughFlags _getPassThroughFlagsForTarget(SlangCompileTarget target)
         case SLANG_CPP_PYTORCH_BINDING:
         case SLANG_HOST_CPP_SOURCE:
         case SLANG_CUDA_SOURCE:
+        case SLANG_METAL:
+        case SLANG_WGSL:
         {
             return 0;
         }
@@ -986,11 +988,18 @@ static PassThroughFlags _getPassThroughFlagsForTarget(SlangCompileTarget target)
             return PassThroughFlag::Dxc;
         }
 
+        case SLANG_METAL_LIB:
+        case SLANG_METAL_LIB_ASM:
+        {
+            return PassThroughFlag::Metal;
+        }
+
         case SLANG_SHADER_HOST_CALLABLE:
         case SLANG_HOST_HOST_CALLABLE:
 
         case SLANG_HOST_EXECUTABLE:
         case SLANG_SHADER_SHARED_LIBRARY:
+        case SLANG_HOST_SHARED_LIBRARY:
         {
             return PassThroughFlag::Generic_C_CPP;
         }
@@ -1088,16 +1097,15 @@ static SlangResult _extractRenderTestRequirements(const CommandLine& cmdLine, Te
                 passThru = SLANG_PASS_THROUGH_DXC;
             }
             break;
-
-        case RenderApiType::OpenGl:
-            target = SLANG_GLSL;
-            nativeLanguage = SLANG_SOURCE_LANGUAGE_GLSL;
-            passThru = SLANG_PASS_THROUGH_GLSLANG;
-            break;
         case RenderApiType::Vulkan:
             target = SLANG_SPIRV;
             nativeLanguage = SLANG_SOURCE_LANGUAGE_GLSL;
             passThru = SLANG_PASS_THROUGH_GLSLANG;
+            break;
+        case RenderApiType::Metal:
+            target = SLANG_METAL_LIB;
+            nativeLanguage = SLANG_SOURCE_LANGUAGE_METAL;
+            passThru = SLANG_PASS_THROUGH_METAL;
             break;
         case RenderApiType::CPU:
             target = SLANG_SHADER_HOST_CALLABLE;
@@ -1616,6 +1624,17 @@ TestResult runExecutableTest(TestContext* context, TestInput& input)
     String modulePath = Path::combine(
         Path::getParentDirectory(Path::getExecutablePath()), Path::getFileNameWithoutExt(filePath));
 
+    // String testRoot
+    // for(;;)
+    // {
+    //     String testRoot = Path::getParentDirectory(filePath);
+    //     if (testRoot == "")
+    //     {
+    //         break;
+    //     }
+    // }
+    // printf("test folder = %s\n", testRoot.begin());
+
     String moduleExePath;
     {
         StringBuilder buf;
@@ -1638,6 +1657,8 @@ TestResult runExecutableTest(TestContext* context, TestInput& input)
     args.add(moduleExePath);
     args.add("-target");
     args.add("exe");
+    args.add("-Xgenericcpp");
+    args.add("-I./include");
     for (auto arg : args)
     {
         // If unescaping is needed, do it
@@ -2636,6 +2657,7 @@ static TestResult generateExpectedOutput(TestContext* const context, const TestI
             default:
             {
                 expectedCmdLine.addArg(filePath + ".glsl");
+                expectedCmdLine.addArg("-emit-spirv-via-glsl");
                 expectedCmdLine.addArg("-pass-through");
                 expectedCmdLine.addArg("glslang");
                 break;
@@ -2681,6 +2703,7 @@ TestResult generateActualOutput(TestContext* const context, const TestInput& inp
     CommandLine actualCmdLine;
     _initSlangCompiler(context, actualCmdLine);
     actualCmdLine.addArg(filePath);
+    actualCmdLine.addArg("-emit-spirv-via-glsl");
 
     const auto& args = input.testOptions->args;
 
@@ -3022,9 +3045,9 @@ static void _addRenderTestOptions(const Options& options, CommandLine& ioCmdLine
         ioCmdLine.addArg("-adapter");
         ioCmdLine.addArg(options.adapter);
     }
-    if (options.emitSPIRVDirectly)
+    if (!options.emitSPIRVDirectly)
     {
-        ioCmdLine.addArg("-emit-spirv-directly");
+        ioCmdLine.addArg("-emit-spirv-via-glsl");
     }
 }
 
@@ -4228,7 +4251,7 @@ static SlangResult runUnitTestModule(TestContext* context, TestOptions& testOpti
     ComPtr<ISlangSharedLibrary> moduleLibrary;
 
     SLANG_RETURN_ON_FAIL(loader->loadSharedLibrary(
-        Path::combine(context->exeDirectoryPath, moduleName).getBuffer(),
+        Path::combine(context->dllDirectoryPath, moduleName).getBuffer(),
         moduleLibrary.writeRef()));
 
     UnitTestGetModuleFunc getModuleFunc =
@@ -4589,7 +4612,7 @@ SlangResult innerMain(int argc, char** argv)
 int main(int argc, char** argv)
 {
     const SlangResult res = innerMain(argc, argv);
-
+    slang::shutdown();
     Slang::RttiInfo::deallocateAll();
 
 #ifdef _MSC_VER

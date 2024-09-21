@@ -15,7 +15,7 @@
 
 #include "../../source/compiler-core/slang-json-rpc-connection.h"
 
-#include "../../slang-com-ptr.h"
+#include "slang-com-ptr.h"
 
 #include "filecheck.h"
 
@@ -37,6 +37,8 @@ struct PassThroughFlag
         Generic_C_CPP = 1 << int(SLANG_PASS_THROUGH_GENERIC_C_CPP),
         NVRTC = 1 << int(SLANG_PASS_THROUGH_NVRTC),
         LLVM = 1 << int(SLANG_PASS_THROUGH_LLVM),
+        Metal = 1 << int(SLANG_PASS_THROUGH_METAL),
+        WGSL = 1 << int(SLANG_PASS_THROUGH_WGSL)
     };
 };
 
@@ -147,6 +149,7 @@ class TestContext
     Slang::RefPtr<Slang::DownstreamCompilerSet> compilerSet;
 
     Slang::String exeDirectoryPath;
+    Slang::String dllDirectoryPath;
     Slang::String exePath;
 
         /// Timeout time for communication over connection.

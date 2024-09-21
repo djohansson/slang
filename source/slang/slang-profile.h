@@ -2,7 +2,7 @@
 #define SLANG_PROFILE_H_INCLUDED
 
 #include "../core/slang-basic.h"
-#include "../../slang.h"
+#include "slang.h"
 #include "slang-capability.h"
 
 namespace Slang
@@ -18,6 +18,8 @@ namespace Slang
         CPP = SLANG_SOURCE_LANGUAGE_CPP,
         CUDA = SLANG_SOURCE_LANGUAGE_CUDA,
         SPIRV = SLANG_SOURCE_LANGUAGE_SPIRV,
+        Metal = SLANG_SOURCE_LANGUAGE_METAL,
+        WGSL = SLANG_SOURCE_LANGUAGE_WGSL,
         CountOf = SLANG_SOURCE_LANGUAGE_COUNT_OF,
     };
 
@@ -54,6 +56,8 @@ namespace Slang
 #include "slang-profile-defs.h"
         
     };
+
+    bool isRaytracingStage(Stage inStage);
 
     const char* getStageName(Stage stage);
 
@@ -110,7 +114,9 @@ namespace Slang
         static Profile lookUp(char const* name);
         char const* getName();
 
-        List<CapabilityName> getCapabilityName();
+        CapabilitySet getCapabilityName();
+
+        List<CapabilitySet> additionalCapabilities;
 
         RawVal raw = Unknown;
     };
@@ -127,6 +133,8 @@ namespace Slang
     Stage findStageByName(String const& name);
 
     UnownedStringSlice getStageText(Stage stage);
+
+    Stage getStageFromAtom(CapabilityAtom atom);
 }
 
 #endif

@@ -8,12 +8,14 @@
 #include "../compiler-core/slang-diagnostic-sink.h"
 #include "../compiler-core/slang-token.h"
 
-#include "../../slang.h"
+#include "slang.h"
 
 namespace Slang
 {
     DiagnosticInfo const* findDiagnosticByName(UnownedStringSlice const& name);
     const DiagnosticsLookup* getDiagnosticsLookup();
+    SlangResult overrideDiagnostic(DiagnosticSink* sink, DiagnosticSink* outDiagnostic, const UnownedStringSlice& identifier, Severity originalSeverity, Severity overrideSeverity);
+    SlangResult overrideDiagnostics(DiagnosticSink* sink, DiagnosticSink* outDiagnostic, const UnownedStringSlice& identifierList, Severity originalSeverity, Severity overrideSeverity);
 
     namespace Diagnostics
     {

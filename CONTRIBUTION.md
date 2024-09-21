@@ -73,37 +73,85 @@ Please follow the instructions of how to [Building Slang from Source](docs/build
 For a quick reference, follow the instructions below.
 
 #### Windows
-Find where the premake executable is. The location may change when we upgrade Premake.
+Download and install CMake from [CMake.org/download](https://cmake.org/download)
+
+Run CMake with the following command to generate a Visual Studio 2022 Solution:
 ```
-C:\git\slang> where /r external\slang-binaries\premake premake*.exe
+C:\git\slang> cmake.exe --preset vs2022 # For VisualStudio 2022
+C:\git\slang> cmake.exe --preset vs2019 # For VisualStudio 2019
 ```
 
-Run the premake with the following command line options after replacing "PREMAKE" with the result from the previous command.
-```
-# For VisualStudio 2019
-C:\git\slang> PREMAKE vs2019 --deps=true --arch=x64
-# For VisualStudio 2017
-C:\git\slang> PREMAKE vs2017 --deps=true --arch=x64
-```
+Open `build/slang.sln` with VisualStudio IDE and build it for "x64".
 
-Open slang.sln with VisualStudio IDE and build it for "x64".
+Or you can build with a following command:
+```
+C:\git\slang> cmake.exe --build --preset release
+```
 
 #### Linux
-Find where the premake is and run it with gmake2 option.
+Install CMake and Ninja.
 ```
-$ PREMAKE="$(find external/slang-binaries/premake -type f -iname 'premake5' | grep bin/linux-64)"
-$ chmod u+x "$PREMAKE"
-$ "$PREMAKE" gmake2 --deps=true --arch=x64
-$ make config=release_x64
+$ sudo apt-get install cmake ninja-build
+```
+> Warning: Currently the required CMake version is 3.25 or above.
+
+Run CMake with a following command to generate Makefile:
+```
+$ cmake --preset default
+```
+
+Build with a following command:
+```
+$ cmake --build --preset release
+```
+
+#### MacOS
+Install XCode from AppStore.
+
+Install CMake and Ninja; we recommend using [homebrew](https://brew.sh/) for installing them.
+```
+brew install ninja
+brew install cmake
+```
+
+Run CMake with a following command to generate Makefile:
+```
+$ cmake --preset default
+```
+
+Build with a following command:
+```
+$ cmake --build --preset release
+```
+
+#### Building with a local build of slang-llvm
+slang-llvm is required to run slang-test properly.
+Follow the instructions below if you wish to build slang-llvm locally.
+```
+$ external/build-llvm.sh --source-dir build/slang-llvm_src --install-prefix build/slang-llvm_install
+```
+
+You need to use the following command to re-generate Makefile,
+```
+$ cmake --preset default --fresh -DSLANG_SLANG_LLVM_FLAVOR=USE_SYSTEM_LLVM -DLLVM_DIR=build/slang-llvm_install/lib/cmake/llvm -DClang_DIR=build/slang-llvm_install/lib/cmake/clang
+```
+
+Build with a following command:
+```
+$ cmake --build --preset release
 ```
 
 ### Making Changes
 Make your changes and ensure to follow our [Design Decisions](docs/design/README.md).
 
 ### Testing
-Test your changes thoroughly to ensure they do not introduce new issues. This is done by building and running a slang-test from the repository root directory. For more details about slang-test, please refer to a [Documentation on testing](tools/slang-test/README.md).
+Test your changes thoroughly to ensure they do not introduce new issues. This is done by building and running a "slang-test" from the repository root directory. For more details about "slang-test", please refer to a [Documentation on testing](tools/slang-test/README.md).
 
-If you are familiar with Workflow/Actions in github, you can check [Our Workflows](.github/workflows). [Windows-selfhosted.yml](.github/workflows/windows-selfhosted.yml) is a good starting point.
+> Note: slang-test is meant to launch from the root of the repository. It uses a hard-coded directory name "tests/" that is expected to exist in the current working directory.
+
+> Note: One of the options for `slang-test.exe` is `-api`, and it takes an additional keyword to specify which API to test. When the option is `-api all-cpu`, as an example, it means it tests all APIs except CPU. The minus sign (-) after `all` means "exclude" and you can "include" with plus sign (+) like `-api gl+dx11`.
+
+If you are familiar with Workflow/Actions in github, you can check [Our Workflows](.github/workflows). "Test Slang" section in [ci.yml](.github/workflows/ci.yml) is where "slang-test" runs.
 
 For a quick reference, follow the instructions below.
 
@@ -115,8 +163,9 @@ For a quick reference, follow the instructions below.
    ```
 1. Run slang-test with multiple threads. This may take 10 minutes or less depending on the performance of your computer.
    ```
-   C:\git\slang> bin\windows-x64\release\slang-test.exe -use-test-server -server-count 8
+   C:\git\slang> build\Release\bin\slang-test.exe -use-test-server -server-count 8
    ```
+   > Note: if you increase `-server-count` more than 16, you may find some of tests randomly fail. This is a known issue on the graphics driver side.
 1. Check whether the test is finished as expected.
 
 #### Linux
@@ -127,7 +176,7 @@ For a quick reference, follow the instructions below.
    ```
 1. Run slang-test with multiple threads. This may take 10 minutes or less depending on the performance of your computer.
    ```
-   $ ./bin/linux-x64/release/slang-test  -use-test-server -server-count 8
+   $ ./build/Release/bin/slang-test -use-test-server -server-count 8
    ```
 1. Check whether the test is finished as expected.
 

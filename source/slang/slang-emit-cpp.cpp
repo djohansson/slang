@@ -313,6 +313,34 @@ SlangResult CPPSourceEmitter::calcTypeName(IRType* type, CodeGenTarget target, S
             out << ">";
             return SLANG_OK;
         }
+        case kIROp_Specialize:
+        {
+            auto inner = getResolvedInstForDecorations(type);
+            if (auto targetIntrinsic = findBestTargetIntrinsicDecoration(inner, getTargetCaps()))
+            {
+                out << targetIntrinsic->getDefinition();
+                out << "<";
+                for (UInt i = 1; i < type->getOperandCount(); i++)
+                {
+                    if (i > 1) out << ", ";
+                    auto elementType = (IRType*)type->getOperand(i);
+                    SLANG_RETURN_ON_FAIL(calcTypeName(elementType, target, out));
+                }
+                out << ">";
+                return SLANG_OK;
+            }
+            return SLANG_FAIL;
+        }
+        case kIROp_IntLit:
+        {
+            auto intLit = as<IRIntLit>(type);
+            out << intLit->getValue();
+            return SLANG_OK;
+        }
+        case kIROp_AtomicType:
+        {
+            return calcTypeName((IRType*)type->getOperand(0), target, out);
+        }
         default:
         {
             if (isNominalOp(type->getOp()))
@@ -352,6 +380,9 @@ SlangResult CPPSourceEmitter::calcTypeName(IRType* type, CodeGenTarget target, S
                     // Assumes ordering of types matches ordering of operands.
 
                     UInt operandCount = type->getOperandCount();
+                    if (as<IRHLSLStructuredBufferTypeBase>(type))
+                        operandCount = 1;
+
                     if (operandCount)
                     {
                         m_writer->emit("<");
@@ -1085,6 +1116,7 @@ void CPPSourceEmitter::_emitType(IRType* type, DeclaratorInfo* declarator)
 void CPPSourceEmitter::emitIntrinsicCallExprImpl(
     IRCall*                         inst,
     UnownedStringSlice              intrinsicDefinition,
+    IRInst*                         intrinsicInst,
     EmitOpInfo const&               inOuterPrec)
 {
     // TODO: Much of this logic duplicates code that is already
@@ -1149,7 +1181,7 @@ void CPPSourceEmitter::emitIntrinsicCallExprImpl(
     }
 
     // Use default impl (which will do intrinsic special macro expansion as necessary)
-    return Super::emitIntrinsicCallExprImpl(inst, intrinsicDefinition, inOuterPrec);
+    return Super::emitIntrinsicCallExprImpl(inst, intrinsicDefinition, intrinsicInst, inOuterPrec);
 }
 
 void CPPSourceEmitter::emitLoopControlDecorationImpl(IRLoopControlDecoration* decl)
@@ -1702,6 +1734,10 @@ void CPPSourceEmitter::emitPreModuleImpl()
         m_writer->emit("using namespace SLANG_PRELUDE_NAMESPACE;\n");
         m_writer->emit("#endif\n\n");
     }
+    else if (m_target == CodeGenTarget::HostCPPSource)
+    {
+        m_writer->emit("namespace Slang{ inline void handleSignal(SignalType, char const*) {} }\n");
+    }
     Super::emitPreModuleImpl();
 }
 
@@ -1792,7 +1828,7 @@ void CPPSourceEmitter::_getExportStyle(IRInst* inst, bool& outIsExport, bool& ou
     outIsExport = false;
     outIsExternC = false;
     // Specially handle export, as we don't want to emit it multiple times
-    if (getTargetReq()->isWholeProgramRequest())
+    if (getTargetProgram()->getOptionSet().getBoolOption(CompilerOptionName::GenerateWholeProgram))
     {
         if (auto nameHint = inst->findDecoration<IRNameHintDecoration>())
         {

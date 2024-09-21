@@ -203,6 +203,27 @@ struct ASTDumpContext
         m_writer->emit("}");
     }
 
+    template <typename T, int n>
+    void dump(const ShortList<T, n>& list)
+    {
+        m_writer->emit(" { \n");
+        m_writer->indent();
+        for (Index i = 0; i < list.getCount(); ++i)
+        {
+            dump(list[i]);
+            if (i < list.getCount() - 1)
+            {
+                m_writer->emit(",\n");
+            }
+            else
+            {
+                m_writer->emit("\n");
+            }
+        }
+        m_writer->dedent();
+        m_writer->emit("}");
+    }
+
     void dump(SourceLoc sourceLoc)
     {
         if (m_dumpFlags & ASTDumpUtil::Flag::HideSourceLoc)
@@ -285,6 +306,10 @@ struct ASTDumpContext
     {
         m_writer->emit(UInt(v));
     }
+    void dump(UInt v)
+    {
+        m_writer->emit(v);
+    }
     void dump(int32_t v)
     {
         m_writer->emit(v);
@@ -298,7 +323,10 @@ struct ASTDumpContext
     {
         m_writer->emit(v);
     }
-    
+    void dump(CapabilityName v)
+    {
+        m_writer->emit(capabilityNameToString(v));
+    }
 
     void dump(const SemanticVersion& version)
     {
@@ -342,6 +370,10 @@ struct ASTDumpContext
     void dump(MarkupVisibility v)
     {
         m_writer->emit((int)v);
+    }
+    void dump(TypeTag tag)
+    {
+        m_writer->emit((int)tag);
     }
     void dump(const String& string)
     {
@@ -662,6 +694,18 @@ struct ASTDumpContext
         case SPIRVAsmOperand::SlangImmediateValue:
             m_writer->emit("!");
             break;
+        case SPIRVAsmOperand::RayPayloadFromLocation:
+            m_writer->emit("__rayPayloadFromLocation");
+            break;
+        case SPIRVAsmOperand::RayAttributeFromLocation:
+            m_writer->emit("__rayAttributeFromLocation");
+            break;
+        case SPIRVAsmOperand::RayCallableFromLocation:
+            m_writer->emit("__rayCallableFromLocation");
+            break;
+        case SPIRVAsmOperand::BuiltinVar:
+            m_writer->emit("builtin");
+            break;
         default:
             SLANG_UNREACHABLE("Unhandled case in ast dump for SPIRVAsmOperand");
         }
@@ -696,20 +740,21 @@ struct ASTDumpContext
     {
         m_writer->emit("capability_set(");
         bool isFirstSet = true;
-        for (auto& set : capSet.getExpandedAtoms())
+        for (auto& set : capSet.getAtomSets())
         {
             if (!isFirstSet)
             {
                 m_writer->emit(" | ");
             }
             bool isFirst = true;
-            for (auto atom : set.getExpandedAtoms())
+            for (auto atom : set)
             {
+                CapabilityName formattedAtom = (CapabilityName)atom;
                 if (!isFirst)
                 {
                     m_writer->emit("+");
                 }
-                dump(capabilityNameToString((CapabilityName)atom));
+                dump(capabilityNameToString((CapabilityName)formattedAtom));
                 isFirst = false;
             }
             isFirstSet = false;

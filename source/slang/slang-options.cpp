@@ -5,7 +5,7 @@
 
 #include "slang-options.h"
 
-#include "../../slang.h"
+#include "slang.h"
 
 #include "slang-compiler.h"
 #include "slang-profile.h"
@@ -35,8 +35,8 @@
 #include "../core/slang-char-util.h"
 
 #include "../core/slang-name-value.h"
-
 #include "../core/slang-command-options-writer.h"
+#include "slang-compiler-options.h"
 
 #include <assert.h>
 
@@ -45,124 +45,7 @@ namespace Slang {
 namespace { // anonymous
 
 // All of the options are given an unique enum
-enum class OptionKind
-{
-    // General
-
-    MacroDefine,
-    DepFile,
-    EntryPointName,
-    Specialize,
-    Help,
-    HelpStyle,
-    Include,
-    Language,
-    MatrixLayoutColumn,
-    MatrixLayoutRow,
-    ModuleName,
-    Output,
-    Profile,
-    Stage,
-    Target,
-    Version,
-    WarningsAsErrors,
-    DisableWarnings,
-    EnableWarning,
-    DisableWarning,
-    DumpWarningDiagnostics,
-    InputFilesRemain,
-    EmitIr,
-    ReportDownstreamTime,
-    ReportPerfBenchmark,
-    SkipSPIRVValidation,
-
-    SourceEmbedStyle,
-    SourceEmbedName,
-    SourceEmbedLanguage,
-
-    // Target
-
-    Capability,
-    DefaultImageFormatUnknown,
-    DisableDynamicDispatch,
-    DisableSpecialization,
-    FloatingPointMode,
-    DebugInformation,
-    LineDirectiveMode,
-    Optimization,
-    Obfuscate,
-
-    VulkanBindShift,
-    VulkanBindGlobals,
-    VulkanInvertY,
-    VulkanUseEntryPointName,
-    VulkanUseGLLayout,
-    VulkanEmitReflection,
-
-    GLSLForceScalarLayout,
-    EnableEffectAnnotations,
-
-    EmitSpirvViaGLSL,
-    EmitSpirvDirectly,
-    SPIRVCoreGrammarJSON,
-    
-    // Downstream
-
-    CompilerPath,
-    DefaultDownstreamCompiler,
-    DownstreamArgs,
-    PassThrough,
-
-    // Repro
-
-    DumpRepro,
-    DumpReproOnError,
-    ExtractRepro,
-    LoadRepro,
-    LoadReproDirectory,
-    ReproFallbackDirectory,
-
-    // Debugging
-
-    DumpAst,
-    DumpIntermediatePrefix,
-    DumpIntermediates,
-    DumpIr,
-    DumpIrIds,
-    PreprocessorOutput,
-    NoCodeGen,
-    OutputIncludes,
-    ReproFileSystem,
-    SerialIr,
-    SkipCodeGen,
-    ValidateIr,
-    VerbosePaths,
-    VerifyDebugSerialIr,
-
-    // Experimental
-
-    FileSystem,
-    Heterogeneous,
-    NoMangle,
-    AllowGLSL,
-
-    // Internal
-
-    ArchiveType,
-    CompileStdLib,
-    Doc,
-    IrCompression,
-    LoadStdLib,
-    ReferenceModule,
-    SaveStdLib,
-    SaveStdLibBinSource,
-    TrackLiveness,
-
-    // Deprecated
-    ParameterBlocksUseRegisterSpaces,
-
-    CountOf,
-};
+typedef CompilerOptionName OptionKind;
 
 struct Option
 {
@@ -406,6 +289,15 @@ void initCommandOptions(CommandOptions& options)
         { OptionKind::Language,     "-lang", "-lang <language>", "Set the language for the following input files."},
         { OptionKind::MatrixLayoutColumn, "-matrix-layout-column-major", nullptr, "Set the default matrix layout to column-major."},
         { OptionKind::MatrixLayoutRow,"-matrix-layout-row-major", nullptr, "Set the default matrix layout to row-major."},
+        { OptionKind::RestrictiveCapabilityCheck,"-restrictive-capability-check", nullptr, "Many capability warnings will become an error."},
+        { OptionKind::ZeroInitialize, "-zero-initialize", nullptr, 
+        "Initialize all variables to zero."
+        "Structs will set all struct-fields without an init expression to 0."
+        "All variables will call their default constructor if not explicitly initialized as usual."},
+        { OptionKind::IgnoreCapabilities,"-ignore-capabilities", nullptr, "Do not warn or error if capabilities are violated"},
+        { OptionKind::MinimumSlangOptimization, "-minimum-slang-optimization", nullptr, "Perform minimum code optimization in Slang to favor compilation time."},
+        { OptionKind::DisableNonEssentialValidations, "-disable-non-essential-validations", nullptr, "Disable non-essential IR validations such as use of uninitialized variables."},
+        { OptionKind::DisableSourceMap, "-disable-source-map", nullptr, "Disable source mapping in the Obfuscation."},
         { OptionKind::ModuleName,     "-module-name", "-module-name <name>", 
         "Set the module name to use when compiling multiple .slang source files into a single module."},
         { OptionKind::Output, "-o", "-o <path>", 
@@ -447,6 +339,7 @@ void initCommandOptions(CommandOptions& options)
         { OptionKind::InputFilesRemain, "--", nullptr, "Treat the rest of the command line as input files."},
         { OptionKind::ReportDownstreamTime, "-report-downstream-time", nullptr, "Reports the time spent in the downstream compiler." },
         { OptionKind::ReportPerfBenchmark, "-report-perf-benchmark", nullptr, "Reports compiler performance benchmark results." },
+        { OptionKind::ReportCheckpointIntermediates, "-report-checkpoint-intermediates", nullptr, "Reports information about checkpoint contexts used for reverse-mode automatic differentiation." },
         { OptionKind::SkipSPIRVValidation, "-skip-spirv-validation", nullptr, "Skips spirv validation." },
         { OptionKind::SourceEmbedStyle, "-source-embed-style", "-source-embed-style <source-embed-style>",
         "If source embedding is enabled, defines the style used. When enabled (with any style other than `none`), "
@@ -459,6 +352,9 @@ void initCommandOptions(CommandOptions& options)
         "The name used as the basis for variables output for source embedding."},
         { OptionKind::SourceEmbedLanguage, "-source-embed-language", "-source-embed-language <language>",
         "The language to be used for source embedding. Defaults to C/C++. Currently only C/C++ are supported"},
+        { OptionKind::DisableShortCircuit, "-disable-short-circuit", nullptr, "Disable short-circuiting for \"&&\" and \"||\" operations" },
+        { OptionKind::UnscopedEnum, "-unscoped-enum", nullptr, "Treat enums types as unscoped by default."},
+        { OptionKind::PreserveParameters, "-preserve-params", nullptr, "Preserve all resource parameters in the output code, even if they are not used by the shader."},
     };
 
     _addOptions(makeConstArrayView(generalOpts), options);
@@ -501,8 +397,9 @@ void initCommandOptions(CommandOptions& options)
         { OptionKind::Optimization, "-O...", "-O<optimization-level>", "Set the optimization level."},
         { OptionKind::Obfuscate, "-obfuscate", nullptr, "Remove all source file information from outputs." },
         { OptionKind::GLSLForceScalarLayout,
-         "-force-glsl-scalar-layout", nullptr,
-         "Force using scalar block layout for uniform and shader storage buffers in GLSL output."},
+         "-force-glsl-scalar-layout,-fvk-use-scalar-layout", nullptr,
+         "Make data accessed through ConstantBuffer, ParameterBlock, StructuredBuffer, ByteAddressBuffer and general pointers follow the 'scalar' layout when targeting GLSL or SPIRV."},
+        { OptionKind::ForceDXLayout, "-fvk-use-dx-layout", nullptr, "Pack members using FXCs member packing rules when targeting GLSL or SPIRV." },
         { OptionKind::VulkanBindShift, vkShiftNames.getBuffer(), "-fvk-<vulkan-shift>-shift <N> <space>", 
         "For example '-fvk-b-shift <N> <space>' shifts by N the inferred binding numbers for all resources in 'b' registers of space <space>. "
         "For a resource attached with :register(bX, <space>) but not [vk::binding(...)], "
@@ -514,27 +411,26 @@ void initCommandOptions(CommandOptions& options)
         "* [DXC description](https://github.com/Microsoft/DirectXShaderCompiler/blob/main/docs/SPIR-V.rst#implicit-binding-number-assignment)\n" 
         "* [GLSL wiki](https://github.com/KhronosGroup/glslang/wiki/HLSL-FAQ#auto-mapped-binding-numbers)\n" },
         { OptionKind::VulkanBindGlobals, "-fvk-bind-globals", "-fvk-bind-globals <N> <descriptor-set>",
-        "Places the $Globals cbuffer at descriptor set <descriptor-set> and binding <N>."},
+        "Places the $Globals cbuffer at descriptor set <descriptor-set> and binding <N>.\n"
+        "It lets you specify the descriptor for the source at a certain register.\n"
+        "* [DXC description](https://github.com/Microsoft/DirectXShaderCompiler/blob/main/docs/SPIR-V.rst#implicit-binding-number-assignment)\n" },
         { OptionKind::VulkanInvertY, "-fvk-invert-y", nullptr, "Negates (additively inverts) SV_Position.y before writing to stage output."},
+        { OptionKind::VulkanUseDxPositionW, "-fvk-use-dx-position-w", nullptr, "Reciprocates (multiplicatively inverts) SV_Position.w after reading from stage input. For use in fragment shaders only."},
         { OptionKind::VulkanUseEntryPointName, "-fvk-use-entrypoint-name", nullptr, "Uses the entrypoint name from the source instead of 'main' in the spirv output."},
         { OptionKind::VulkanUseGLLayout, "-fvk-use-gl-layout", nullptr, "Use std430 layout instead of D3D buffer layout for raw buffer load/stores."},
         { OptionKind::VulkanEmitReflection, "-fspv-reflect", nullptr, "Include reflection decorations in the resulting SPIRV for shader parameters."},
         { OptionKind::EnableEffectAnnotations,
          "-enable-effect-annotations", nullptr, 
          "Enables support for legacy effect annotation syntax."},
-#if defined(SLANG_CONFIG_DEFAULT_SPIRV_DIRECT)
         { OptionKind::EmitSpirvViaGLSL, "-emit-spirv-via-glsl", nullptr,
         "Generate SPIR-V output by compiling generated GLSL with glslang" },
         { OptionKind::EmitSpirvDirectly, "-emit-spirv-directly", nullptr,
-        "Generate SPIR-V output direclty (default)" },
-#else
-        { OptionKind::EmitSpirvViaGLSL, "-emit-spirv-via-glsl", nullptr,
-        "Generate SPIR-V output by compiling generated GLSL with glslang (default)" },
-        { OptionKind::EmitSpirvDirectly, "-emit-spirv-directly", nullptr,
-        "Generate SPIR-V output direclty rather than by compiling generated GLSL with glslang" },
+        "Generate SPIR-V output directly (default)" },
         { OptionKind::SPIRVCoreGrammarJSON, "-spirv-core-grammar", nullptr,
         "A path to a specific spirv.core.grammar.json to use when generating SPIR-V output" },
-#endif
+        { OptionKind::IncompleteLibrary, "-incomplete-library", nullptr,
+        "Allow generating code from incomplete libraries with unresolved external functions" },
+        { OptionKind::EmbedDownstreamIR, "-embed-downstream-ir", nullptr, "Embed downstream IR into emitted slang IR" },
     };
 
     _addOptions(makeConstArrayView(targetOpts), options);
@@ -631,7 +527,13 @@ void initCommandOptions(CommandOptions& options)
         "Set the filesystem hook to use for a compile request."},
         { OptionKind::Heterogeneous, "-heterogeneous", nullptr, "Output heterogeneity-related code." },
         { OptionKind::NoMangle, "-no-mangle", nullptr, "Do as little mangling of names as possible." },
+        { OptionKind::NoHLSLBinding, "-no-hlsl-binding", nullptr, "Do not include explicit parameter binding semantics in the output HLSL code,"
+                                                                  "except for parameters that has explicit bindings in the input source." },
+        { OptionKind::NoHLSLPackConstantBufferElements, "-no-hlsl-pack-constant-buffer-elements", nullptr,
+        "Do not pack elements of constant buffers into structs in the output HLSL code." },
+        { OptionKind::ValidateUniformity, "-validate-uniformity", nullptr, "Perform uniformity validation analysis." },
         { OptionKind::AllowGLSL, "-allow-glsl", nullptr, "Enable GLSL as an input language." },
+        { OptionKind::EnableExperimentalPasses, "-enable-experimental-passes", nullptr, "Enable experimental compiler passes" },
     };
     _addOptions(makeConstArrayView(experimentalOpts), options);
 
@@ -655,6 +557,7 @@ void initCommandOptions(CommandOptions& options)
         { OptionKind::SaveStdLibBinSource, "-save-stdlib-bin-source","-save-stdlib-bin-source <filename>", "Same as -save-stdlib but output "
         "the data as a C array.\n"},
         { OptionKind::TrackLiveness, "-track-liveness", nullptr, "Enable liveness tracking. Places SLANG_LIVE_START, and SLANG_LIVE_END in output source to indicate value liveness." },
+        { OptionKind::LoopInversion, "-loop-inversion", nullptr, "Enable loop inversion in the code-gen optimization. Default is off" },
     };
     _addOptions(makeConstArrayView(internalOpts), options);
 
@@ -670,11 +573,11 @@ void initCommandOptions(CommandOptions& options)
 
     // We can now check that the whole range is available. If this fails it means there 
     // is an enum in the list that hasn't been setup as an option!
-    SLANG_ASSERT(options.hasContiguousUserValueRange(CommandOptions::LookupKind::Option, UserValue(0), UserValue(OptionKind::CountOf)));
+    SLANG_ASSERT(options.hasContiguousUserValueRange(CommandOptions::LookupKind::Option, UserValue(0), UserValue(OptionKind::CountOfParsableOptions)));
     SLANG_ASSERT(options.hasContiguousUserValueRange(CommandOptions::LookupKind::Category, UserValue(0), UserValue(ValueCategory::CountOf)));
 }
 
-SlangResult _addLibraryReference(EndToEndCompileRequest* req, IArtifact* artifact);
+SlangResult _addLibraryReference(EndToEndCompileRequest* req, String path, IArtifact* artifact, bool includeEntryPoint);
 
 class ReproPathVisitor : public Slang::Path::Visitor
 {
@@ -767,12 +670,8 @@ struct OptionsParser
     struct RawTarget
     {
         CodeGenTarget       format = CodeGenTarget::Unknown;
-        ProfileVersion      profileVersion = ProfileVersion::Unknown;
-        SlangTargetFlags    targetFlags = kDefaultTargetFlags;
         int                 targetID = -1;
-        FloatingPointMode   floatingPointMode = FloatingPointMode::Default;
-        bool                forceGLSLScalarLayout = false;
-        List<CapabilityName> capabilityAtoms;
+        CompilerOptionSet   optionSet;
 
         // State for tracking command-line errors
         bool conflictingProfilesSet = false;
@@ -802,8 +701,9 @@ struct OptionsParser
 
     RawTarget* getCurrentTarget();
     void setProfileVersion(RawTarget* rawTarget, ProfileVersion profileVersion);
+    void setProfile(RawTarget* rawTarget, Profile profile);
     void addCapabilityAtom(RawTarget* rawTarget, CapabilityName atom);
-    
+
     void setFloatingPointMode(RawTarget* rawTarget, FloatingPointMode mode);
     
     SlangResult parse(
@@ -856,6 +756,7 @@ struct OptionsParser
     void _appendMinimalUsage(StringBuilder& out);
     void _outputMinimalUsage();
 
+    SlangResult addReferencedModule(String path, SourceLoc loc, bool includeEntryPoint);
     SlangResult _parseReferenceModule(const CommandLineArg& arg);
     SlangResult _parseReproFileSystem(const CommandLineArg& arg);
     SlangResult _parseLoadRepro(const CommandLineArg& arg);
@@ -886,41 +787,27 @@ struct OptionsParser
     // before the first "proper" entry point is specified.
     RawEntryPoint m_defaultEntryPoint;
 
-    SlangCompileFlags m_flags = 0;
-
-    RefPtr<HLSLToVulkanLayoutOptions> m_hlslToVulkanLayoutOptions;
-
     List<RawTranslationUnit> m_rawTranslationUnits;
 
     // If we already have a translation unit for Slang code, then this will give its index.
     // If not, it will be `-1`.
     int m_slangTranslationUnitIndex = -1;
 
-    // The number of input files that have been specified
-    int m_inputPathCount = 0;
-
     int m_translationUnitCount = 0;
     int m_currentTranslationUnitIndex = -1;
 
+    bool m_hasLoadedRepro = false;
+    bool m_compileStdLib = false;
+    slang::CompileStdLibFlags m_compileStdLibFlags;
+
+    SlangArchiveType m_archiveType = SLANG_ARCHIVE_TYPE_RIFF_LZ4;
+    
     List<RawOutput> m_rawOutputs;
 
     DiagnosticSink m_parseSink;
     DiagnosticSink* m_sink = nullptr;
 
     FrontEndCompileRequest* m_frontEndReq = nullptr;
-
-    SlangMatrixLayoutMode m_defaultMatrixLayoutMode = SLANG_MATRIX_LAYOUT_MODE_UNKNOWN;
-
-        // The default archive type is zip
-    SlangArchiveType m_archiveType = SLANG_ARCHIVE_TYPE_ZIP;
-
-    bool m_compileStdLib = false;
-    slang::CompileStdLibFlags m_compileStdLibFlags = 0;
-    bool m_hasLoadedRepro = false;
-
-    String m_spirvCoreGrammarJSONPath;
-
-    bool m_allowGLSLInput = false;
 
     CommandLineReader m_reader;
 
@@ -1062,13 +949,15 @@ SlangSourceLanguage findSourceLanguageFromPath(const String& path, Stage& outImp
 
 SlangResult OptionsParser::addInputPath(char const* inPath, SourceLanguage langOverride )
 {
-    m_inputPathCount++;
-
     // look at the extension on the file name to determine
     // how we should handle it.
     String path = String(inPath);
 
-    if (path.endsWith(".slang") || langOverride == SourceLanguage::Slang)
+    if (path.endsWith(".slang-module") || path.endsWith(".slang-lib"))
+    {
+        return addReferencedModule(path, SourceLoc(), false);
+    }
+    else if (path.endsWith(".slang") || langOverride == SourceLanguage::Slang)
     {
         // Plain old slang code
         addInputSlangPath(path);
@@ -1076,8 +965,14 @@ SlangResult OptionsParser::addInputPath(char const* inPath, SourceLanguage langO
     }
 
     Stage impliedStage = Stage::Unknown;
-    SlangSourceLanguage sourceLanguage = langOverride == SourceLanguage::Unknown ? findSourceLanguageFromPath(path, impliedStage) : SlangSourceLanguage(langOverride);
-
+    SlangSourceLanguage sourceLanguage = SlangSourceLanguage(langOverride);
+    if (sourceLanguage == SLANG_SOURCE_LANGUAGE_UNKNOWN)
+    {
+        if (m_requestImpl->getLinkage()->m_optionSet.hasOption(CompilerOptionName::Language))
+            sourceLanguage = SlangSourceLanguage(m_requestImpl->getLinkage()->m_optionSet.getEnumOption<SlangSourceLanguage>(CompilerOptionName::Language));
+        else
+            sourceLanguage = findSourceLanguageFromPath(path, impliedStage);
+    }
     if (sourceLanguage == SLANG_SOURCE_LANGUAGE_UNKNOWN)
     {
         m_requestImpl->getSink()->diagnose(SourceLoc(), Diagnostics::cannotDeduceSourceLanguage, inPath);
@@ -1110,17 +1005,11 @@ void OptionsParser::addOutputPath(char const* inPath)
         ext == toSlice("zip"))
     {
         // These extensions don't indicate a artifact container, just that we want to emit IR
-        if (ext == toSlice("slang-module") ||
-            ext == toSlice("slang-lib"))
-        {
-            // We want to emit IR 
-            m_requestImpl->m_emitIr = true;
-        }
-        else
-        {
-            // We want to write out in an artfact "container", that can hold multiple artifacts.
-            m_compileRequest->setOutputContainerFormat(SLANG_CONTAINER_FORMAT_SLANG_MODULE);
-        }
+        // We want to emit IR
+        m_requestImpl->m_emitIr = true;
+
+        // We want to write out in an artfact "container", that can hold multiple artifacts.
+        m_compileRequest->setOutputContainerFormat(SLANG_CONTAINER_FORMAT_SLANG_MODULE);
 
         m_requestImpl->m_containerOutputPath = path;
     }
@@ -1161,26 +1050,47 @@ OptionsParser::RawTarget* OptionsParser::getCurrentTarget()
 
 void OptionsParser::setProfileVersion(RawTarget* rawTarget, ProfileVersion profileVersion)
 {
-    if (rawTarget->profileVersion != ProfileVersion::Unknown)
+    if (rawTarget->optionSet.getProfileVersion() != ProfileVersion::Unknown)
     {
         rawTarget->redundantProfileSet = true;
 
-        if (profileVersion != rawTarget->profileVersion)
+        if (profileVersion != rawTarget->optionSet.getProfileVersion())
         {
             rawTarget->conflictingProfilesSet = true;
         }
     }
-    rawTarget->profileVersion = profileVersion;
+    rawTarget->optionSet.setProfileVersion(profileVersion);
+}
+
+void OptionsParser::setProfile(RawTarget* rawTarget, Profile profile)
+{
+    if (rawTarget->optionSet.getProfile() != Profile::Unknown)
+    {
+        rawTarget->redundantProfileSet = true;
+
+        if (profile != rawTarget->optionSet.getProfile())
+        {
+            rawTarget->conflictingProfilesSet = true;
+        }
+    }
+    rawTarget->optionSet.setProfile(profile);
 }
 
 void OptionsParser::addCapabilityAtom(RawTarget* rawTarget, CapabilityName atom)
 {
-    rawTarget->capabilityAtoms.add(atom);
+    CapabilitySet capSet(atom);
+    auto stageAtom = capSet.getUniquelyImpliedStageAtom();
+    if (stageAtom != CapabilityAtom::Invalid)
+    {
+        Stage stage = getStageFromAtom(stageAtom);
+        setStage(getCurrentEntryPoint(), stage);
+    }
+    rawTarget->optionSet.addCapabilityAtom(atom);
 }
 
 void OptionsParser::setFloatingPointMode(RawTarget* rawTarget, FloatingPointMode mode)
 {
-    rawTarget->floatingPointMode = mode;
+    rawTarget->optionSet.set(CompilerOptionName::FloatingPointMode, mode);
 }
 
 /* static */bool OptionsParser::_passThroughRequiresStage(PassThroughMode passThrough)
@@ -1290,67 +1200,6 @@ SlangResult OptionsParser::_compileReproDirectory(SlangSession* session, EndToEn
         const char end[] = "(END)\n";
         stdOut->write(end, SLANG_COUNT_OF(end) - 1);
     }
-
-    return SLANG_OK;
-}
-
-SlangResult OptionsParser::_overrideDiagnostics(const UnownedStringSlice& identifierList, Severity originalSeverity, Severity overrideSeverity)
-{
-    List<UnownedStringSlice> slices;
-    StringUtil::split(identifierList, ',', slices);
-
-    for (const auto& slice : slices)
-    {
-        SLANG_RETURN_ON_FAIL(_overrideDiagnostic(slice, originalSeverity, overrideSeverity));
-    }
-    return SLANG_OK;
-}
-
-SlangResult OptionsParser::_overrideDiagnostic(const UnownedStringSlice& identifier, Severity originalSeverity, Severity overrideSeverity)
-{
-    auto diagnosticsLookup = getDiagnosticsLookup();
-
-    const DiagnosticInfo* diagnostic = nullptr;
-    Int diagnosticId = -1;
-
-    // If it starts with a digit we assume it a number 
-    if (identifier.getLength() > 0 && (CharUtil::isDigit(identifier[0]) || identifier[0] == '-'))
-    {
-        if (SLANG_FAILED(StringUtil::parseInt(identifier, diagnosticId)))
-        {
-            m_sink->diagnose(SourceLoc(), Diagnostics::unknownDiagnosticName, identifier);
-            return SLANG_FAIL;
-        }
-
-        // If we use numbers, we don't worry if we can't find a diagnostic
-        // and silently ignore. This was the previous behavior, and perhaps
-        // provides a way to safely disable warnings, without worrying about
-        // the version of the compiler.
-        diagnostic = diagnosticsLookup->getDiagnosticById(diagnosticId);
-    }
-    else
-    {
-        diagnostic = diagnosticsLookup->findDiagnosticByName(identifier);
-        if (!diagnostic)
-        {
-            m_sink->diagnose(SourceLoc(), Diagnostics::unknownDiagnosticName, identifier);
-            return SLANG_FAIL;
-        }
-        diagnosticId = diagnostic->id;
-    }
-
-    // If we are only allowing certain original severities check it's the right type
-    if (diagnostic && originalSeverity != Severity::Disable && diagnostic->severity != originalSeverity)
-    {
-        // Strictly speaking the diagnostic name is known, but it's not the right severity
-        // to be converted from, so it is an 'unknown name' in the context of severity...
-        // Or perhaps we want another diagnostic
-        m_sink->diagnose(SourceLoc(), Diagnostics::unknownDiagnosticName, identifier);
-        return SLANG_FAIL;
-    }
-
-    // Override the diagnostic severity in the sink
-    m_requestImpl->getSink()->overrideDiagnosticSeverity(int(diagnosticId), overrideSeverity, diagnostic);
 
     return SLANG_OK;
 }
@@ -1490,20 +1339,13 @@ SlangResult OptionsParser::_expectInt(const CommandLineArg& initArg, Int& outInt
     return SLANG_OK;
 }
 
-SlangResult OptionsParser::_parseReferenceModule(const CommandLineArg& arg)
+SlangResult OptionsParser::addReferencedModule(String path, SourceLoc loc, bool includeEntryPoint)
 {
-    SLANG_UNUSED(arg);
-
-    CommandLineArg referenceModuleName;
-    SLANG_RETURN_ON_FAIL(m_reader.expectArg(referenceModuleName));
-
-    const auto path = referenceModuleName.value;
-
     auto desc = ArtifactDescUtil::getDescFromPath(path.getUnownedSlice());
 
     if (desc.kind == ArtifactKind::Unknown)
     {
-        m_sink->diagnose(referenceModuleName.loc, Diagnostics::unknownLibraryKind, Path::getPathExt(path));
+        m_sink->diagnose(loc, Diagnostics::unknownLibraryKind, Path::getPathExt(path));
         return SLANG_FAIL;
     }
 
@@ -1521,7 +1363,7 @@ SlangResult OptionsParser::_parseReferenceModule(const CommandLineArg& arg)
 
     if (!ArtifactDescUtil::isLinkable(desc))
     {
-        m_sink->diagnose(referenceModuleName.loc, Diagnostics::kindNotLinkable, Path::getPathExt(path));
+        m_sink->diagnose(loc, Diagnostics::kindNotLinkable, Path::getPathExt(path));
         return SLANG_FAIL;
     }
 
@@ -1546,14 +1388,34 @@ SlangResult OptionsParser::_parseReferenceModule(const CommandLineArg& arg)
         fileRep = new OSFileArtifactRepresentation(IOSFileArtifactRepresentation::Kind::Reference, path.getUnownedSlice(), nullptr);
         if (!fileRep->exists())
         {
-            m_sink->diagnose(referenceModuleName.loc, Diagnostics::libraryDoesNotExist, path);
+            m_sink->diagnose(loc, Diagnostics::libraryDoesNotExist, path);
             return SLANG_FAIL;
         }
     }
     artifact->addRepresentation(fileRep);
 
-    SLANG_RETURN_ON_FAIL(_addLibraryReference(m_requestImpl, artifact));
+    SLANG_RETURN_ON_FAIL(_addLibraryReference(m_requestImpl, path, artifact, includeEntryPoint));
+    for (Index i = m_rawTranslationUnits.getCount(); i < m_requestImpl->getTranslationUnitCount(); i++)
+    {
+        RawTranslationUnit rawTU;
+        rawTU.translationUnitID = (int)i;
+        rawTU.impliedStage = Stage::Unknown;
+        rawTU.sourceLanguage = SLANG_SOURCE_LANGUAGE_SLANG;
+        m_rawTranslationUnits.add(rawTU);
+    }
+    m_currentTranslationUnitIndex = m_requestImpl->getTranslationUnitCount() - 1;
+    m_slangTranslationUnitIndex = m_currentTranslationUnitIndex;
     return SLANG_OK;
+}
+
+SlangResult OptionsParser::_parseReferenceModule(const CommandLineArg& arg)
+{
+    SLANG_UNUSED(arg);
+
+    CommandLineArg referenceModuleName;
+    SLANG_RETURN_ON_FAIL(m_reader.expectArg(referenceModuleName));
+
+    return addReferencedModule(referenceModuleName.value, referenceModuleName.loc, true);
 }
 
 SlangResult OptionsParser::_parseReproFileSystem(const CommandLineArg& arg)
@@ -1750,10 +1612,8 @@ SlangResult OptionsParser::_parseProfile(const CommandLineArg& arg)
     {
         auto profile = Profile(profileID);
 
-        setProfileVersion(getCurrentTarget(), profile.getVersion());
+        setProfile(this->getCurrentTarget(), profile);
 
-        // A `-profile` option that also specifies a stage (e.g., `-profile vs_5_0`)
-        // should be treated like a composite (e.g., `-profile sm_5_0 -stage vertex`)
         auto stage = profile.getStage();
         if (stage != Stage::Unknown)
         {
@@ -1784,20 +1644,28 @@ SlangResult OptionsParser::_parse(
     int             argc,
     char const* const* argv)
 {
-    // Copy some state out of the current request, in case we've been called
-    // after some other initialization has been performed.
-    m_flags = m_requestImpl->getFrontEndReq()->compileFlags;
-
     // Set up the args
     CommandLineArgs args(m_cmdLineContext);
+
     // Converts input args into args in 'args'.
     // Doing so will allocate some SourceLoc space from the CommandLineContext.
     args.setArgs(argv, argc);
 
+    auto linkage = m_requestImpl->getLinkage();
+
+    // Before we do anything else lets strip out all of the downstream arguments.
+    DownstreamArgs downstreamArgs(m_cmdLineContext);
+
+
+    SLANG_RETURN_ON_FAIL(downstreamArgs.stripDownstreamArgs(args, 0, m_sink));
+    for (auto& entry : downstreamArgs.m_entries)
     {
-        auto linkage = m_requestImpl->getLinkage();
-        // Before we do anything else lets strip out all of the downstream arguments.
-        SLANG_RETURN_ON_FAIL(linkage->m_downstreamArgs.stripDownstreamArgs(args, 0, m_sink));
+        String serializedArgs = entry.args.serialize();
+        CompilerOptionValue v;
+        v.kind = CompilerOptionValueKind::String;
+        v.stringValue = entry.name;
+        v.stringValue2 = serializedArgs;
+        linkage->m_optionSet.add(CompilerOptionName::DownstreamArgs, v);
     }
 
     m_reader.init(&args, m_sink);
@@ -1827,9 +1695,55 @@ SlangResult OptionsParser::_parse(
 
         switch (optionKind)
         {
-            case OptionKind::NoMangle: m_flags |= SLANG_COMPILE_FLAG_NO_MANGLING; break;
-            case OptionKind::AllowGLSL: m_allowGLSLInput = true; break;
-            case OptionKind::EmitIr: m_requestImpl->m_emitIr = true; break;
+            case OptionKind::NoMangle:
+            case OptionKind::ValidateUniformity:
+            case OptionKind::AllowGLSL:
+            case OptionKind::EnableExperimentalPasses:
+            case OptionKind::EmitIr:
+            case OptionKind::DumpIntermediates:
+            case OptionKind::DumpReproOnError:
+            case OptionKind::ReportDownstreamTime:
+            case OptionKind::ReportPerfBenchmark:
+            case OptionKind::ReportCheckpointIntermediates:
+            case OptionKind::SkipSPIRVValidation:
+            case OptionKind::DisableSpecialization:
+            case OptionKind::DisableDynamicDispatch:
+            case OptionKind::TrackLiveness:
+            case OptionKind::SkipCodeGen:
+            case OptionKind::ParameterBlocksUseRegisterSpaces:
+            case OptionKind::ValidateIr:
+            case OptionKind::DumpIr:
+            case OptionKind::VulkanInvertY:
+            case OptionKind::VulkanUseDxPositionW:
+            case OptionKind::VulkanUseEntryPointName:
+            case OptionKind::VulkanUseGLLayout:
+            case OptionKind::VulkanEmitReflection:
+            case OptionKind::ZeroInitialize:
+            case OptionKind::IgnoreCapabilities:
+            case OptionKind::RestrictiveCapabilityCheck:
+            case OptionKind::MinimumSlangOptimization:
+            case OptionKind::DisableNonEssentialValidations:
+            case OptionKind::DisableSourceMap:
+            case OptionKind::DefaultImageFormatUnknown:
+            case OptionKind::Obfuscate:
+            case OptionKind::OutputIncludes:
+            case OptionKind::PreprocessorOutput:
+            case OptionKind::DumpAst:
+            case OptionKind::IncompleteLibrary:
+            case OptionKind::NoHLSLBinding:
+            case OptionKind::NoHLSLPackConstantBufferElements:
+            case OptionKind::LoopInversion:
+            case OptionKind::UnscopedEnum:
+            case OptionKind::PreserveParameters:
+                linkage->m_optionSet.set(optionKind, true);
+                break;
+            case OptionKind::MatrixLayoutRow:
+            case OptionKind::MatrixLayoutColumn:
+                linkage->m_optionSet.setMatrixLayoutMode((optionKind == OptionKind::MatrixLayoutRow) ? MatrixLayoutMode::kMatrixLayoutMode_RowMajor : MatrixLayoutMode::kMatrixLayoutMode_ColumnMajor);
+                break;
+            case OptionKind::NoCodeGen:
+                linkage->m_optionSet.set(OptionKind::SkipCodeGen, true); break;
+                break;
             case OptionKind::LoadStdLib:
             {
                 CommandLineArg fileName;
@@ -1839,10 +1753,18 @@ SlangResult OptionsParser::_parse(
                 ScopedAllocation contents;
                 SLANG_RETURN_ON_FAIL(File::readAllBytes(fileName.value, contents));
                 SLANG_RETURN_ON_FAIL(m_session->loadStdLib(contents.getData(), contents.getSizeInBytes()));
+                
+                // Ensure that the linkage's AST builder is up-to-date.
+                linkage->getASTBuilder()->m_cachedNodes = asInternal(m_session)->getGlobalASTBuilder()->m_cachedNodes;
+
                 break;
             }
             case OptionKind::CompileStdLib: m_compileStdLib = true; break;
-            case OptionKind::ArchiveType:   SLANG_RETURN_ON_FAIL(_expectValue(m_archiveType)); break;
+            case OptionKind::ArchiveType:
+            {
+                SLANG_RETURN_ON_FAIL(_expectValue(m_archiveType));
+                break;
+            }
             case OptionKind::SaveStdLib:
             {
                 CommandLineArg fileName;
@@ -1871,8 +1793,6 @@ SlangResult OptionsParser::_parse(
                 File::writeAllText(fileName.value, builder);
                 break;
             }
-            case OptionKind::NoCodeGen: m_flags |= SLANG_COMPILE_FLAG_NO_CODEGEN; break;
-            case OptionKind::DumpIntermediates: m_compileRequest->setDumpIntermediates(true); break;
             case OptionKind::DumpIrIds:
             {
                 m_frontEndReq->m_irDumpOptions.flags |= IRDumpOptions::Flag::DumpDebugIds;
@@ -1882,31 +1802,26 @@ SlangResult OptionsParser::_parse(
             {
                 CommandLineArg prefix;
                 SLANG_RETURN_ON_FAIL(m_reader.expectArg(prefix));
-                m_requestImpl->m_dumpIntermediatePrefix = prefix.value;
+                linkage->m_optionSet.set(CompilerOptionName::DumpIntermediatePrefix, prefix.value);
                 break;
             }
-            case OptionKind::OutputIncludes: m_frontEndReq->outputIncludes = true; break;
-            case OptionKind::DumpIr: m_frontEndReq->shouldDumpIR = true; break;
-            case OptionKind::PreprocessorOutput: m_frontEndReq->outputPreprocessor = true; break;
-            case OptionKind::DumpAst: m_frontEndReq->shouldDumpAST = true; break;
             case OptionKind::Doc:
             {
                 // If compiling stdlib is enabled, will write out documentation
                 m_compileStdLibFlags |= slang::CompileStdLibFlag::WriteDocumentation;
 
                 // Enable writing out documentation on the req
-                m_frontEndReq->shouldDocument = true;
+                linkage->m_optionSet.set(CompilerOptionName::Doc, true);
                 break;
             }
             case OptionKind::DumpRepro:
             {
                 CommandLineArg dumpRepro;
                 SLANG_RETURN_ON_FAIL(m_reader.expectArg(dumpRepro));
-                m_requestImpl->m_dumpRepro = dumpRepro.value;
+                linkage->m_optionSet.set(OptionKind::DumpRepro, dumpRepro.value);
                 m_compileRequest->enableReproCapture();
                 break;
             }
-            case OptionKind::DumpReproOnError: m_requestImpl->m_dumpReproOnError = true; break;
             case OptionKind::ExtractRepro:
             {
                 CommandLineArg reproName;
@@ -1920,21 +1835,6 @@ SlangResult OptionsParser::_parse(
                         return res;
                     }
                 }
-                break;
-            }
-            case OptionKind::ReportDownstreamTime:
-            {
-                m_compileRequest->setReportDownstreamTime(true);
-                break;
-            }
-            case OptionKind::ReportPerfBenchmark:
-            {
-                m_compileRequest->setReportPerfBenchmark(true);
-                break;
-            }
-            case OptionKind::SkipSPIRVValidation:
-            {
-                m_compileRequest->setSkipSPIRVValidation(true);
                 break;
             }
             case OptionKind::ModuleName:
@@ -1986,64 +1886,55 @@ SlangResult OptionsParser::_parse(
             }
             case OptionKind::ReproFileSystem: SLANG_RETURN_ON_FAIL(_parseReproFileSystem(arg)); break;
             case OptionKind::SerialIr: m_frontEndReq->useSerialIRBottleneck = true; break;
-            case OptionKind::DisableSpecialization: m_requestImpl->disableSpecialization = true; break;
-            case OptionKind::DisableDynamicDispatch: m_requestImpl->disableDynamicDispatch = true; break;
-            case OptionKind::TrackLiveness: m_requestImpl->setTrackLiveness(true); break;
-            case OptionKind::VerbosePaths: m_requestImpl->getSink()->setFlag(DiagnosticSink::Flag::VerbosePath); break;
+            case OptionKind::VerbosePaths:
+                m_requestImpl->getSink()->setFlag(DiagnosticSink::Flag::VerbosePath); break;
             case OptionKind::DumpWarningDiagnostics: _dumpDiagnostics(Severity::Warning); break;
             case OptionKind::WarningsAsErrors:
             {
                 CommandLineArg operand;
                 SLANG_RETURN_ON_FAIL(m_reader.expectArg(operand));
-
-                if (operand.value == "all")
-                {
-                    // TODO(JS):
-                    // Perhaps there needs to be a way to disable this selectively.
-                    m_requestImpl->getSink()->setFlag(DiagnosticSink::Flag::TreatWarningsAsErrors);
-                }
-                else
-                {
-                    SLANG_RETURN_ON_FAIL(_overrideDiagnostics(operand.value.getUnownedSlice(), Severity::Warning, Severity::Error));
-                }
+                linkage->m_optionSet.add(OptionKind::WarningsAsErrors, operand.value.getUnownedSlice());
                 break;
             }
             case OptionKind::DisableWarnings:
             {
                 CommandLineArg operand;
                 SLANG_RETURN_ON_FAIL(m_reader.expectArg(operand));
-                SLANG_RETURN_ON_FAIL(_overrideDiagnostics(operand.value.getUnownedSlice(), Severity::Warning, Severity::Disable));
+                //SLANG_RETURN_ON_FAIL(_overrideDiagnostics(operand.value.getUnownedSlice(), Severity::Warning, Severity::Disable));
+                linkage->m_optionSet.add(OptionKind::DisableWarnings, operand.value.getUnownedSlice());
                 break;
             }
             case OptionKind::DisableWarning:
             {
                 // 5 because -Wno-
                 auto name = argValue.getUnownedSlice().tail(5);
-                SLANG_RETURN_ON_FAIL(_overrideDiagnostic(name, Severity::Warning, Severity::Disable));
+                linkage->m_optionSet.add(OptionKind::DisableWarning, name);
+
+                //SLANG_RETURN_ON_FAIL(_overrideDiagnostic(name, Severity::Warning, Severity::Disable));
                 break;
             }
             case OptionKind::EnableWarning:
             {
                 // 2 because -W
                 auto name = argValue.getUnownedSlice().tail(2);
+                linkage->m_optionSet.add(OptionKind::EnableWarning, name);
                 // Enable the warning
-                SLANG_RETURN_ON_FAIL(_overrideDiagnostic(name, Severity::Warning, Severity::Warning));
+                //SLANG_RETURN_ON_FAIL(_overrideDiagnostic(name, Severity::Warning, Severity::Warning));
                 break;
             }
             case OptionKind::VerifyDebugSerialIr: m_frontEndReq->verifyDebugSerialization = true; break;
-            case OptionKind::ValidateIr: m_frontEndReq->shouldValidateIR = true; break;
-            case OptionKind::SkipCodeGen: m_requestImpl->m_shouldSkipCodegen = true; break;
-            case OptionKind::ParameterBlocksUseRegisterSpaces:
-            {
-                getCurrentTarget()->targetFlags |= SLANG_TARGET_FLAG_PARAMETER_BLOCKS_USE_REGISTER_SPACES;
-                break;
-            }
             case OptionKind::IrCompression:
             {
                 CommandLineArg name;
                 SLANG_RETURN_ON_FAIL(m_reader.expectArg(name));
-
-                SLANG_RETURN_ON_FAIL(SerialParseUtil::parseCompressionType(name.value.getUnownedSlice(), m_requestImpl->getLinkage()->serialCompressionType));
+                SerialCompressionType compressionType;
+                SLANG_RETURN_ON_FAIL(SerialParseUtil::parseCompressionType(name.value.getUnownedSlice(), compressionType));
+                linkage->m_optionSet.set(optionKind, compressionType);
+                break;
+            }
+            case OptionKind::EmbedDownstreamIR:
+            {
+                getCurrentTarget()->optionSet.add(CompilerOptionName::EmbedDownstreamIR, true);
                 break;
             }
             case OptionKind::Target:
@@ -2061,7 +1952,9 @@ SlangResult OptionsParser::_parse(
 
                 RawTarget rawTarget;
                 rawTarget.format = CodeGenTarget(format);
-
+                // Silently allow redundant targets if it is the same as the last specified target.
+                if (m_rawTargets.getCount() != 0 && m_rawTargets.getLast().format == rawTarget.format)
+                    break;
                 m_rawTargets.add(rawTarget);
                 break;
             }
@@ -2078,13 +1971,13 @@ SlangResult OptionsParser::_parse(
                 if (m_reader.hasArg() && m_reader.peekArg().value == toSlice("all"))
                 {
                     m_reader.advance();
-                    m_hlslToVulkanLayoutOptions->setAllShift(kind, shift);
+                    linkage->m_optionSet.add(CompilerOptionName::VulkanBindShiftAll, (int)kind, (int)shift);
                 }
                 else
                 {
                     Int set;
                     SLANG_RETURN_ON_FAIL(_expectInt(arg, set));
-                    m_hlslToVulkanLayoutOptions->setShift(kind, set, shift);
+                    linkage->m_optionSet.add(CompilerOptionName::VulkanBindShift, (uint8_t)kind, (int)set, (int)shift);
                 }
                 break;
             }
@@ -2094,32 +1987,7 @@ SlangResult OptionsParser::_parse(
                 Int binding, bindingSet;
                 SLANG_RETURN_ON_FAIL(_expectInt(arg, binding));
                 SLANG_RETURN_ON_FAIL(_expectInt(arg, bindingSet));
-
-                m_hlslToVulkanLayoutOptions->setGlobalsBinding(Index(bindingSet), Index(binding));
-                break;
-            }
-            case OptionKind::VulkanInvertY:
-            {
-                // -fvk-invert-y
-                m_hlslToVulkanLayoutOptions->setInvertY(true);
-                break;
-            }
-            case OptionKind::VulkanUseEntryPointName:
-            {
-                // -fvk-use-entrypoint-name
-                m_hlslToVulkanLayoutOptions->setUseOriginalEntryPointName(true);
-                break;
-            }
-            case OptionKind::VulkanUseGLLayout:
-            {
-                // -fvk-use-gl-layout
-                m_hlslToVulkanLayoutOptions->setUseGLLayout(true);
-                break;
-            }
-            case OptionKind::VulkanEmitReflection:
-            {
-                // -fvk-invert-y
-                m_hlslToVulkanLayoutOptions->setEmitSPIRVReflectionInfo(true);
+                linkage->m_optionSet.set(OptionKind::VulkanBindGlobals, (int)binding, (int)bindingSet);
                 break;
             }
             case OptionKind::Profile: SLANG_RETURN_ON_FAIL(_parseProfile(arg)); break;
@@ -2172,7 +2040,12 @@ SlangResult OptionsParser::_parse(
             }
             case OptionKind::GLSLForceScalarLayout:
             {
-                getCurrentTarget()->forceGLSLScalarLayout = true;
+                getCurrentTarget()->optionSet.add(CompilerOptionName::GLSLForceScalarLayout, true);
+                break;
+            }
+            case OptionKind::ForceDXLayout:
+            {
+                getCurrentTarget()->optionSet.add(CompilerOptionName::ForceDXLayout, true);
                 break;
             }
             case OptionKind::EnableEffectAnnotations:
@@ -2189,7 +2062,9 @@ SlangResult OptionsParser::_parse(
                 RawEntryPoint rawEntryPoint;
                 rawEntryPoint.name = name.value;
                 rawEntryPoint.translationUnitIndex = m_currentTranslationUnitIndex;
-
+                // Silently allow duplicate entrypoints if it is the same as the last specified one.
+                if (m_rawEntryPoints.getCount() != 0 && m_rawEntryPoints.getLast().name == rawEntryPoint.name)
+                    break;
                 m_rawEntryPoints.add(rawEntryPoint);
                 break;
             }
@@ -2230,6 +2105,7 @@ SlangResult OptionsParser::_parse(
                         SLANG_RETURN_ON_FAIL(addInputPath(m_reader.getValueAndAdvance().getBuffer(), sourceLanguage));
                     }
                 }
+                linkage->m_optionSet.add(CompilerOptionName::Language, (int)sourceLanguage);
                 break;
             }
             case OptionKind::PassThrough:
@@ -2327,8 +2203,6 @@ SlangResult OptionsParser::_parse(
                 }
                 break;
             }
-            case OptionKind::MatrixLayoutRow:       m_defaultMatrixLayoutMode = SlangMatrixLayoutMode(kMatrixLayoutMode_RowMajor); break;
-            case OptionKind::MatrixLayoutColumn:    m_defaultMatrixLayoutMode = SlangMatrixLayoutMode(kMatrixLayoutMode_ColumnMajor); break;
             case OptionKind::LineDirectiveMode: 
             {
                 SlangLineDirectiveMode value;
@@ -2357,8 +2231,6 @@ SlangResult OptionsParser::_parse(
                 break;
             }
             case OptionKind::DebugInformation: SLANG_RETURN_ON_FAIL(_parseDebugInformation(arg)); break;
-            case OptionKind::DefaultImageFormatUnknown: m_requestImpl->useUnknownImageFormatAsDefault = true; break;
-            case OptionKind::Obfuscate: m_requestImpl->getLinkage()->m_obfuscateCode = true; break;
             case OptionKind::FileSystem:
             {
                 typedef TypeTextUtil::FileSystemType FileSystemType;
@@ -2388,20 +2260,16 @@ SlangResult OptionsParser::_parse(
                 return SLANG_FAIL;
             }
             case OptionKind::EmitSpirvViaGLSL:
-            {
-                getCurrentTarget()->targetFlags &= ~SLANG_TARGET_FLAG_GENERATE_SPIRV_DIRECTLY;
-            }
-            break;
             case OptionKind::EmitSpirvDirectly:
             {
-                getCurrentTarget()->targetFlags |= SLANG_TARGET_FLAG_GENERATE_SPIRV_DIRECTLY;
+                getCurrentTarget()->optionSet.add(optionKind, true);
             }
             break;
             case OptionKind::SPIRVCoreGrammarJSON:
             {
                 CommandLineArg path;
                 SLANG_RETURN_ON_FAIL(m_reader.expectArg(path));
-                m_spirvCoreGrammarJSONPath = path.value;
+                m_session->setSPIRVCoreGrammar(path.value.getBuffer());
             }
             break;
 
@@ -2491,6 +2359,11 @@ SlangResult OptionsParser::_parse(
 
                 break;
             }
+            case OptionKind::DisableShortCircuit:
+            {
+                linkage->m_optionSet.add(OptionKind::DisableShortCircuit, true);
+                break;
+            }
             default:
             {
                 // Hmmm, we looked up and produced a valid enum, but it wasn't handled in the switch... 
@@ -2502,16 +2375,6 @@ SlangResult OptionsParser::_parse(
         }
     }
 
-    // If there is state set on HLSL to Vulkan layout settings, set on the end to end request
-    // such can be added when target requests are setup
-    if (!m_hlslToVulkanLayoutOptions->isReset())
-    {
-        m_requestImpl->setHLSLToVulkanLayoutOptions(m_hlslToVulkanLayoutOptions);
-    }
-
-    // No longer need to track
-    m_hlslToVulkanLayoutOptions.setNull();
-    
     if (m_compileStdLib)
     {
         SLANG_RETURN_ON_FAIL(m_session->compileStdLib(m_compileStdLibFlags));
@@ -2521,280 +2384,270 @@ SlangResult OptionsParser::_parse(
     // If a repro has been loaded, then many of the following options will overwrite
     // what was set up. So for now they are ignored, and only parameters set as part
     // of the loop work if they are after -load-repro
-    if (m_hasLoadedRepro)
+    if (!m_hasLoadedRepro)
     {
-        return SLANG_OK;
-    }
-
-    m_compileRequest->setCompileFlags(m_flags);
-
-    m_compileRequest->setAllowGLSLInput(m_allowGLSLInput);
-
-    // As a compatability feature, if the user didn't list any explicit entry
-    // point names, *and* they are compiling a single translation unit, *and* they
-    // have either specified a stage, or we can assume one from the naming
-    // of the translation unit, then we assume they wanted to compile a single
-    // entry point named `main`.
-    //
-    if (m_rawEntryPoints.getCount() == 0
-        && m_rawTranslationUnits.getCount() == 1
-        && (m_defaultEntryPoint.stage != Stage::Unknown
-            || m_rawTranslationUnits[0].impliedStage != Stage::Unknown))
-    {
-        RawEntryPoint entry;
-        entry.name = "main";
-        entry.translationUnitIndex = 0;
-        m_rawEntryPoints.add(entry);
-    }
-
-    // If the user (manually or implicitly) specified only a single entry point,
-    // then we allow the associated stage to be specified either before or after
-    // the entry point. This means that if there is a stage attached
-    // to the "default" entry point, we should copy it over to the
-    // explicit one.
-    //
-    if (m_rawEntryPoints.getCount() == 1)
-    {
-        if (m_defaultEntryPoint.stage != Stage::Unknown)
+        // As a compatability feature, if the user didn't list any explicit entry
+        // point names, *and* they are compiling a single translation unit, *and* they
+        // have either specified a stage, or we can assume one from the naming
+        // of the translation unit, then we assume they wanted to compile a single
+        // entry point named `main`.
+        //
+        if (m_rawEntryPoints.getCount() == 0
+            && m_rawTranslationUnits.getCount() == 1
+            && (m_defaultEntryPoint.stage != Stage::Unknown
+                || m_rawTranslationUnits[0].impliedStage != Stage::Unknown))
         {
-            setStage(getCurrentEntryPoint(), m_defaultEntryPoint.stage);
+            RawEntryPoint entry;
+            entry.name = "main";
+            entry.translationUnitIndex = 0;
+            m_rawEntryPoints.add(entry);
         }
 
-        if (m_defaultEntryPoint.redundantStageSet)
-            getCurrentEntryPoint()->redundantStageSet = true;
-        if (m_defaultEntryPoint.conflictingStagesSet)
-            getCurrentEntryPoint()->conflictingStagesSet = true;
-    }
-    else
-    {
-        // If the "default" entry point has had a stage (or
-        // other state, if we add other per-entry-point state)
-        // specified, but there is more than one entry point,
-        // then that state doesn't apply to anything and we
-        // should issue an error to tell the user something
-        // funky is going on.
+        // If the user (manually or implicitly) specified only a single entry point,
+        // then we allow the associated stage to be specified either before or after
+        // the entry point. This means that if there is a stage attached
+        // to the "default" entry point, we should copy it over to the
+        // explicit one.
         //
-        if (m_defaultEntryPoint.stage != Stage::Unknown)
+        if (m_rawEntryPoints.getCount() == 1)
         {
-            if (m_rawEntryPoints.getCount() == 0)
+            if (m_defaultEntryPoint.stage != Stage::Unknown)
             {
-                m_sink->diagnose(SourceLoc(), Diagnostics::stageSpecificationIgnoredBecauseNoEntryPoints);
+                setStage(getCurrentEntryPoint(), m_defaultEntryPoint.stage);
+            }
+
+            if (m_defaultEntryPoint.redundantStageSet)
+                getCurrentEntryPoint()->redundantStageSet = true;
+            if (m_defaultEntryPoint.conflictingStagesSet)
+                getCurrentEntryPoint()->conflictingStagesSet = true;
+        }
+        else
+        {
+            // If the "default" entry point has had a stage (or
+            // other state, if we add other per-entry-point state)
+            // specified, but there is more than one entry point,
+            // then that state doesn't apply to anything and we
+            // should issue an error to tell the user something
+            // funky is going on.
+            //
+            if (m_defaultEntryPoint.stage != Stage::Unknown)
+            {
+                if (m_rawEntryPoints.getCount() == 0)
+                {
+                    m_sink->diagnose(SourceLoc(), Diagnostics::stageSpecificationIgnoredBecauseNoEntryPoints);
+                }
+                else
+                {
+                    m_sink->diagnose(SourceLoc(), Diagnostics::stageSpecificationIgnoredBecauseBeforeAllEntryPoints);
+                }
+            }
+        }
+
+        // Slang requires that every explicit entry point indicate the translation
+        // unit it comes from. If there is only one translation unit specified,
+        // then implicitly all entry points come from it.
+        //
+        if (m_translationUnitCount == 1)
+        {
+            for (auto& entryPoint : m_rawEntryPoints)
+            {
+                entryPoint.translationUnitIndex = 0;
+            }
+        }
+        else if (m_frontEndReq->additionalLoadedModules &&
+            m_frontEndReq->additionalLoadedModules->getCount() == 0)
+        {
+            // Otherwise, we require that all entry points be specified after
+            // the translation unit to which tye belong.
+            bool anyEntryPointWithoutTranslationUnit = false;
+            for (auto& entryPoint : m_rawEntryPoints)
+            {
+                // Skip entry points that are already associated with a translation unit...
+                if (entryPoint.translationUnitIndex != -1)
+                    continue;
+
+                anyEntryPointWithoutTranslationUnit = true;
+            }
+            if (anyEntryPointWithoutTranslationUnit)
+            {
+                m_sink->diagnose(SourceLoc(), Diagnostics::entryPointsNeedToBeAssociatedWithTranslationUnits);
+                return SLANG_FAIL;
+            }
+        }
+
+        // Now that entry points are associated with translation units,
+        // we can make one additional pass where if an entry point has
+        // no specified stage, but the nameing of its translation unit
+        // implies a stage, we will use that (a manual `-stage` annotation
+        // will always win out in such a case).
+        //
+        for (auto& rawEntryPoint : m_rawEntryPoints)
+        {
+            // Skip entry points that already have a stage.
+            if (rawEntryPoint.stage != Stage::Unknown)
+                continue;
+
+            // Sanity check: don't process entry points with no associated translation unit.
+            if (rawEntryPoint.translationUnitIndex == -1)
+                continue;
+
+            auto impliedStage = m_rawTranslationUnits[rawEntryPoint.translationUnitIndex].impliedStage;
+            if (impliedStage != Stage::Unknown)
+                rawEntryPoint.stage = impliedStage;
+        }
+
+        // Note: it is possible that some entry points still won't have associated
+        // stages at this point, but we don't want to error out here, because
+        // those entry points might get stages later, as part of semantic checking,
+        // if the corresponding function has a `[shader("...")]` attribute.
+
+        // Now that we've tried to establish stages for entry points, we can
+        // issue diagnostics for cases where stages were set redundantly or
+        // in conflicting ways.
+        //
+        for (auto& rawEntryPoint : m_rawEntryPoints)
+        {
+            if (rawEntryPoint.conflictingStagesSet)
+            {
+                m_sink->diagnose(SourceLoc(), Diagnostics::conflictingStagesForEntryPoint, rawEntryPoint.name);
+            }
+            else if (rawEntryPoint.redundantStageSet)
+            {
+                m_sink->diagnose(SourceLoc(), Diagnostics::sameStageSpecifiedMoreThanOnce, rawEntryPoint.stage, rawEntryPoint.name);
+            }
+            else if (rawEntryPoint.translationUnitIndex != -1)
+            {
+                // As a quality-of-life feature, if the file name implies a particular
+                // stage, but the user manually specified something different for
+                // their entry point, give a warning in case they made a mistake.
+
+                auto& rawTranslationUnit = m_rawTranslationUnits[rawEntryPoint.translationUnitIndex];
+                if (rawTranslationUnit.impliedStage != Stage::Unknown
+                    && rawEntryPoint.stage != Stage::Unknown
+                    && rawTranslationUnit.impliedStage != rawEntryPoint.stage)
+                {
+                    m_sink->diagnose(SourceLoc(), Diagnostics::explicitStageDoesntMatchImpliedStage, rawEntryPoint.name, rawEntryPoint.stage, rawTranslationUnit.impliedStage);
+                }
+            }
+        }
+
+        // If the user is requesting code generation via pass-through,
+        // then any entry points they specify need to have a stage set,
+        // because fxc/dxc/glslang don't have a facility for taking
+        // a named entry point and pulling its stage from an attribute.
+        //
+        if (_passThroughRequiresStage(m_requestImpl->m_passThrough))
+        {
+            for (auto& rawEntryPoint : m_rawEntryPoints)
+            {
+                if (rawEntryPoint.stage == Stage::Unknown)
+                {
+                    m_sink->diagnose(SourceLoc(), Diagnostics::noStageSpecifiedInPassThroughMode, rawEntryPoint.name);
+                }
+            }
+        }
+
+        // We now have inferred enough information to add the
+        // entry points to our compile request.
+        //
+        for (auto& rawEntryPoint : m_rawEntryPoints)
+        {
+            if (rawEntryPoint.translationUnitIndex < 0)
+                continue;
+
+            auto translationUnitID = m_rawTranslationUnits[rawEntryPoint.translationUnitIndex].translationUnitID;
+
+            List<const char*> specializationArgs;
+            for (auto& arg : rawEntryPoint.specializationArgs)
+                specializationArgs.add(arg.getBuffer());
+
+            int entryPointID = m_compileRequest->addEntryPointEx(
+                translationUnitID,
+                rawEntryPoint.name.begin(),
+                SlangStage(rawEntryPoint.stage),
+                (int)specializationArgs.getCount(),
+                specializationArgs.getBuffer());
+
+            rawEntryPoint.entryPointID = entryPointID;
+        }
+
+        // We are going to build a mapping from target formats to the
+        // target that handles that format.
+        Dictionary<CodeGenTarget, int> mapFormatToTargetIndex;
+
+        // If there was no explicit `-target` specified, then we will look
+        // at the `-o` options to see what we can infer.
+        //
+        if (m_rawTargets.getCount() == 0)
+        {
+            // If there are no targets and no outputs
+            if (m_rawOutputs.getCount() == 0)
+            {
+                m_requestImpl->m_emitIr = true;
             }
             else
             {
-                m_sink->diagnose(SourceLoc(), Diagnostics::stageSpecificationIgnoredBecauseBeforeAllEntryPoints);
-            }
-        }
-    }
+                for (auto& rawOutput : m_rawOutputs)
+                {
+                    // Some outputs don't imply a target format, and we shouldn't use those for inference.
+                    auto impliedFormat = rawOutput.impliedFormat;
+                    if (impliedFormat == CodeGenTarget::Unknown)
+                        continue;
 
-    // Slang requires that every explicit entry point indicate the translation
-    // unit it comes from. If there is only one translation unit specified,
-    // then implicitly all entry points come from it.
-    //
-    if (m_translationUnitCount == 1)
-    {
-        for (auto& entryPoint : m_rawEntryPoints)
-        {
-            entryPoint.translationUnitIndex = 0;
-        }
-    }
-    else
-    {
-        // Otherwise, we require that all entry points be specified after
-        // the translation unit to which tye belong.
-        bool anyEntryPointWithoutTranslationUnit = false;
-        for (auto& entryPoint : m_rawEntryPoints)
-        {
-            // Skip entry points that are already associated with a translation unit...
-            if (entryPoint.translationUnitIndex != -1)
-                continue;
+                    int targetIndex = 0;
+                    if (!mapFormatToTargetIndex.tryGetValue(impliedFormat, targetIndex))
+                    {
+                        targetIndex = (int)m_rawTargets.getCount();
 
-            anyEntryPointWithoutTranslationUnit = true;
-        }
-        if (anyEntryPointWithoutTranslationUnit)
-        {
-            m_sink->diagnose(SourceLoc(), Diagnostics::entryPointsNeedToBeAssociatedWithTranslationUnits);
-            return SLANG_FAIL;
-        }
-    }
+                        RawTarget rawTarget;
+                        rawTarget.format = impliedFormat;
+                        m_rawTargets.add(rawTarget);
 
-    // Now that entry points are associated with translation units,
-    // we can make one additional pass where if an entry point has
-    // no specified stage, but the nameing of its translation unit
-    // implies a stage, we will use that (a manual `-stage` annotation
-    // will always win out in such a case).
-    //
-    for (auto& rawEntryPoint : m_rawEntryPoints)
-    {
-        // Skip entry points that already have a stage.
-        if (rawEntryPoint.stage != Stage::Unknown)
-            continue;
+                        mapFormatToTargetIndex[impliedFormat] = targetIndex;
+                    }
 
-        // Sanity check: don't process entry points with no associated translation unit.
-        if (rawEntryPoint.translationUnitIndex == -1)
-            continue;
-
-        auto impliedStage = m_rawTranslationUnits[rawEntryPoint.translationUnitIndex].impliedStage;
-        if (impliedStage != Stage::Unknown)
-            rawEntryPoint.stage = impliedStage;
-    }
-
-    // Note: it is possible that some entry points still won't have associated
-    // stages at this point, but we don't want to error out here, because
-    // those entry points might get stages later, as part of semantic checking,
-    // if the corresponding function has a `[shader("...")]` attribute.
-
-    // Now that we've tried to establish stages for entry points, we can
-    // issue diagnostics for cases where stages were set redundantly or
-    // in conflicting ways.
-    //
-    for (auto& rawEntryPoint : m_rawEntryPoints)
-    {
-        if (rawEntryPoint.conflictingStagesSet)
-        {
-            m_sink->diagnose(SourceLoc(), Diagnostics::conflictingStagesForEntryPoint, rawEntryPoint.name);
-        }
-        else if (rawEntryPoint.redundantStageSet)
-        {
-            m_sink->diagnose(SourceLoc(), Diagnostics::sameStageSpecifiedMoreThanOnce, rawEntryPoint.stage, rawEntryPoint.name);
-        }
-        else if (rawEntryPoint.translationUnitIndex != -1)
-        {
-            // As a quality-of-life feature, if the file name implies a particular
-            // stage, but the user manually specified something different for
-            // their entry point, give a warning in case they made a mistake.
-
-            auto& rawTranslationUnit = m_rawTranslationUnits[rawEntryPoint.translationUnitIndex];
-            if (rawTranslationUnit.impliedStage != Stage::Unknown
-                && rawEntryPoint.stage != Stage::Unknown
-                && rawTranslationUnit.impliedStage != rawEntryPoint.stage)
-            {
-                m_sink->diagnose(SourceLoc(), Diagnostics::explicitStageDoesntMatchImpliedStage, rawEntryPoint.name, rawEntryPoint.stage, rawTranslationUnit.impliedStage);
-            }
-        }
-    }
-
-    // If the user is requesting code generation via pass-through,
-    // then any entry points they specify need to have a stage set,
-    // because fxc/dxc/glslang don't have a facility for taking
-    // a named entry point and pulling its stage from an attribute.
-    //
-    if (_passThroughRequiresStage(m_requestImpl->m_passThrough))
-    {
-        for (auto& rawEntryPoint : m_rawEntryPoints)
-        {
-            if (rawEntryPoint.stage == Stage::Unknown)
-            {
-                m_sink->diagnose(SourceLoc(), Diagnostics::noStageSpecifiedInPassThroughMode, rawEntryPoint.name);
-            }
-        }
-    }
-
-    // We now have inferred enough information to add the
-    // entry points to our compile request.
-    //
-    for (auto& rawEntryPoint : m_rawEntryPoints)
-    {
-        if (rawEntryPoint.translationUnitIndex < 0)
-            continue;
-
-        auto translationUnitID = m_rawTranslationUnits[rawEntryPoint.translationUnitIndex].translationUnitID;
-
-        List<const char*> specializationArgs;
-        for (auto& arg : rawEntryPoint.specializationArgs)
-            specializationArgs.add(arg.getBuffer());
-
-        int entryPointID = m_compileRequest->addEntryPointEx(
-            translationUnitID,
-            rawEntryPoint.name.begin(),
-            SlangStage(rawEntryPoint.stage),
-            (int)specializationArgs.getCount(),
-            specializationArgs.getBuffer());
-
-        rawEntryPoint.entryPointID = entryPointID;
-    }
-
-    // We are going to build a mapping from target formats to the
-    // target that handles that format.
-    Dictionary<CodeGenTarget, int> mapFormatToTargetIndex;
-
-    // If there was no explicit `-target` specified, then we will look
-    // at the `-o` options to see what we can infer.
-    //
-    if (m_rawTargets.getCount() == 0)
-    {
-        // If there are no targets and no outputs
-        if (m_rawOutputs.getCount() == 0)
-        {
-            // And we have a container for output, then enable emitting SlangIR module
-            if (m_requestImpl->m_containerFormat != ContainerFormat::None)
-            {
-                m_requestImpl->m_emitIr = true;
+                    rawOutput.targetIndex = targetIndex;
+                }
             }
         }
         else
         {
-            for (auto& rawOutput : m_rawOutputs)
+            // If there were explicit targets, then we will use those, but still
+            // build up our mapping. We should object if the same target format
+            // is specified more than once (just because of the ambiguities
+            // it will create).
+            //
+            int targetCount = (int)m_rawTargets.getCount();
+            for (int targetIndex = 0; targetIndex < targetCount; ++targetIndex)
             {
-                // Some outputs don't imply a target format, and we shouldn't use those for inference.
-                auto impliedFormat = rawOutput.impliedFormat;
-                if (impliedFormat == CodeGenTarget::Unknown)
-                    continue;
+                auto format = m_rawTargets[targetIndex].format;
 
-                int targetIndex = 0;
-                if (!mapFormatToTargetIndex.tryGetValue(impliedFormat, targetIndex))
+                if (mapFormatToTargetIndex.containsKey(format))
                 {
-                    targetIndex = (int)m_rawTargets.getCount();
-
-                    RawTarget rawTarget;
-                    rawTarget.format = impliedFormat;
-                    m_rawTargets.add(rawTarget);
-
-                    mapFormatToTargetIndex[impliedFormat] = targetIndex;
+                    m_sink->diagnose(SourceLoc(), Diagnostics::duplicateTargets, format);
                 }
-
-                rawOutput.targetIndex = targetIndex;
+                else
+                {
+                    mapFormatToTargetIndex[format] = targetIndex;
+                }
             }
         }
-    }
-    else
-    {
-        // If there were explicit targets, then we will use those, but still
-        // build up our mapping. We should object if the same target format
-        // is specified more than once (just because of the ambiguities
-        // it will create).
-        //
-        int targetCount = (int)m_rawTargets.getCount();
-        for (int targetIndex = 0; targetIndex < targetCount; ++targetIndex)
-        {
-            auto format = m_rawTargets[targetIndex].format;
 
-            if (mapFormatToTargetIndex.containsKey(format))
-            {
-                m_sink->diagnose(SourceLoc(), Diagnostics::duplicateTargets, format);
-            }
-            else
-            {
-                mapFormatToTargetIndex[format] = targetIndex;
-            }
-        }
-    }
-
-    // If we weren't able to infer any targets from output paths (perhaps
-    // because there were no output paths), but there was a profile specified,
-    // then we can try to infer a target from the profile.
-    //
-    if (m_rawTargets.getCount() == 0
-        && m_defaultTarget.profileVersion != ProfileVersion::Unknown
-        && !m_defaultTarget.conflictingProfilesSet)
-    {
-        // Let's see if the chosen profile allows us to infer
-        // the code gen target format that the user probably meant.
+        // If we weren't able to infer any targets from output paths (perhaps
+        // because there were no output paths), but there was a profile specified,
+        // then we can try to infer a target from the profile.
         //
-        CodeGenTarget inferredFormat = CodeGenTarget::Unknown;
-        auto profileVersion = m_defaultTarget.profileVersion;
-        switch (Profile(profileVersion).getFamily())
+        if (m_rawTargets.getCount() == 0
+            && m_defaultTarget.optionSet.getProfileVersion() != ProfileVersion::Unknown
+            && !m_defaultTarget.conflictingProfilesSet)
         {
+            // Let's see if the chosen profile allows us to infer
+            // the code gen target format that the user probably meant.
+            //
+            CodeGenTarget inferredFormat = CodeGenTarget::Unknown;
+            auto profileVersion = m_defaultTarget.optionSet.getProfileVersion();
+            switch (Profile(profileVersion).getFamily())
+            {
             default:
                 break;
 
@@ -2824,166 +2677,144 @@ SlangResult OptionsParser::_parse(
                     inferredFormat = CodeGenTarget::DXBytecode;
                 }
                 break;
+            }
+
+            if (inferredFormat != CodeGenTarget::Unknown)
+            {
+                RawTarget rawTarget;
+                rawTarget.format = inferredFormat;
+                m_rawTargets.add(rawTarget);
+            }
         }
 
-        if (inferredFormat != CodeGenTarget::Unknown)
-        {
-            RawTarget rawTarget;
-            rawTarget.format = inferredFormat;
-            m_rawTargets.add(rawTarget);
-        }
-    }
+        // Similar to the case for entry points, if there is a single target,
+        // then we allow some of its options to come from the "default"
+        // target state.
+        auto defaultTargetFloatingPointMode = m_defaultTarget.optionSet.getEnumOption<FloatingPointMode>(CompilerOptionName::FloatingPointMode);
 
-    // Similar to the case for entry points, if there is a single target,
-    // then we allow some of its options to come from the "default"
-    // target state.
-    if (m_rawTargets.getCount() == 1)
-    {
-        if (m_defaultTarget.profileVersion != ProfileVersion::Unknown)
+        if (m_rawTargets.getCount() == 1)
         {
-            setProfileVersion(getCurrentTarget(), m_defaultTarget.profileVersion);
+            m_rawTargets[0].optionSet.overrideWith(m_defaultTarget.optionSet);
         }
-        for (auto atom : m_defaultTarget.capabilityAtoms)
+        else
         {
-            addCapabilityAtom(getCurrentTarget(), atom);
+            // If the "default" target has had a profile (or other state)
+            // specified, but there is != 1 taget, then that state doesn't
+            // apply to anythign and we should give the user an error.
+            //
+            if (m_defaultTarget.optionSet.getProfileVersion() != ProfileVersion::Unknown)
+            {
+                if (m_rawTargets.getCount() == 0)
+                {
+                    // This should only happen if there were multiple `-profile` options,
+                    // so we didn't try to infer a target, or if the `-profile` option
+                    // somehow didn't imply a target.
+                    //
+                    m_sink->diagnose(SourceLoc(), Diagnostics::profileSpecificationIgnoredBecauseNoTargets);
+                }
+                else
+                {
+                    m_sink->diagnose(SourceLoc(), Diagnostics::profileSpecificationIgnoredBecauseBeforeAllTargets);
+                }
+            }
+
+            if (defaultTargetFloatingPointMode != FloatingPointMode::Default)
+            {
+                if (m_rawTargets.getCount() == 0)
+                {
+                    m_sink->diagnose(SourceLoc(), Diagnostics::targetFlagsIgnoredBecauseNoTargets);
+                }
+                else
+                {
+                    m_sink->diagnose(SourceLoc(), Diagnostics::targetFlagsIgnoredBecauseBeforeAllTargets);
+                }
+            }
+
+        }
+        for (auto& rawTarget : m_rawTargets)
+        {
+            if (rawTarget.conflictingProfilesSet)
+            {
+                m_sink->diagnose(SourceLoc(), Diagnostics::conflictingProfilesSpecifiedForTarget, rawTarget.format);
+            }
+            else if (rawTarget.redundantProfileSet)
+            {
+                m_sink->diagnose(SourceLoc(), Diagnostics::sameProfileSpecifiedMoreThanOnce, rawTarget.optionSet.getProfileVersion(), rawTarget.format);
+            }
         }
 
-        getCurrentTarget()->targetFlags |= m_defaultTarget.targetFlags;
+        // TODO: do we need to require that a target must have a profile specified,
+        // or will we continue to allow the profile to be inferred from the target?
 
-        if (m_defaultTarget.floatingPointMode != FloatingPointMode::Default)
-        {
-            setFloatingPointMode(getCurrentTarget(), m_defaultTarget.floatingPointMode);
-        }
-    }
-    else
-    {
-        // If the "default" target has had a profile (or other state)
-        // specified, but there is != 1 taget, then that state doesn't
-        // apply to anythign and we should give the user an error.
+        // We now have enough information to go ahead and declare the targets
+        // through the Slang API:
         //
-        if (m_defaultTarget.profileVersion != ProfileVersion::Unknown)
+        for (auto& rawTarget : m_rawTargets)
         {
-            if (m_rawTargets.getCount() == 0)
+            int targetID = m_compileRequest->addCodeGenTarget(SlangCompileTarget(rawTarget.format));
+            rawTarget.targetID = targetID;
+
+            if (rawTarget.optionSet.getProfileVersion() != ProfileVersion::Unknown)
             {
-                // This should only happen if there were multiple `-profile` options,
-                // so we didn't try to infer a target, or if the `-profile` option
-                // somehow didn't imply a target.
-                //
-                m_sink->diagnose(SourceLoc(), Diagnostics::profileSpecificationIgnoredBecauseNoTargets);
+                m_compileRequest->setTargetProfile(targetID, SlangProfileID(Profile(rawTarget.optionSet.getProfileVersion()).raw));
             }
-            else
+            for (auto atom : rawTarget.optionSet.getArray(CompilerOptionName::Capability))
             {
-                m_sink->diagnose(SourceLoc(), Diagnostics::profileSpecificationIgnoredBecauseBeforeAllTargets);
+                m_requestImpl->addTargetCapability(targetID, SlangCapabilityID(atom.intValue));
             }
-        }
 
-        if (m_defaultTarget.targetFlags != kDefaultTargetFlags)
-        {
-            if (m_rawTargets.getCount() == 0)
+            auto floatingPointMode = rawTarget.optionSet.getEnumOption<FloatingPointMode>(CompilerOptionName::FloatingPointMode);
+            if (floatingPointMode != FloatingPointMode::Default)
             {
-                m_sink->diagnose(SourceLoc(), Diagnostics::targetFlagsIgnoredBecauseNoTargets);
+                m_compileRequest->setTargetFloatingPointMode(targetID, SlangFloatingPointMode(floatingPointMode));
             }
-            else
+
+            if (rawTarget.optionSet.shouldUseScalarLayout())
             {
-                m_sink->diagnose(SourceLoc(), Diagnostics::targetFlagsIgnoredBecauseBeforeAllTargets);
+                m_compileRequest->setTargetForceGLSLScalarBufferLayout(targetID, true);
             }
-        }
 
-        if (m_defaultTarget.floatingPointMode != FloatingPointMode::Default)
-        {
-            if (m_rawTargets.getCount() == 0)
+            if (rawTarget.optionSet.shouldUseDXLayout())
             {
-                m_sink->diagnose(SourceLoc(), Diagnostics::targetFlagsIgnoredBecauseNoTargets);
+                m_compileRequest->setTargetForceDXLayout(targetID, true);
             }
-            else
+
+            if (rawTarget.optionSet.getBoolOption(CompilerOptionName::GenerateWholeProgram))
             {
-                m_sink->diagnose(SourceLoc(), Diagnostics::targetFlagsIgnoredBecauseBeforeAllTargets);
+                m_compileRequest->setTargetGenerateWholeProgram(targetID, true);
+            }
+
+            if (rawTarget.optionSet.getBoolOption(CompilerOptionName::EmbedDownstreamIR))
+            {
+                m_compileRequest->setTargetEmbedDownstreamIR(targetID, true);
+            }
+
+        }
+
+        // Next we need to sort out the output files specified with `-o`, and
+        // figure out which entry point and/or target they apply to.
+        //
+        // If there is only a single entry point, then that is automatically
+        // the entry point that should be associated with all outputs.
+        //
+        if (m_rawEntryPoints.getCount() == 1)
+        {
+            for (auto& rawOutput : m_rawOutputs)
+            {
+                rawOutput.entryPointIndex = 0;
             }
         }
-
-    }
-    for (auto& rawTarget : m_rawTargets)
-    {
-        if (rawTarget.conflictingProfilesSet)
+        //
+        // Similarly, if there is only one target, then all outputs must
+        // implicitly appertain to that target.
+        //
+        if (m_rawTargets.getCount() == 1)
         {
-            m_sink->diagnose(SourceLoc(), Diagnostics::conflictingProfilesSpecifiedForTarget, rawTarget.format);
+            for (auto& rawOutput : m_rawOutputs)
+            {
+                rawOutput.targetIndex = 0;
+            }
         }
-        else if (rawTarget.redundantProfileSet)
-        {
-            m_sink->diagnose(SourceLoc(), Diagnostics::sameProfileSpecifiedMoreThanOnce, rawTarget.profileVersion, rawTarget.format);
-        }
-    }
-
-    // TODO: do we need to require that a target must have a profile specified,
-    // or will we continue to allow the profile to be inferred from the target?
-
-    // We now have enough information to go ahead and declare the targets
-    // through the Slang API:
-    //
-    for (auto& rawTarget : m_rawTargets)
-    {
-        int targetID = m_compileRequest->addCodeGenTarget(SlangCompileTarget(rawTarget.format));
-        rawTarget.targetID = targetID;
-
-        if (rawTarget.profileVersion != ProfileVersion::Unknown)
-        {
-            m_compileRequest->setTargetProfile(targetID, SlangProfileID(Profile(rawTarget.profileVersion).raw));
-        }
-        for (auto atom : rawTarget.capabilityAtoms)
-        {
-            m_requestImpl->addTargetCapability(targetID, SlangCapabilityID(atom));
-        }
-
-        if (rawTarget.targetFlags)
-        {
-            m_compileRequest->setTargetFlags(targetID, rawTarget.targetFlags);
-        }
-
-        if (rawTarget.floatingPointMode != FloatingPointMode::Default)
-        {
-            m_compileRequest->setTargetFloatingPointMode(targetID, SlangFloatingPointMode(rawTarget.floatingPointMode));
-        }
-
-        if (rawTarget.forceGLSLScalarLayout)
-        {
-            m_compileRequest->setTargetForceGLSLScalarBufferLayout(targetID, true);
-        }
-    }
-
-    if (m_defaultMatrixLayoutMode != SLANG_MATRIX_LAYOUT_MODE_UNKNOWN)
-    {
-        m_compileRequest->setMatrixLayoutMode(m_defaultMatrixLayoutMode);
-    }
-
-    if(m_spirvCoreGrammarJSONPath.getLength())
-    {
-        m_session->setSPIRVCoreGrammar(m_spirvCoreGrammarJSONPath.getBuffer());
-    }
-
-    // Next we need to sort out the output files specified with `-o`, and
-    // figure out which entry point and/or target they apply to.
-    //
-    // If there is only a single entry point, then that is automatically
-    // the entry point that should be associated with all outputs.
-    //
-    if (m_rawEntryPoints.getCount() == 1)
-    {
-        for (auto& rawOutput : m_rawOutputs)
-        {
-            rawOutput.entryPointIndex = 0;
-        }
-    }
-    //
-    // Similarly, if there is only one target, then all outputs must
-    // implicitly appertain to that target.
-    //
-    if (m_rawTargets.getCount() == 1)
-    {
-        for (auto& rawOutput : m_rawOutputs)
-        {
-            rawOutput.targetIndex = 0;
-        }
-    }
 
     // If we don't have any raw outputs but do have a raw target,
     // add an empty' rawOutput for certain targets where the expected behavior is obvious.
@@ -2994,6 +2825,9 @@ SlangResult OptionsParser::_parse(
             m_rawTargets[0].format == CodeGenTarget::CUDASource ||
             m_rawTargets[0].format == CodeGenTarget::SPIRV ||
             m_rawTargets[0].format == CodeGenTarget::SPIRVAssembly ||
+            m_rawTargets[0].format == CodeGenTarget::Metal ||
+            m_rawTargets[0].format == CodeGenTarget::MetalLib ||
+            m_rawTargets[0].format == CodeGenTarget::MetalLibAssembly ||
             ArtifactDescUtil::makeDescForCompileTarget(asExternal(m_rawTargets[0].format)).kind == ArtifactKind::HostCallable))
     {
         RawOutput rawOutput;
@@ -3002,54 +2836,55 @@ SlangResult OptionsParser::_parse(
         m_rawOutputs.add(rawOutput);
     }
 
-    // Consider the output files specified via `-o` and try to figure
-    // out how to deal with them.
-    //
-    for (auto& rawOutput : m_rawOutputs)
-    {
-        // For now, most output formats need to be tightly bound to
-        // both a target and an entry point.
-
-        // If an output doesn't have a target associated with
-        // it, then search for the target with the matching format.
-        if (rawOutput.targetIndex == -1)
+        // Consider the output files specified via `-o` and try to figure
+        // out how to deal with them.
+        //
+        for (auto& rawOutput : m_rawOutputs)
         {
-            auto impliedFormat = rawOutput.impliedFormat;
-            int targetIndex = -1;
+            // For now, most output formats need to be tightly bound to
+            // both a target and an entry point.
 
-            if (impliedFormat == CodeGenTarget::Unknown)
+            // If an output doesn't have a target associated with
+            // it, then search for the target with the matching format.
+            if (rawOutput.targetIndex == -1)
             {
-                // If we hit this case, then it means that we need to pick the
-                // target to assocaite with this output based on its implied
-                // format, but the file path doesn't direclty imply a format
-                // (it doesn't have a suffix like `.spv` that tells us what to write).
-                //
-                m_sink->diagnose(SourceLoc(), Diagnostics::cannotDeduceOutputFormatFromPath, rawOutput.path);
-            }
-            else if (mapFormatToTargetIndex.tryGetValue(rawOutput.impliedFormat, targetIndex))
-            {
-                rawOutput.targetIndex = targetIndex;
-            }
-            else
-            {
-                m_sink->diagnose(SourceLoc(), Diagnostics::cannotMatchOutputFileToTarget, rawOutput.path, rawOutput.impliedFormat);
-            }
-        }
+                auto impliedFormat = rawOutput.impliedFormat;
+                int targetIndex = -1;
 
-        // We won't do any searching to match an output file
-        // with an entry point, since the case of a single entry
-        // point was handled above, and the user is expected to
-        // follow the ordering rules when using multiple entry points.
-        if (rawOutput.entryPointIndex == -1)
-        {
-            if (rawOutput.targetIndex != -1)
-            {
-                auto outputFormat = m_rawTargets[rawOutput.targetIndex].format;
-                // Here we check whether the given output format supports multiple entry points
-                // When we add targets with support for multiple entry points,
-                // we should update this switch with those new formats
-                switch (outputFormat)
+                if (impliedFormat == CodeGenTarget::Unknown)
                 {
+
+                    // If we hit this case, then it means that we need to pick the
+                    // target to assocaite with this output based on its implied
+                    // format, but the file path doesn't direclty imply a format
+                    // (it doesn't have a suffix like `.spv` that tells us what to write).
+                    //
+                    m_sink->diagnose(SourceLoc(), Diagnostics::cannotDeduceOutputFormatFromPath, rawOutput.path);
+                }
+                else if (mapFormatToTargetIndex.tryGetValue(rawOutput.impliedFormat, targetIndex))
+                {
+                    rawOutput.targetIndex = targetIndex;
+                }
+                else
+                {
+                    m_sink->diagnose(SourceLoc(), Diagnostics::cannotMatchOutputFileToTarget, rawOutput.path, rawOutput.impliedFormat);
+                }
+            }
+
+            // We won't do any searching to match an output file
+            // with an entry point, since the case of a single entry
+            // point was handled above, and the user is expected to
+            // follow the ordering rules when using multiple entry points.
+            if (rawOutput.entryPointIndex == -1)
+            {
+                if (rawOutput.targetIndex != -1)
+                {
+                    auto outputFormat = m_rawTargets[rawOutput.targetIndex].format;
+                    // Here we check whether the given output format supports multiple entry points
+                    // When we add targets with support for multiple entry points,
+                    // we should update this switch with those new formats
+                    switch (outputFormat)
+                    {
                     case CodeGenTarget::CPPSource:
                     case CodeGenTarget::PTX:
                     case CodeGenTarget::CUDASource:
@@ -3058,25 +2893,38 @@ SlangResult OptionsParser::_parse(
                     case CodeGenTarget::ShaderHostCallable:
                     case CodeGenTarget::HostExecutable:
                     case CodeGenTarget::ShaderSharedLibrary:
+                    case CodeGenTarget::HostSharedLibrary:
                     case CodeGenTarget::PyTorchCppBinding:
                     case CodeGenTarget::DXIL:
+                    case CodeGenTarget::MetalLib:
+                    case CodeGenTarget::MetalLibAssembly:
+                    case CodeGenTarget::Metal:
                         rawOutput.isWholeProgram = true;
                         break;
                     case CodeGenTarget::SPIRV:
                     case CodeGenTarget::SPIRVAssembly:
-                        if (getCurrentTarget()->targetFlags & SLANG_TARGET_FLAG_GENERATE_SPIRV_DIRECTLY)
+                        if (getCurrentTarget()->optionSet.shouldEmitSPIRVDirectly())
                         {
                             rawOutput.isWholeProgram = true;
+                            break;
+                        }
+                        else if (m_rawEntryPoints.getCount() != 0)
+                        {
+                            rawOutput.entryPointIndex = (int)m_rawEntryPoints.getCount() - 1;
+                            break;
+                        }
+                        [[fallthrough]];
+                    default:
+                        if (rawOutput.path.getLength() != 0)
+                        {
+                            m_sink->diagnose(SourceLoc(), Diagnostics::cannotMatchOutputFileToEntryPoint, rawOutput.path);
                         }
                         break;
-                    default:
-                        m_sink->diagnose(SourceLoc(), Diagnostics::cannotMatchOutputFileToEntryPoint, rawOutput.path);
-                        break;
+                    }
                 }
             }
         }
     }
-
 
     // Now that we've diagnosed the output paths, we can add them
     // to the compile request at the appropriate locations.
@@ -3095,7 +2943,7 @@ SlangResult OptionsParser::_parse(
             targetInfo = new EndToEndCompileRequest::TargetInfo();
             m_requestImpl->m_targetInfos[target] = targetInfo;
         }
-
+        target->getOptionSet().overrideWith(m_rawTargets[rawOutput.targetIndex].optionSet);
         if (rawOutput.isWholeProgram)
         {
             if (targetInfo->wholeTargetOutputPath != "")
@@ -3104,7 +2952,7 @@ SlangResult OptionsParser::_parse(
             }
             else
             {
-                target->addTargetFlags(SLANG_TARGET_FLAG_GENERATE_WHOLE_PROGRAM);
+                target->getOptionSet().addTargetFlags(SLANG_TARGET_FLAG_GENERATE_WHOLE_PROGRAM);
                 targetInfo->wholeTargetOutputPath = rawOutput.path;
             }
         }
@@ -3112,7 +2960,13 @@ SlangResult OptionsParser::_parse(
         {
             if (rawOutput.entryPointIndex == -1) continue;
 
-            Int entryPointID = m_rawEntryPoints[rawOutput.entryPointIndex].entryPointID;
+            auto entryPoint = m_rawEntryPoints[rawOutput.entryPointIndex];
+            Int entryPointID = entryPoint.entryPointID;
+            if (entryPointID == -1)
+            {
+                m_sink->diagnose(SourceLoc(), Diagnostics::entryPointFunctionNotFound, entryPoint.name);
+                continue;
+            }
             auto entryPointReq = m_requestImpl->getFrontEndReq()->getEntryPointReqs()[entryPointID];
 
             //String outputPath;
@@ -3126,6 +2980,29 @@ SlangResult OptionsParser::_parse(
             }
         }
     }
+
+
+    // Copy all settings from linkage to targets.
+    for (auto target : linkage->targets)
+    {
+        target->getOptionSet().inheritFrom(linkage->m_optionSet);
+
+        // If there is no target specified in command line, we should inherit the default target options.
+        if(m_rawTargets.getCount() == 0)
+        {
+            target->getOptionSet().inheritFrom(m_defaultTarget.optionSet);
+        }
+    }
+
+    // If there are no targets specified in command line, and addCodeGenTarget() is not called
+    // yet, the options for the default target will be gone after option parsing. We
+    // should save the option for the future use when addCodeGenTarget() is called.
+    if ((linkage->targets.getCount() == 0) && (m_rawTargets.getCount() == 0))
+    {
+        m_requestImpl->m_optionSetForDefaultTarget = m_defaultTarget.optionSet;
+    }
+    
+    applySettingsToDiagnosticSink(m_requestImpl->getSink(), m_sink, linkage->m_optionSet);
 
     return (m_sink->getErrorCount() == 0) ? SLANG_OK : SLANG_FAIL;
 }
@@ -3145,13 +3022,10 @@ SlangResult OptionsParser::parse(
     m_session = session;
     m_frontEndReq = m_requestImpl->getFrontEndReq();
 
-    m_hlslToVulkanLayoutOptions = new HLSLToVulkanLayoutOptions;
-
     m_cmdOptions = &session->m_commandOptions;
+    m_cmdLineContext = m_requestImpl->getLinkage()->m_cmdLineContext.get();
 
     DiagnosticSink* requestSink = m_requestImpl->getSink();
-
-    m_cmdLineContext = m_requestImpl->getLinkage()->m_downstreamArgs.getContext();
 
     // Why create a new DiagnosticSink?
     // We *don't* want the lexer that comes as default (it's for Slang source!)

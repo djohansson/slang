@@ -432,7 +432,7 @@ static DocMarkdownWriter::Requirement _getRequirementFromTargetToken(const Token
         return Requirement{CodeGenTarget::SPIRV, UnownedStringSlice("")};
     }
 
-    const CapabilityAtom targetCap = (CapabilityAtom)findCapabilityName(targetName);
+    const CapabilityAtom targetCap = asAtom(findCapabilityName(targetName));
 
     if (targetCap == CapabilityAtom::Invalid)
     {
@@ -479,7 +479,14 @@ static DocMarkdownWriter::Requirement _getRequirementFromTargetToken(const Token
     {
         return Requirement{ CodeGenTarget::CSource, targetName };
     }
-    
+    else if (isCapabilityDerivedFrom(targetCap, CapabilityAtom::metal))
+    {
+        return Requirement{ CodeGenTarget::Metal, targetName };
+    }
+    else if (isCapabilityDerivedFrom(targetCap, CapabilityAtom::wgsl))
+    {
+        return Requirement{ CodeGenTarget::WGSL, targetName };
+    }
     return Requirement{ CodeGenTarget::Unknown, String() };
 }
 
@@ -1067,6 +1074,8 @@ void DocMarkdownWriter::writeAggType(const ASTMarkup::Entry& entry, AggTypeDeclB
         List<Decl*> uniqueMethods;
         for (const auto& [_, decl] : memberDict)
         {
+            if (!shouldDocumentDecl(decl))
+                continue;
             CallableDecl* callableDecl = as<CallableDecl>(decl);
             if (callableDecl && isVisible(callableDecl))
             {

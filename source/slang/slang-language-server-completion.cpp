@@ -23,7 +23,7 @@ static const char* kDeclKeywords[] = {
     "protected", "typedef",        "typealias", "uniform",   "export",  "groupshared",
     "extension", "associatedtype", "namespace", "This",    "using",
     "__generic", "__exported",     "import",    "enum",      "cbuffer",   "tbuffer",   "func",
-    "functype"};
+    "functype",  "typename",       "each",      "expand" };
 static const char* kStmtKeywords[] = {
     "if",        "else",           "switch",    "case",      "default", "return",
     "try",       "throw",          "throws",    "catch",     "while",   "for",
@@ -35,7 +35,8 @@ static const char* kStmtKeywords[] = {
     "__generic", "__exported",     "import",    "enum",      "break",   "continue",
     "discard",   "defer",          "cbuffer",   "tbuffer",   "func",    "is",
     "as",        "nullptr",        "none",      "true",      "false",   "functype", 
-    "sizeof",    "alignof",        "__target_switch",        "__intrinsic_asm"};
+    "sizeof",    "alignof",        "__target_switch",        "__intrinsic_asm",
+    "each",      "expand" };
 
 static const char* hlslSemanticNames[] = {
     "register",
@@ -672,6 +673,20 @@ List<LanguageServerProtocol::CompletionItem> CompletionContext::createSwizzleCan
                 item.label = nameSB.toString();
                 result.add(item);
             }
+        }
+    }
+    else if (auto tupleType = as<TupleType>(type))
+    {
+        auto count = Math::Min((int)elementCount[0], 4);
+        for (int i = 0; i < count; i++)
+        {
+            LanguageServerProtocol::CompletionItem item;
+            item.data = 0;
+            if (tupleType->getMember(i))
+                item.detail = tupleType->getMember(i)->toString();
+            item.kind = LanguageServerProtocol::kCompletionItemKindVariable;
+            item.label = String("_") + String(i);
+            result.add(item);
         }
     }
     for (auto& item : result)

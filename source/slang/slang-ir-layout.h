@@ -21,7 +21,7 @@
 
 namespace Slang
 {
-class TargetRequest;
+struct CompilerOptionSet;
 
     /// Align `value` to the next multiple of `alignment`, which must be a power of two.
 inline IRIntegerValue align(IRIntegerValue value, int alignment)
@@ -58,18 +58,25 @@ struct IRTypeLayoutRules
 {
 public:
     IRTypeLayoutRuleName ruleName;
+
+    /// Align composite based on rule. Type is aligned assuming
+    /// it is apart of a composite (array, struct, matrix, etc...)
     virtual IRSizeAndAlignment alignCompositeElement(IRSizeAndAlignment elementSize) = 0;
+
+    /// Get alignment and size of a vector given components of vector.
+    /// This alignment is not assuming this vector is a member of a struct.
     virtual IRSizeAndAlignment getVectorSizeAndAlignment(IRSizeAndAlignment element, IRIntegerValue count) = 0;
     virtual IRIntegerValue adjustOffsetForNextAggregateMember(IRIntegerValue currentSize, IRIntegerValue lastElementAlignment) = 0;
     static IRTypeLayoutRules* getStd430();
     static IRTypeLayoutRules* getStd140();
     static IRTypeLayoutRules* getNatural();
+    static IRTypeLayoutRules* getConstantBuffer();
     static IRTypeLayoutRules* get(IRTypeLayoutRuleName name);
 };
 
-Result getOffset(TargetRequest* target, IRTypeLayoutRules* rules, IRStructField* field, IRIntegerValue* outOffset);
+Result getOffset(CompilerOptionSet& optionSet, IRTypeLayoutRules* rules, IRStructField* field, IRIntegerValue* outOffset);
 
-Result getSizeAndAlignment(TargetRequest* target, IRTypeLayoutRules* rules, IRType* type, IRSizeAndAlignment* outSizeAndAlignment);
+Result getSizeAndAlignment(CompilerOptionSet& optionSet, IRTypeLayoutRules* rules, IRType* type, IRSizeAndAlignment* outSizeAndAlignment);
 
     /// Compute (if necessary) and return the natural size and alignment of `type`.
     ///
@@ -77,7 +84,7 @@ Result getSizeAndAlignment(TargetRequest* target, IRTypeLayoutRules* rules, IRTy
     /// general-purpose memory for the current target. In that case the
     /// type is considered to have no natural layout.
     ///
-Result getNaturalSizeAndAlignment(TargetRequest* target, IRType* type, IRSizeAndAlignment* outSizeAndAlignment);
+Result getNaturalSizeAndAlignment(CompilerOptionSet& optionSet, IRType* type, IRSizeAndAlignment* outSizeAndAlignment);
 
     /// Compute (if necessary) and return the natural offset of `field`
     ///
@@ -85,7 +92,7 @@ Result getNaturalSizeAndAlignment(TargetRequest* target, IRType* type, IRSizeAnd
     /// that can be stored in general-purpose memory. In that case, the
     /// field is considered to have no natural offset.
     ///
-Result getNaturalOffset(TargetRequest* target, IRStructField* field, IRIntegerValue* outOffset);
+Result getNaturalOffset(CompilerOptionSet& optionSet, IRStructField* field, IRIntegerValue* outOffset);
 
 /// Compute (if necessary) and return the std430 size and alignment of `type`.
 ///
@@ -93,7 +100,7 @@ Result getNaturalOffset(TargetRequest* target, IRStructField* field, IRIntegerVa
 /// general-purpose memory for the current target. In that case the
 /// type is considered to have no std430 layout.
 ///
-Result getStd430SizeAndAlignment(TargetRequest* target, IRType* type, IRSizeAndAlignment* outSizeAndAlignment);
+Result getStd430SizeAndAlignment(CompilerOptionSet& optionSet, IRType* type, IRSizeAndAlignment* outSizeAndAlignment);
 
 /// Compute (if necessary) and return the std430 offset of `field`
 ///
@@ -101,7 +108,7 @@ Result getStd430SizeAndAlignment(TargetRequest* target, IRType* type, IRSizeAndA
 /// that can be stored in general-purpose memory. In that case, the
 /// field is considered to have no std430 offset.
 ///
-Result getStd430Offset(TargetRequest* target, IRStructField* field, IRIntegerValue* outOffset);
+Result getStd430Offset(CompilerOptionSet& optionSet, IRStructField* field, IRIntegerValue* outOffset);
 
 }
 

@@ -4,7 +4,6 @@
 #include "../core/slang-string-util.h"
 #include "../core/slang-string-escape-util.h"
 #include "../core/slang-char-encode.h"
-
 #include "slang-artifact-representation-impl.h"
 #include "slang-artifact-impl.h"
 #include "slang-artifact-util.h"
@@ -574,15 +573,33 @@ int SourceFile::calcColumnIndex(int lineIndex, int offset, int tabSize)
 
 void SourceFile::setContents(ISlangBlob* blob)
 {
-    const UInt contentSize = blob->getBufferSize();
+    const UInt rawContentSize = blob->getBufferSize();
 
-    SLANG_ASSERT(contentSize == m_contentSize);
+    SLANG_ASSERT(rawContentSize == m_contentSize);
 
-    char const* contentBegin = (char const*)blob->getBufferPointer();
-    char const* contentEnd = contentBegin + contentSize;
+    Byte* rawContentBegin = (Byte*)blob->getBufferPointer();
 
-    m_contentBlob = blob;
-    m_content = UnownedStringSlice(contentBegin, contentEnd);
+    // Query the encoding type and discard the Unicode Byte-Order-Marker before decoding
+    size_t offset;
+    auto type = CharEncoding::determineEncoding(
+        rawContentBegin,
+        rawContentSize,
+        offset);
+    SLANG_ASSERT(rawContentSize >= offset);
+
+    List<char> decodedBuffer;
+    CharEncoding::getEncoding(type)->decode(
+        rawContentBegin + offset,
+        int(rawContentSize - offset),
+        decodedBuffer);
+
+    m_contentBlob = RawBlob::create(decodedBuffer.getBuffer(), decodedBuffer.getCount());
+
+    char const* decodedContentBegin = (char const*)m_contentBlob->getBufferPointer();
+    const UInt decodedContentSize = m_contentBlob->getBufferSize();
+    char const* decodedContentEnd = decodedContentBegin + decodedContentSize;
+
+    m_content = UnownedStringSlice(decodedContentBegin, decodedContentEnd);
 }
 
 void SourceFile::setContents(const String& content)
@@ -600,6 +617,17 @@ SourceFile::SourceFile(SourceManager* sourceManager, const PathInfo& pathInfo, s
 
 SourceFile::~SourceFile()
 {
+}
+
+SHA1::Digest SourceFile::getDigest()
+{
+    if (m_digest == SHA1::Digest())
+    {
+        DigestBuilder<SHA1> builder;
+        builder.append(getContent());
+        m_digest = builder.finalize();
+    }
+    return m_digest;
 }
 
 String SourceFile::calcVerbosePath() const

@@ -1,3 +1,5 @@
+> Note: This document is a work in progress. It is both incomplete and, in many cases, inaccurate.
+
 Types
 =====
 
@@ -19,14 +21,14 @@ Scalar Types
 
 ### Boolean Type
 
-The type `bool` is used to represent Boolean truth value: `true` and `false`.
+The type `bool` is used to represent Boolean truth values: `true` and `false`.
 
 The size of a `bool` varies across target platforms; programs that need to ensure a matching in-memory layout between targets should not use `bool` for in-memory data structures.
 On all platforms, the `bool` type must be _naturally aligned_ (its alignment is its size).
 
 ### Integer Types
 
-The following integer types are defines:
+The following integer types are defined:
 
 | Name          | Description |
 |---------------|-------------|
@@ -111,7 +113,8 @@ This means that the bare name `vector` may be used as a type equivalent to `floa
 // All of these variables have the same type
 vector a;
 float4 b;
-vector<float, 4> c;
+vector<float> c;
+vector<float, 4> d;
 ```
 
 Matrix Types

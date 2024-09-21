@@ -3,7 +3,7 @@
 // This file implements an example of hardware ray-tracing using
 // Slang shaders and the `gfx` graphics API.
 
-#include <slang.h>
+#include "slang.h"
 #include "slang-gfx.h"
 #include "gfx-util/shader-cursor.h"
 #include "tools/platform/window.h"
@@ -14,6 +14,8 @@
 
 using namespace gfx;
 using namespace Slang;
+
+static const ExampleResources resourceBase("ray-tracing");
 
 struct Uniforms
 {
@@ -161,7 +163,8 @@ gfx::Result loadShaderProgram(
     slangSession = device->getSlangSession();
 
     ComPtr<slang::IBlob> diagnosticsBlob;
-    slang::IModule* module = slangSession->loadModule("shaders", diagnosticsBlob.writeRef());
+    Slang::String path = resourceBase.resolveResource("shaders.slang");
+    slang::IModule* module = slangSession->loadModule(path.getBuffer(), diagnosticsBlob.writeRef());
     diagnoseIfNeeded(diagnosticsBlob);
     if(!module)
         return SLANG_FAIL;
@@ -191,6 +194,11 @@ gfx::Result loadShaderProgram(
         diagnosticsBlob.writeRef());
     diagnoseIfNeeded(diagnosticsBlob);
     SLANG_RETURN_ON_FAIL(result);
+
+    if (isTestMode())
+    {
+        printEntrypointHashes(componentTypes.getCount() - 1, 1, linkedProgram);
+    }
 
     gfx::IShaderProgram::Desc programDesc = {};
     programDesc.slangGlobalScope = linkedProgram;
@@ -285,11 +293,15 @@ void onMouseUp(platform::MouseEventArgs args) { isMouseDown = false; }
 Slang::Result initialize()
 {
     initializeBase("Ray Tracing", 1024, 768);
-    gWindow->events.mouseMove = [this](const platform::MouseEventArgs& e) { onMouseMove(e); };
-    gWindow->events.mouseUp = [this](const platform::MouseEventArgs& e) { onMouseUp(e); };
-    gWindow->events.mouseDown = [this](const platform::MouseEventArgs& e) { onMouseDown(e); };
-    gWindow->events.keyDown = [this](const platform::KeyEventArgs& e) { onKeyDown(e); };
-    gWindow->events.keyUp = [this](const platform::KeyEventArgs& e) { onKeyUp(e); };
+
+    if (!isTestMode())
+    {
+        gWindow->events.mouseMove = [this](const platform::MouseEventArgs& e) { onMouseMove(e); };
+        gWindow->events.mouseUp = [this](const platform::MouseEventArgs& e) { onMouseUp(e); };
+        gWindow->events.mouseDown = [this](const platform::MouseEventArgs& e) { onMouseDown(e); };
+        gWindow->events.keyDown = [this](const platform::KeyEventArgs& e) { onKeyDown(e); };
+        gWindow->events.keyUp = [this](const platform::KeyEventArgs& e) { onKeyUp(e); };
+    }
 
     IBufferResource::Desc vertexBufferDesc;
     vertexBufferDesc.type = IResource::Type::Buffer;
@@ -309,6 +321,7 @@ Slang::Result initialize()
     IBufferResource::Desc primitiveBufferDesc;
     primitiveBufferDesc.type = IResource::Type::Buffer;
     primitiveBufferDesc.sizeInBytes = kPrimitiveCount * sizeof(Primitive);
+    primitiveBufferDesc.elementSize = sizeof(Primitive);
     primitiveBufferDesc.defaultState = ResourceState::ShaderResource;
     gPrimitiveBuffer = gDevice->createBufferResource(primitiveBufferDesc, &kPrimitiveData[0]);
     if (!gPrimitiveBuffer)
@@ -317,7 +330,6 @@ Slang::Result initialize()
     IResourceView::Desc primitiveSRVDesc = {};
     primitiveSRVDesc.format = Format::Unknown;
     primitiveSRVDesc.type = IResourceView::Type::ShaderResource;
-    primitiveSRVDesc.bufferElementSize = sizeof(Primitive);
     gPrimitiveBufferSRV = gDevice->createBufferView(gPrimitiveBuffer, nullptr, primitiveSRVDesc);
 
     IBufferResource::Desc transformBufferDesc;
@@ -632,9 +644,13 @@ virtual void renderFrame(int frameBufferIndex) override
         presentCommandBuffer->close();
         gQueue->executeCommandBuffer(presentCommandBuffer);
     }
-    // With that, we are done drawing for one frame, and ready for the next.
-    //
-    gSwapchain->present();
+
+    if (!isTestMode())
+    {
+        // With that, we are done drawing for one frame, and ready for the next.
+        //
+        gSwapchain->present();
+    }
 }
 
 };

@@ -2,37 +2,37 @@
 #pragma once
 
 #include "slang-ir-simplify-cfg.h"
+#include "slang-ir-peephole.h"
+#include "slang-ir-dce.h"
 
 namespace Slang
 {
     struct IRModule;
     struct IRGlobalValueWithCode;
     class DiagnosticSink;
-    class TargetRequest;
+    class TargetProgram;
 
     struct IRSimplificationOptions
     {
         CFGSimplificationOptions cfgOptions;
-        static IRSimplificationOptions getDefault()
-        {
-            IRSimplificationOptions result;
-            return result;
-        }
-        static IRSimplificationOptions getFast()
-        {
-            IRSimplificationOptions result;
-            result.cfgOptions.removeSideEffectFreeLoops = false;
-            result.cfgOptions.removeTrivialSingleIterationLoops = false;
-            return result;
-        }
+        PeepholeOptimizationOptions peepholeOptions;
+        IRDeadCodeEliminationOptions deadCodeElimOptions;
+
+        bool minimalOptimization = false;
+        bool removeRedundancy = false;
+
+        static IRSimplificationOptions getDefault(TargetProgram* targetProgram);
+
+        static IRSimplificationOptions getFast(TargetProgram* targetProgram);
+
     };
 
     // Run a combination of SSA, SCCP, SimplifyCFG, and DeadCodeElimination pass
     // until no more changes are possible.
-    void simplifyIR(TargetRequest* target, IRModule* module, IRSimplificationOptions options, DiagnosticSink* sink = nullptr);
+    void simplifyIR(TargetProgram* target, IRModule* module, IRSimplificationOptions options, DiagnosticSink* sink = nullptr);
 
     // Run simplifications on IR that is out of SSA form.
-    void simplifyNonSSAIR(TargetRequest* target, IRModule* module, IRSimplificationOptions options);
+    void simplifyNonSSAIR(TargetProgram* target, IRModule* module, IRSimplificationOptions options);
 
-    void simplifyFunc(TargetRequest* target, IRGlobalValueWithCode* func, IRSimplificationOptions options, DiagnosticSink* sink = nullptr);
+    void simplifyFunc(TargetProgram* target, IRGlobalValueWithCode* func, IRSimplificationOptions options, DiagnosticSink* sink = nullptr);
 }

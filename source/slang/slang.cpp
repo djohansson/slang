@@ -1,4 +1,4 @@
-#include "../../slang.h"
+#include "slang.h"
 
 #include "../core/slang-io.h"
 #include "../core/slang-string-util.h"
@@ -26,6 +26,7 @@
 #include "slang-parser.h"
 #include "slang-preprocessor.h"
 #include "slang-type-layout.h"
+#include "slang-lookup.h"
 
 #include "slang-options.h"
 
@@ -47,7 +48,7 @@
 
 #include "slang-check-impl.h"
 
-#include "../../slang-tag-version.h"
+#include "slang-tag-version.h"
 
 #include <sys/stat.h>
 
@@ -124,7 +125,7 @@ namespace Slang {
 
 const char* getBuildTagString()
 {
-    if (UnownedStringSlice(SLANG_TAG_VERSION) == "unknown")
+    if (UnownedStringSlice(SLANG_TAG_VERSION) == "0.0.0-unknown")
     {
         // If the tag is unknown, then we will try to get the timestamp of the shared library
         // and use that as the version string, so that we can at least return something
@@ -140,7 +141,7 @@ void Session::init()
 {
     SLANG_ASSERT(BaseTypeInfo::check());
 
-    
+
     _initCodeGenTransitionMap();
 
     ::memset(m_downstreamCompilerLocators, 0, sizeof(m_downstreamCompilerLocators));
@@ -169,7 +170,7 @@ void Session::init()
 
     // Built in linkage uses the built in builder
     m_builtinLinkage = new Linkage(this, builtinAstBuilder, nullptr);
-    m_builtinLinkage->debugInfoLevel = DebugInfoLevel::None;
+    m_builtinLinkage->m_optionSet.set(CompilerOptionName::DebugInformation, DebugInfoLevel::None);
 
     // Because the `Session` retains the builtin `Linkage`,
     // we need to make sure that the parent pointer inside
@@ -246,6 +247,7 @@ void Session::_initCodeGenTransitionMap()
             // is available. We prefer LLVM if that's available. If it's not we can use generic C/C++ compiler
 
             map.addTransition(source, CodeGenTarget::ShaderSharedLibrary, PassThroughMode::GenericCCpp);
+            map.addTransition(source, CodeGenTarget::HostSharedLibrary, PassThroughMode::GenericCCpp);
             map.addTransition(source, CodeGenTarget::HostExecutable, PassThroughMode::GenericCCpp);
             map.addTransition(source, CodeGenTarget::ObjectCode, PassThroughMode::GenericCCpp);
         }
@@ -257,11 +259,13 @@ void Session::_initCodeGenTransitionMap()
     map.addTransition(CodeGenTarget::HLSL, CodeGenTarget::DXBytecode, PassThroughMode::Fxc);
     map.addTransition(CodeGenTarget::HLSL, CodeGenTarget::DXIL, PassThroughMode::Dxc);
     map.addTransition(CodeGenTarget::GLSL, CodeGenTarget::SPIRV, PassThroughMode::Glslang);
-
+    map.addTransition(CodeGenTarget::Metal, CodeGenTarget::MetalLib, PassThroughMode::MetalC);
     // To assembly
     map.addTransition(CodeGenTarget::SPIRV, CodeGenTarget::SPIRVAssembly, PassThroughMode::Glslang);
     map.addTransition(CodeGenTarget::DXIL, CodeGenTarget::DXILAssembly, PassThroughMode::Dxc);
     map.addTransition(CodeGenTarget::DXBytecode, CodeGenTarget::DXBytecodeAssembly, PassThroughMode::Fxc);
+    map.addTransition(CodeGenTarget::MetalLib, CodeGenTarget::MetalLibAssembly, PassThroughMode::MetalC);
+
 }
 
 void Session::addBuiltins(
@@ -313,6 +317,14 @@ SlangResult Session::compileStdLib(slang::CompileStdLibFlags compileFlags)
         return SLANG_FAIL;
     }
 
+#ifdef _DEBUG
+    // Print a message in debug builds to notice the user that compiling the stdlib
+    // can take a while.
+    time_t beginTime;
+    time(&beginTime);
+    fprintf(stderr, "Compiling stdlib on debug build, this can take a while.\n");
+#endif
+
     // TODO(JS): Could make this return a SlangResult as opposed to exception
     StringBuilder stdLibSrcBuilder;
     stdLibSrcBuilder
@@ -363,6 +375,11 @@ SlangResult Session::compileStdLib(slang::CompileStdLibFlags compileFlags)
 
     finalizeSharedASTBuilder();
 
+#ifdef _DEBUG
+    time_t endTime;
+    time(&endTime);
+    fprintf(stderr, "Compiling stdlib took %.2f seconds.\n", difftime(endTime, beginTime));
+#endif
     return SLANG_OK;
 }
 
@@ -480,11 +497,13 @@ SlangResult Session::_readBuiltinModule(ISlangFileSystem* fileSystem, Scope* sco
     // Hmm - don't have a suitable sink yet, so attempt to just not have one
     options.sink = nullptr;
 
-    SLANG_RETURN_ON_FAIL(SerialContainerUtil::read(&riffContainer, options, containerData));
+    SLANG_RETURN_ON_FAIL(SerialContainerUtil::read(&riffContainer, options, nullptr, containerData));
 
     for (auto& srcModule : containerData.modules)
     {
         RefPtr<Module> module(new Module(linkage, srcModule.astBuilder));
+        module->setName(moduleName);
+        module->setDigest(srcModule.digest);
 
         ModuleDecl* moduleDecl = as<ModuleDecl>(srcModule.astRootNode);
         // Set the module back reference on the decl
@@ -528,11 +547,23 @@ SlangResult Session::_readBuiltinModule(ISlangFileSystem* fileSystem, Scope* sco
     return SLANG_OK;
 }
 
-ISlangUnknown* Session::getInterface(const Guid& guid)
+SLANG_NO_THROW SlangResult SLANG_MCALL Session::queryInterface(SlangUUID const& uuid, void** outObject)
 {
-    if(guid == ISlangUnknown::getTypeGuid() || guid == IGlobalSession::getTypeGuid())
-        return asExternal(this);
-    return nullptr;
+    if (uuid == Session::getTypeGuid())
+    {
+        addReference();
+        *outObject = static_cast<Session*>(this);
+        return SLANG_OK;
+    }
+
+    if (uuid == ISlangUnknown::getTypeGuid() && uuid == IGlobalSession::getTypeGuid())
+    {
+        addReference();
+        *outObject = static_cast<slang::IGlobalSession*>(this);
+        return SLANG_OK;
+    }
+
+    return SLANG_E_NO_INTERFACE;
 }
 
 static size_t _getStructureSize(const uint8_t* src)
@@ -577,7 +608,7 @@ static T makeFromSizeVersioned(const uint8_t* src)
 
     // The size to copy is the minimum on the two sizes
     const auto copySize = std::min(srcSize, dstSize);
-    ::memcpy(&dst, &src, copySize);
+    ::memcpy(&dst, src, copySize);
 
     // The final struct size is the destination size
     dst.structureSize = dstSize;
@@ -586,28 +617,13 @@ static T makeFromSizeVersioned(const uint8_t* src)
 }
 
 SLANG_NO_THROW SlangResult SLANG_MCALL Session::createSession(
-    slang::SessionDesc const&  desc,
+    slang::SessionDesc const&  inDesc,
     slang::ISession**          outSession)
 {
     RefPtr<ASTBuilder> astBuilder(new ASTBuilder(m_sharedASTBuilder, "Session::astBuilder"));
+    slang::SessionDesc desc = makeFromSizeVersioned<slang::SessionDesc>((uint8_t*)&inDesc);
+
     RefPtr<Linkage> linkage = new Linkage(this, astBuilder, getBuiltinLinkage());
-
-    {
-        const Int targetCount = desc.targetCount;
-        const uint8_t* targetDescPtr = reinterpret_cast<const uint8_t*>(desc.targets);
-        for (Int ii = 0; ii < targetCount; ++ii, targetDescPtr += _getStructureSize(targetDescPtr))
-        {
-            const auto targetDesc = makeFromSizeVersioned<slang::TargetDesc>(targetDescPtr);
-            linkage->addTarget(targetDesc);
-        }
-    }
-
-    linkage->setFlags(desc.flags);
-
-    if(desc.flags & slang::kSessionFlag_FalcorCustomSharedKeywordSemantics)
-    {
-        linkage->m_useFalcorCustomSharedKeywordSemantics = true;
-    }
 
     linkage->setMatrixLayoutMode(desc.defaultMatrixLayoutMode);
 
@@ -631,7 +647,19 @@ SLANG_NO_THROW SlangResult SLANG_MCALL Session::createSession(
 
     if (desc.structureSize >= offsetof(slang::SessionDesc, enableEffectAnnotations))
     {
-        linkage->setEnableEffectAnnotations(desc.enableEffectAnnotations);
+        linkage->m_optionSet.set(CompilerOptionName::EnableEffectAnnotations, desc.enableEffectAnnotations);
+    }
+
+    linkage->m_optionSet.load(desc.compilerOptionEntryCount, desc.compilerOptionEntries);
+
+    {
+        const Int targetCount = desc.targetCount;
+        const uint8_t* targetDescPtr = reinterpret_cast<const uint8_t*>(desc.targets);
+        for (Int ii = 0; ii < targetCount; ++ii, targetDescPtr += _getStructureSize(targetDescPtr))
+        {
+            const auto targetDesc = makeFromSizeVersioned<slang::TargetDesc>(targetDescPtr);
+            linkage->addTarget(targetDesc);
+        }
     }
 
     *outSession = asExternal(linkage.detach());
@@ -835,10 +863,69 @@ SLANG_NO_THROW SlangResult SLANG_MCALL Session::setSPIRVCoreGrammar(char const* 
     return spirvCoreGrammarInfo ? SLANG_OK : SLANG_FAIL;
 }
 
+struct ParsedCommandLineData : public ISlangUnknown, public ComObject
+{
+    SLANG_COM_OBJECT_IUNKNOWN_ALL
+
+    ISlangUnknown* getInterface(const Slang::Guid& guid)
+    {
+        if (guid == ISlangUnknown::getTypeGuid())
+            return this;
+        return nullptr;
+    }
+    List<SerializedOptionsData> options;
+    List<slang::TargetDesc> targets;
+};
+
+SLANG_NO_THROW SlangResult SLANG_MCALL Session::parseCommandLineArguments(
+    int argc,
+    const char* const* argv,
+    slang::SessionDesc* outDesc,
+    ISlangUnknown** outAllocation)
+{
+    if (outDesc->structureSize < sizeof(slang::SessionDesc))
+        return SLANG_E_BUFFER_TOO_SMALL;
+    RefPtr<ParsedCommandLineData> outData = new ParsedCommandLineData();
+    SerializedOptionsData optionData;
+    RefPtr<EndToEndCompileRequest> tempReq = new EndToEndCompileRequest(this);
+    tempReq->processCommandLineArguments(argv, argc);
+    tempReq->getOptionSet().serialize(&optionData);
+    outData->options.add(optionData);
+    for (auto target : tempReq->getLinkage()->targets)
+    {
+        slang::TargetDesc tdesc;
+        SerializedOptionsData targetOptionData;
+        tempReq->getTargetOptionSet(target).serialize(&targetOptionData);
+        outData->options.add(targetOptionData);
+        tdesc.compilerOptionEntryCount = (uint32_t)targetOptionData.entries.getCount();
+        tdesc.compilerOptionEntries = targetOptionData.entries.getBuffer();
+        outData->targets.add(tdesc);
+    }
+    outDesc->compilerOptionEntryCount = (uint32_t)optionData.entries.getCount();
+    outDesc->compilerOptionEntries = optionData.entries.getBuffer();
+    outDesc->targetCount = outData->targets.getCount();
+    outDesc->targets = outData->targets.getBuffer();
+    *outAllocation = outData.get();
+    outData->addRef();
+    return SLANG_OK;
+}
+
+SLANG_NO_THROW SlangResult SLANG_MCALL Session::getSessionDescDigest(slang::SessionDesc* sessionDesc, ISlangBlob** outBlob)
+{
+    ComPtr<slang::ISession> tempSession;
+    createSession(*sessionDesc, tempSession.writeRef());
+    auto linkage = static_cast<Linkage*>(tempSession.get());
+    DigestBuilder<SHA1> digestBuilder;
+    linkage->buildHash(digestBuilder, -1);
+    auto blob = digestBuilder.finalize().toBlob();
+    *outBlob = blob.detach();
+    return SLANG_OK;
+}
+
 Profile getEffectiveProfile(EntryPoint* entryPoint, TargetRequest* target)
 {
     auto entryPointProfile = entryPoint->getProfile();
-    auto targetProfile = target->getTargetProfile();
+    auto targetProfile = target->getOptionSet().getProfile();
 
     // Depending on the target *format* we might have to restrict the
     // profile family to one that makes sense.
@@ -852,8 +939,6 @@ Profile getEffectiveProfile(EntryPoint* entryPoint, TargetRequest* target)
         break;
 
     case CodeGenTarget::GLSL:
-    case CodeGenTarget::GLSL_Vulkan:
-    case CodeGenTarget::GLSL_Vulkan_OneDesc:
     case CodeGenTarget::SPIRV:
     case CodeGenTarget::SPIRVAssembly:
         if(targetProfile.getFamily() != ProfileFamily::GLSL)
@@ -870,6 +955,14 @@ Profile getEffectiveProfile(EntryPoint* entryPoint, TargetRequest* target)
         if(targetProfile.getFamily() != ProfileFamily::DX)
         {
             targetProfile.setVersion(ProfileVersion::DX_5_1);
+        }
+        break;
+    case CodeGenTarget::Metal:
+    case CodeGenTarget::MetalLib:
+    case CodeGenTarget::MetalLibAssembly:
+        if (targetProfile.getFamily() != ProfileFamily::METAL)
+        {
+            targetProfile.setVersion(ProfileVersion::METAL_2_3);
         }
         break;
     }
@@ -958,6 +1051,7 @@ Linkage::Linkage(Session* session, ASTBuilder* astBuilder, Linkage* builtinLinka
     , m_retainedSession(session)
     , m_sourceManager(&m_defaultSourceManager)
     , m_astBuilder(astBuilder)
+    , m_cmdLineContext(new CommandLineContext())
 {
     if (builtinLinkage)
         m_astBuilder->m_cachedNodes = builtinLinkage->getASTBuilder()->m_cachedNodes;
@@ -975,24 +1069,10 @@ Linkage::Linkage(Session* session, ASTBuilder* astBuilder, Linkage* builtinLinka
             mapNameToLoadedModules.add(nameToMod);
     }
 
-    {
-        RefPtr<CommandLineContext> context = new CommandLineContext;
-        m_downstreamArgs = DownstreamArgs(context);
-
-        // Add all of the possible names we allow for downstream tools
-        {
-            for (Index i = SLANG_PASS_THROUGH_NONE + 1; i < SLANG_PASS_THROUGH_COUNT_OF; ++i)
-            {
-                m_downstreamArgs.addName(TypeTextUtil::getPassThroughName(SlangPassThrough(i)));
-            }
-
-            // Generic downstream tool
-            m_downstreamArgs.addName("downstream");
-            // Generic downstream linker
-            m_downstreamArgs.addName("linker");
-        }
-    }
+    m_semanticsForReflection = new SharedSemanticsContext(this, nullptr, nullptr);
 }
+
+SharedSemanticsContext* Linkage::getSemanticsForReflection() { return m_semanticsForReflection.get(); }
 
 ISlangUnknown* Linkage::getInterface(const Guid& guid)
 {
@@ -1005,6 +1085,18 @@ ISlangUnknown* Linkage::getInterface(const Guid& guid)
 Linkage::~Linkage()
 {
     destroyTypeCheckingCache();
+}
+
+SearchDirectoryList& Linkage::getSearchDirectories()
+{
+    auto list = m_optionSet.getArray(CompilerOptionName::Include);
+    if (list.getCount() != searchDirectoryCache.searchDirectories.getCount())
+    {
+        searchDirectoryCache.searchDirectories.clear();
+        for (auto dir : list)
+            searchDirectoryCache.searchDirectories.add(SearchDirectory(dir.stringValue));
+    }
+    return searchDirectoryCache;
 }
 
 TypeCheckingCache* Linkage::getTypeCheckingCache()
@@ -1035,11 +1127,15 @@ void Linkage::addTarget(
     auto targetIndex = addTarget(CodeGenTarget(desc.format));
     auto target = targets[targetIndex];
 
-    target->setFloatingPointMode(FloatingPointMode(desc.floatingPointMode));
-    target->addTargetFlags(desc.flags);
-    target->setTargetProfile(Profile(desc.profile));
-    target->setLineDirectiveMode(LineDirectiveMode(desc.lineDirectiveMode));
-    target->setForceGLSLScalarBufferLayout(desc.forceGLSLScalarBufferLayout);
+    auto& optionSet = target->getOptionSet();
+    optionSet.inheritFrom(m_optionSet);
+
+    optionSet.set(CompilerOptionName::FloatingPointMode, FloatingPointMode(desc.floatingPointMode));
+    optionSet.addTargetFlags(desc.flags);
+    optionSet.setProfile(Profile(desc.profile));
+    optionSet.set(CompilerOptionName::LineDirectiveMode, LineDirectiveMode(desc.lineDirectiveMode));
+    optionSet.set(CompilerOptionName::GLSLForceScalarLayout, desc.forceGLSLScalarBufferLayout);
+
 }
 
 #if 0
@@ -1063,6 +1159,7 @@ SLANG_NO_THROW slang::IModule* SLANG_MCALL Linkage::loadModule(
     SLANG_AST_BUILDER_RAII(getASTBuilder());
 
     DiagnosticSink sink(getSourceManager(), Lexer::sourceLocationLexer);
+    applySettingsToDiagnosticSink(&sink, &sink, m_optionSet);
 
     if (isInLanguageServer())
     {
@@ -1086,29 +1183,49 @@ SLANG_NO_THROW slang::IModule* SLANG_MCALL Linkage::loadModule(
     }
 }
 
-SLANG_NO_THROW slang::IModule* SLANG_MCALL Linkage::loadModuleFromSource(
+slang::IModule* Linkage::loadModuleFromBlob(
     const char* moduleName,
     const char* path,
     slang::IBlob* source,
+    ModuleBlobType blobType,
     slang::IBlob** outDiagnostics)
 {
     SLANG_AST_BUILDER_RAII(getASTBuilder());
 
     DiagnosticSink sink(getSourceManager(), Lexer::sourceLocationLexer);
+    applySettingsToDiagnosticSink(&sink, &sink, m_optionSet);
+
     if (isInLanguageServer())
     {
         sink.setFlags(DiagnosticSink::Flag::HumaneLoc | DiagnosticSink::Flag::LanguageServer);
     }
+    
 
     try
     {
-        auto name = getNamePool()->getName(moduleName);
+        auto getDigestStr = [](auto x)
+            {
+                DigestBuilder<SHA1> digestBuilder;
+                digestBuilder.append(x);
+                return digestBuilder.finalize().toString();
+            };
+
+        String moduleNameStr = moduleName;
+        if (!moduleName)
+            moduleNameStr = getDigestStr(source);
+
+        auto name = getNamePool()->getName(moduleNameStr);
         RefPtr<LoadedModule> loadedModule;
         if (mapNameToLoadedModules.tryGetValue(name, loadedModule))
         {
             return loadedModule;
         }
         String pathStr = path;
+        if (pathStr.getLength() == 0)
+        {
+            // If path is empty, use a digest from source as path.
+            pathStr = getDigestStr(source);
+        }
         auto pathInfo = PathInfo::makeFromString(pathStr);
         if (File::exists(pathStr))
         {
@@ -1124,7 +1241,8 @@ SLANG_NO_THROW slang::IModule* SLANG_MCALL Linkage::loadModuleFromSource(
             source,
             SourceLoc(),
             &sink,
-            nullptr);
+            nullptr,
+            blobType);
         sink.getBlobIfNeeded(outDiagnostics);
         return asExternal(module);
 
@@ -1136,12 +1254,43 @@ SLANG_NO_THROW slang::IModule* SLANG_MCALL Linkage::loadModuleFromSource(
     }
 }
 
+SLANG_NO_THROW slang::IModule* SLANG_MCALL Linkage::loadModuleFromSource(
+    const char* moduleName,
+    const char* path,
+    slang::IBlob* source,
+    slang::IBlob** outDiagnostics)
+{
+    return loadModuleFromBlob(moduleName, path, source, ModuleBlobType::Source, outDiagnostics);
+}
+
+SLANG_NO_THROW slang::IModule* SLANG_MCALL Linkage::loadModuleFromSourceString(
+    const char* moduleName,
+    const char* path,
+    const char* source,
+    slang::IBlob** outDiagnostics)
+{
+    auto sourceBlob = StringBlob::create(UnownedStringSlice(source));
+    return loadModuleFromSource(moduleName, path, sourceBlob.get(), outDiagnostics);
+}
+
+SLANG_NO_THROW slang::IModule* SLANG_MCALL Linkage::loadModuleFromIRBlob(
+    const char* moduleName,
+    const char* path,
+    slang::IBlob* source,
+    slang::IBlob** outDiagnostics)
+{
+    return loadModuleFromBlob(moduleName, path, source, ModuleBlobType::IR, outDiagnostics);
+}
+
 SLANG_NO_THROW SlangResult SLANG_MCALL Linkage::createCompositeComponentType(
     slang::IComponentType* const*   componentTypes,
     SlangInt                        componentTypeCount,
     slang::IComponentType**         outCompositeComponentType,
     ISlangBlob**                    outDiagnostics)
 {
+    if (outCompositeComponentType == nullptr)
+        return SLANG_E_INVALID_ARG;
+
     SLANG_AST_BUILDER_RAII(getASTBuilder());
 
     // Attempting to create a "composite" of just one component type should
@@ -1156,6 +1305,7 @@ SLANG_NO_THROW SlangResult SLANG_MCALL Linkage::createCompositeComponentType(
     }
 
     DiagnosticSink sink(getSourceManager(), Lexer::sourceLocationLexer);
+    applySettingsToDiagnosticSink(&sink, &sink, m_optionSet);
 
     List<RefPtr<ComponentType>> childComponents;
     for( Int cc = 0; cc < componentTypeCount; ++cc )
@@ -1201,6 +1351,92 @@ SLANG_NO_THROW slang::TypeReflection* SLANG_MCALL Linkage::specializeType(
     return asExternal(specializedType);
 }
 
+DeclRef<GenericDecl> getGenericParentDeclRef(
+    ASTBuilder* astBuilder,
+    SemanticsVisitor* visitor,
+    DeclRef<Decl> declRef)
+{
+    // Create substituted parent decl ref.
+    auto decl = declRef.getDecl();
+
+    while (!as<GenericDecl>(decl))
+    {
+        decl = decl->parentDecl;
+    }
+
+    auto genericDecl = as<GenericDecl>(decl);
+    auto genericDeclRef = createDefaultSubstitutionsIfNeeded(astBuilder, visitor, DeclRef(genericDecl)).as<GenericDecl>();
+    return substituteDeclRef(SubstitutionSet(declRef), astBuilder, genericDeclRef).as<GenericDecl>();
+}
+
+DeclRef<Decl> Linkage::specializeWithArgTypes(
+    Expr*               funcExpr,
+    List<Type*>         argTypes,
+    DiagnosticSink*     sink)
+{
+    SemanticsVisitor visitor(getSemanticsForReflection());
+    visitor = visitor.withSink(sink);
+
+    ASTBuilder* astBuilder = getASTBuilder();
+    
+    if (auto declRefFuncExpr = as<DeclRefExpr>(funcExpr))
+    {
+        auto genericDeclRefExpr = astBuilder->create<DeclRefExpr>();
+        genericDeclRefExpr->declRef = getGenericParentDeclRef(
+            getASTBuilder(),
+            &visitor,
+            declRefFuncExpr->declRef);
+        funcExpr = genericDeclRefExpr;
+    }
+
+    List<Expr*> argExprs;
+    for (SlangInt aa = 0; aa < argTypes.getCount(); ++aa)
+    {
+        auto argType = argTypes[aa];
+
+        // Create an 'empty' expr with the given type. Ideally, the expression itself should not matter
+        // only its checked type.
+        //
+        auto argExpr = astBuilder->create<VarExpr>();
+        argExpr->type = argType;
+        argExprs.add(argExpr);
+    }
+
+    // Construct invoke expr.
+    auto invokeExpr = astBuilder->create<InvokeExpr>();
+    invokeExpr->functionExpr = funcExpr;
+    invokeExpr->arguments = argExprs;
+
+    auto checkedInvokeExpr = visitor.CheckInvokeExprWithCheckedOperands(invokeExpr);
+    return as<DeclRefExpr>(as<InvokeExpr>(checkedInvokeExpr)->functionExpr)->declRef;
+}
+
+
+DeclRef<Decl> Linkage::specializeGeneric(
+        DeclRef<Decl>                       declRef,
+        List<Expr*>                         argExprs,
+        DiagnosticSink*                     sink)
+{
+    SLANG_AST_BUILDER_RAII(getASTBuilder());
+    SLANG_ASSERT(declRef);
+
+    SemanticsVisitor visitor(getSemanticsForReflection());
+    visitor = visitor.withSink(sink);
+
+    auto genericDeclRef = getGenericParentDeclRef(getASTBuilder(), &visitor, declRef);
+
+    DeclRefExpr* declRefExpr = getASTBuilder()->create<DeclRefExpr>();
+    declRefExpr->declRef = genericDeclRef;
+
+    GenericAppExpr* genericAppExpr = getASTBuilder()->create<GenericAppExpr>();
+    genericAppExpr->functionExpr = declRefExpr;
+    genericAppExpr->arguments = argExprs;
+
+    auto specializedDeclRef = as<DeclRefExpr>(visitor.checkGenericAppWithCheckedArgs(genericAppExpr))->declRef;
+
+    return specializedDeclRef;
+}
+
 SLANG_NO_THROW slang::TypeLayoutReflection* SLANG_MCALL Linkage::getTypeLayout(
     slang::TypeReflection*  inType,
     SlangInt                targetIndex,
@@ -1223,7 +1459,7 @@ SLANG_NO_THROW slang::TypeLayoutReflection* SLANG_MCALL Linkage::getTypeLayout(
     //
     SLANG_UNUSED(rules);
 
-    auto typeLayout = target->getTypeLayout(type);
+    auto typeLayout = target->getTypeLayout(type, rules);
 
     // TODO: We currently don't have a path for capturing
     // errors that occur during layout (e.g., types that
@@ -1366,16 +1602,22 @@ SLANG_NO_THROW SlangResult SLANG_MCALL Linkage::createTypeConformanceComponentTy
     SlangInt conformanceIdOverride,
     ISlangBlob** outDiagnostics)
 {
+    if (outConformanceComponentType == nullptr)
+        return SLANG_E_INVALID_ARG;
+
     SLANG_AST_BUILDER_RAII(getASTBuilder());
 
     RefPtr<TypeConformance> result;
     DiagnosticSink sink;
+    applySettingsToDiagnosticSink(&sink, &sink, m_optionSet);
+
     try
     {
-        SharedSemanticsContext sharedSemanticsContext(this, nullptr, &sink);
-        SemanticsVisitor visitor(&sharedSemanticsContext);
+        SemanticsVisitor visitor(getSemanticsForReflection());
+        visitor = visitor.withSink(&sink);
+
         auto witness =
-            visitor.isSubtype((Slang::Type*)type, (Slang::Type*)interfaceType);
+            visitor.isSubtype((Slang::Type*)type, (Slang::Type*)interfaceType, IsSubTypeOptions::None);
         if (auto subtypeWitness = as<SubtypeWitness>(witness))
         {
             result = new TypeConformance(this, subtypeWitness, conformanceIdOverride, &sink);
@@ -1398,87 +1640,80 @@ SLANG_NO_THROW SlangResult SLANG_MCALL Linkage::createCompileRequest(
     return SLANG_OK;
 }
 
+SLANG_NO_THROW SlangInt SLANG_MCALL Linkage::getLoadedModuleCount()
+{
+    return loadedModulesList.getCount();
+}
+
+SLANG_NO_THROW slang::IModule* SLANG_MCALL Linkage::getLoadedModule(SlangInt index)
+{
+    if (index >= 0 && index < loadedModulesList.getCount())
+        return loadedModulesList[index].get();
+    return nullptr;
+}
+
 void Linkage::buildHash(DigestBuilder<SHA1>& builder, SlangInt targetIndex)
 {
     // Add the Slang compiler version to the hash
     auto version = String(getBuildTagString());
     builder.append(version);
 
-    // Add the search directory paths to the hash
-    auto searchDirectoryList = getSearchDirectories().searchDirectories;
-    for (auto& searchDir : searchDirectoryList)
-    {
-        auto searchPath = searchDir.path;
-        builder.append(searchPath);
-    }
+    // Add compiler options, including search path, preprocessor includes, etc.
+    m_optionSet.buildHash(builder);
 
-    // Add the preprocessor definitions to the hash
-    for (const auto& [defName, defVal] : preprocessorDefinitions)
+    auto addTargetDigest = [&](TargetRequest* targetReq)
     {
-        builder.append(defName);
-        builder.append(defVal);
-    }
+        targetReq->getOptionSet().buildHash(builder);
 
-    // Add compiler settings to hash
-    builder.append(defaultMatrixLayoutMode);
-    builder.append(debugInfoLevel);
-    builder.append(debugInfoFormat);
-    builder.append(optimizationLevel);
+        const PassThroughMode passThroughMode = getDownstreamCompilerRequiredForTarget(targetReq->getTarget());
+        const SourceLanguage sourceLanguage = getDefaultSourceLanguageForDownstreamCompiler(passThroughMode);
+
+        // Add prelude for the given downstream compiler.
+        ComPtr<ISlangBlob> prelude;
+        getGlobalSession()->getLanguagePrelude((SlangSourceLanguage)sourceLanguage, prelude.writeRef());
+        if (prelude)
+        {
+            builder.append(prelude);
+        }
+
+        // TODO: Downstream compilers (specifically dxc) can currently #include additional dependencies.
+        // This is currently the case for NVAPI headers included in the prelude.
+        // These dependencies are currently not picked up by the shader cache which is a significant issue.
+        // This can only be fixed by running the preprocessor in the slang compiler so dxc (or any other
+        // downstream compiler for that matter) isn't resolving any includes implicitly.
+
+        // Add the downstream compiler version (if it exists) to the hash
+        auto downstreamCompiler = getSessionImpl()->getOrLoadDownstreamCompiler(passThroughMode, nullptr);
+        if (downstreamCompiler)
+        {
+            ComPtr<ISlangBlob> versionString;
+            if (SLANG_SUCCEEDED(downstreamCompiler->getVersionString(versionString.writeRef())))
+            {
+                builder.append(versionString);
+            }
+        }
+    };
 
     // Add the target specified by targetIndex
-    auto targetReq = targets[targetIndex];
-    builder.append(targetReq->getTarget());
-    builder.append(targetReq->getTargetProfile().raw);
-    builder.append(targetReq->getTargetFlags());
-    builder.append(targetReq->getFloatingPointMode());
-    builder.append(targetReq->getLineDirectiveMode());
-    builder.append(targetReq->getForceGLSLScalarBufferLayout());
-    builder.append(targetReq->getDefaultMatrixLayoutMode());
-    builder.append(targetReq->shouldDumpIntermediates());
-    builder.append(targetReq->shouldTrackLiveness());
-
-    auto cookedCapabilities = targetReq->getTargetCaps().getExpandedAtoms();
-    builder.append(cookedCapabilities.getCount());
-    for (auto& capabilityConjunction : cookedCapabilities)
+    if (targetIndex == -1)
     {
-        builder.append(capabilityConjunction.getExpandedAtoms().getCount());
-        for (auto atom : capabilityConjunction.getExpandedAtoms())
-            builder.append(atom);
-    }
-
-    const PassThroughMode passThroughMode = getDownstreamCompilerRequiredForTarget(targetReq->getTarget());
-    const SourceLanguage sourceLanguage = getDefaultSourceLanguageForDownstreamCompiler(passThroughMode);
-
-    // Add prelude for the given downstream compiler.
-    ComPtr<ISlangBlob> prelude;
-    getGlobalSession()->getLanguagePrelude((SlangSourceLanguage)sourceLanguage, prelude.writeRef());
-    if (prelude)
-    {
-        builder.append(prelude);
-    }
-
-    // TODO: Downstream compilers (specifically dxc) can currently #include additional dependencies.
-    // This is currently the case for NVAPI headers included in the prelude.
-    // These dependencies are currently not picked up by the shader cache which is a significant issue.
-    // This can only be fixed by running the preprocessor in the slang compiler so dxc (or any other
-    // downstream compiler for that matter) isn't resolving any includes implicitly.
-
-    // Add the downstream compiler version (if it exists) to the hash
-    auto downstreamCompiler = getSessionImpl()->getOrLoadDownstreamCompiler(passThroughMode, nullptr);
-    if (downstreamCompiler)
-    {
-        ComPtr<ISlangBlob> versionString;
-        if (SLANG_SUCCEEDED(downstreamCompiler->getVersionString(versionString.writeRef())))
+        // -1 means all targets.
+        for (auto targetReq : targets)
         {
-            builder.append(versionString);
+            addTargetDigest(targetReq);
         }
+    }
+    else
+    {
+        auto targetReq = targets[targetIndex];
+        addTargetDigest(targetReq);
     }
 }
 
 SlangResult Linkage::addSearchPath(
     char const* path)
 {
-    searchDirectories.searchDirectories.add(Slang::SearchDirectory(path));
+    m_optionSet.add(CompilerOptionName::Include, String(path));
     return SLANG_OK;
 }
 
@@ -1486,14 +1721,18 @@ SlangResult Linkage::addPreprocessorDefine(
     char const* name,
     char const* value)
 {
-    preprocessorDefinitions[name] = value;
+    CompilerOptionValue val;
+    val.kind = CompilerOptionValueKind::String;
+    val.stringValue = name;
+    val.stringValue2 = value;
+    m_optionSet.add(CompilerOptionName::MacroDefine, val);
     return SLANG_OK;
 }
 
 SlangResult Linkage::setMatrixLayoutMode(
     SlangMatrixLayoutMode mode)
 {
-    defaultMatrixLayoutMode = MatrixLayoutMode(mode);
+    m_optionSet.setMatrixLayoutMode((MatrixLayoutMode)mode);
     return SLANG_OK;
 }
 
@@ -1503,8 +1742,15 @@ SlangResult Linkage::setMatrixLayoutMode(
 
 TargetRequest::TargetRequest(Linkage* linkage, CodeGenTarget format)
     : linkage(linkage)
-    , format(format)
-{}
+{
+    optionSet = linkage->m_optionSet;
+    optionSet.add(CompilerOptionName::Target, format);
+}
+
+TargetRequest::TargetRequest(const TargetRequest& other)
+    : RefObject(), linkage(other.linkage), optionSet(other.optionSet)
+{
+}
 
 
 Session* TargetRequest::getSession()
@@ -1512,23 +1758,20 @@ Session* TargetRequest::getSession()
     return linkage->getSessionImpl();
 }
 
-MatrixLayoutMode TargetRequest::getDefaultMatrixLayoutMode()
+HLSLToVulkanLayoutOptions* TargetRequest::getHLSLToVulkanLayoutOptions()
 {
-    return linkage->getDefaultMatrixLayoutMode();
-}
-
-void TargetRequest::setHLSLToVulkanLayoutOptions(HLSLToVulkanLayoutOptions* opts)
-{
-    if (isKhronosTarget(this))
+    if (!hlslToVulkanOptions)
     {
-        hlslToVulkanLayoutOptions = opts;
+        hlslToVulkanOptions = new HLSLToVulkanLayoutOptions();
+        hlslToVulkanOptions->loadFromOptionSet(optionSet);
     }
+    return hlslToVulkanOptions.get();
 }
 
-void TargetRequest::addCapability(CapabilityName capability)
+void TargetRequest::setTargetCaps(CapabilitySet capSet)
 {
-    rawCapabilities.add(capability);
-    cookedCapabilities = CapabilitySet::makeEmpty();
+    cookedCapabilities = capSet;
+
 }
 
 CapabilitySet TargetRequest::getTargetCaps()
@@ -1556,25 +1799,62 @@ CapabilitySet TargetRequest::getTargetCaps()
     // are available where can be directly encoded on the declarations.
 
     List<CapabilityName> atoms;
+
+    // If the user specified a explicit profile, we should pull
+    // a corresponding atom representing the target version from the profile.
+    CapabilitySet profileCaps = optionSet.getProfile().getCapabilityName();
+
     bool isGLSLTarget = false;
-    switch(format)
+    switch(getTarget())
     {
     case CodeGenTarget::GLSL:
-    case CodeGenTarget::GLSL_Vulkan:
-    case CodeGenTarget::GLSL_Vulkan_OneDesc:
         isGLSLTarget = true;
         atoms.add(CapabilityName::glsl);
         break;
     case CodeGenTarget::SPIRV:
     case CodeGenTarget::SPIRVAssembly:
-        if (targetFlags & SLANG_TARGET_FLAG_GENERATE_SPIRV_DIRECTLY)
+        if (getOptionSet().shouldEmitSPIRVDirectly())
         {
-            atoms.add(CapabilityName::spirv_1_5);
+            // Default to SPIRV 1.5 if the user has not specified a target version.
+            bool hasTargetVersionAtom = false;
+            if (!profileCaps.isEmpty())
+            {
+                profileCaps.join(CapabilitySet(CapabilityName::spirv_1_0));
+                for (auto profileCapAtomSet : profileCaps.getAtomSets())
+                {
+                    for (auto atom : profileCapAtomSet)
+                    {
+                        if (isTargetVersionAtom(asAtom(atom)))
+                        {
+                            atoms.add((CapabilityName)atom);
+                            hasTargetVersionAtom = true;
+                        }
+                    }
+                }
+            }
+            if (!hasTargetVersionAtom)
+            {
+                atoms.add(CapabilityName::spirv_1_5);
+            }
+            // If the user specified any SPIR-V extensions in the profile,
+            // pull them in.
+            for (auto profileCapAtomSet : profileCaps.getAtomSets())
+            {
+                for (auto atom : profileCapAtomSet)
+                {
+                    if (isSpirvExtensionAtom(asAtom(atom)))
+                    {
+                        atoms.add((CapabilityName)atom);
+                        hasTargetVersionAtom = true;
+                    }
+                }
+            }
         }
         else
         {
             isGLSLTarget = true;
             atoms.add(CapabilityName::glsl);
+            profileCaps.addSpirvVersionFromOtherAsGlslSpirvVersion(profileCaps);
         }
         break;
 
@@ -1594,6 +1874,7 @@ CapabilitySet TargetRequest::getTargetCaps()
     case CodeGenTarget::PyTorchCppBinding:
     case CodeGenTarget::HostExecutable:
     case CodeGenTarget::ShaderSharedLibrary:
+    case CodeGenTarget::HostSharedLibrary:
     case CodeGenTarget::HostHostCallable:
     case CodeGenTarget::ShaderHostCallable:
         atoms.add(CapabilityName::cpp);
@@ -1604,40 +1885,45 @@ CapabilitySet TargetRequest::getTargetCaps()
         atoms.add(CapabilityName::cuda);
         break;
 
+    case CodeGenTarget::Metal:
+    case CodeGenTarget::MetalLib:
+    case CodeGenTarget::MetalLibAssembly:
+        atoms.add(CapabilityName::metal);
+        break;
+
+    case CodeGenTarget::WGSL:
+        atoms.add(CapabilityName::wgsl);
+        break;        
+        
     default:
         break;
     }
 
     CapabilitySet targetCap = CapabilitySet(atoms);
 
-    CapabilitySet latestSpirvCapSet = CapabilitySet(CapabilityName::spirv_latest);
-    CapabilityName latestSpirvAtom = (CapabilityName)latestSpirvCapSet.getExpandedAtoms()[0].getExpandedAtoms().getLast();
-    for (auto atom : rawCapabilities)
+    if (profileCaps.atLeastOneSetImpliedInOther(targetCap) == CapabilitySet::ImpliesReturnFlags::Implied)
+        targetCap.join(profileCaps);
+    
+    for (auto atomVal : optionSet.getArray(CompilerOptionName::Capability))
     {
-        if (isGLSLTarget)
-        {
-            // If we are emitting GLSL code, we need to
-            // translate all spirv_*_* capabilities to
-            // glsl_spirv_*_* instead.
-            //
-            if (atom >= CapabilityName::spirv_1_0 && atom <= latestSpirvAtom)
-            {
-                atom = (CapabilityName)((Int)CapabilityName::glsl_spirv_1_0 + ((Int)atom - (Int)CapabilityName::spirv_1_0));
-            }
-        }
-        if (!targetCap.isIncompatibleWith(atom))
-        {
-            // Only add atoms that are compatible with the current target.
-            atoms.add(atom);
-        }
+        auto toAdd = CapabilitySet((CapabilityName)atomVal.intValue);
+        
+        if(isGLSLTarget)
+            targetCap.addSpirvVersionFromOtherAsGlslSpirvVersion(toAdd);
+
+        if (!targetCap.isIncompatibleWith(toAdd))
+            targetCap.join(toAdd);
     }
 
-    cookedCapabilities = CapabilitySet(atoms);
+    cookedCapabilities = targetCap;
+    
+    SLANG_ASSERT(!cookedCapabilities.isInvalid());
+        
     return cookedCapabilities;
 }
 
 
-TypeLayout* TargetRequest::getTypeLayout(Type* type)
+TypeLayout* TargetRequest::getTypeLayout(Type* type, slang::LayoutRules rules)
 {
     SLANG_AST_BUILDER_RAII(getLinkage()->getASTBuilder());
 
@@ -1651,13 +1937,14 @@ TypeLayout* TargetRequest::getTypeLayout(Type* type)
     // parameter instead (leaving the user to figure out how that
     // maps to the ordering via some API on the program layout).
     //
-    auto layoutContext = getInitialLayoutContextForTarget(this, nullptr);
+    auto layoutContext = getInitialLayoutContextForTarget(this, nullptr, rules);
 
     RefPtr<TypeLayout> result;
-    if (getTypeLayouts().tryGetValue(type, result))
+    auto key = TypeLayoutKey{ type, rules };
+    if (getTypeLayouts().tryGetValue(key, result))
         return result.Ptr();
     result = createTypeLayout(layoutContext, type);
-    getTypeLayouts()[type] = result;
+    getTypeLayouts()[key] = result;
     return result.Ptr();
 }
 
@@ -1672,6 +1959,12 @@ TranslationUnitRequest::TranslationUnitRequest(
     module = new Module(compileRequest->getLinkage());
 }
 
+TranslationUnitRequest::TranslationUnitRequest(
+    FrontEndCompileRequest* compileRequest, Module* m)
+    : compileRequest(compileRequest), module(m), isChecked(true)
+{
+    moduleName = getNamePool()->getName(m->getName());
+}
 
 Session* TranslationUnitRequest::getSession()
 {
@@ -1707,16 +2000,11 @@ Scope* TranslationUnitRequest::getLanguageScope()
 
 Dictionary<String, String> TranslationUnitRequest::getCombinedPreprocessorDefinitions()
 {
-    // TODO(JS):
-    // Note! that a adding a define twice will cause an exception in debug builds
-    // that may be desirable or not...
     Dictionary<String, String> combinedPreprocessorDefinitions;
-    for (const auto& def : compileRequest->getLinkage()->preprocessorDefinitions)
-        combinedPreprocessorDefinitions.add(def);
-    for (const auto& def : compileRequest->preprocessorDefinitions)
-        combinedPreprocessorDefinitions.add(def);
     for (const auto& def : preprocessorDefinitions)
-        combinedPreprocessorDefinitions.add(def);
+        combinedPreprocessorDefinitions.addIfNotExists(def);
+    for (const auto& def : compileRequest->optionSet.getArray(CompilerOptionName::MacroDefine))
+        combinedPreprocessorDefinitions.addIfNotExists(def.stringValue, def.stringValue2);
 
     // Define standard macros, if not already defined. This style assumes using `#if __SOME_VAR` style, as in
     //
@@ -1984,17 +2272,23 @@ Expr* Linkage::parseTermString(String typeStr, Scope* scope)
 
     // We need to temporarily replace the SourceManager for this CompileRequest
     ScopeReplaceSourceManager scopeReplaceSourceManager(this, &localSourceManager);
+    
+    SourceLanguage sourceLanguage;
 
     auto tokens = preprocessSource(
         srcFile,
         &sink,
         nullptr,
         Dictionary<String,String>(),
-        this);
+        this,
+        sourceLanguage);
+
+    if (sourceLanguage == SourceLanguage::Unknown)
+        sourceLanguage = SourceLanguage::Slang;
 
     return parseTermFromSourceFile(
         getASTBuilder(),
-        tokens, &sink, scope, getNamePool(), SourceLanguage::Slang);
+        tokens, &sink, scope, getNamePool(), sourceLanguage);
 }
 
 Type* checkProperType(
@@ -2027,7 +2321,7 @@ Type* ComponentType::getTypeFromString(
     // the modules that were directly or
     // indirectly referenced.
     //
-    Scope* scope = _createScopeForLegacyLookup(astBuilder);
+    Scope* scope = _getOrCreateScopeForLegacyLookup(astBuilder);
 
     auto linkage = getLinkage();
 
@@ -2042,6 +2336,214 @@ Type* ComponentType::getTypeFromString(
         m_types[typeStr] = type;
     }
     return type;
+}
+
+Expr* ComponentType::findDeclFromString(
+    String const& name,
+    DiagnosticSink* sink)
+{
+    // If we've looked up this type name before,
+   // then we can re-use it.
+   //
+    Expr* result = nullptr;
+    if (m_decls.tryGetValue(name, result))
+        return result;
+
+
+    // TODO(JS): For now just used the linkages ASTBuilder to keep on scope
+    //
+    // The parseTermString uses the linkage ASTBuilder for it's parsing.
+    //
+    // It might be possible to just create a temporary ASTBuilder - the worry though is
+    // that the parsing sets a member variable in AST node to one of these scopes, and then
+    // it become a dangling pointer. So for now we go with the linkages.
+    auto astBuilder = getLinkage()->getASTBuilder();
+
+    // Otherwise, we need to start looking in
+    // the modules that were directly or
+    // indirectly referenced.
+    //
+    Scope* scope = _getOrCreateScopeForLegacyLookup(astBuilder);
+
+    auto linkage = getLinkage();
+
+    SLANG_AST_BUILDER_RAII(linkage->getASTBuilder());
+
+    Expr* expr = linkage->parseTermString(name, scope);
+
+    SemanticsContext context(linkage->getSemanticsForReflection());
+    context = context.allowStaticReferenceToNonStaticMember().withSink(sink);
+
+    SemanticsVisitor visitor(context);
+
+    auto checkedExpr = visitor.CheckTerm(expr);
+
+    if (as<DeclRefExpr>(checkedExpr) || as<OverloadedExpr>(checkedExpr))
+    {
+        result = checkedExpr;
+    }
+    
+    m_decls[name] = result;
+    return result;
+}
+
+Expr* ComponentType::findDeclFromStringInType(
+    Type* type,
+    String const& name,
+    LookupMask mask,
+    DiagnosticSink* sink)
+{
+    // Only look up in the type if it is a DeclRefType
+    if (!as<DeclRefType>(type))
+        return nullptr;
+
+    // TODO(JS): For now just used the linkages ASTBuilder to keep on scope
+    //
+    // The parseTermString uses the linkage ASTBuilder for it's parsing.
+    //
+    // It might be possible to just create a temporary ASTBuilder - the worry though is
+    // that the parsing sets a member variable in AST node to one of these scopes, and then
+    // it become a dangling pointer. So for now we go with the linkages.
+    auto astBuilder = getLinkage()->getASTBuilder();
+
+    // Otherwise, we need to start looking in
+    // the modules that were directly or
+    // indirectly referenced.
+    //
+    Scope* scope = _getOrCreateScopeForLegacyLookup(astBuilder);
+
+    auto linkage = getLinkage();
+
+    SLANG_AST_BUILDER_RAII(linkage->getASTBuilder());
+
+    Expr* expr = linkage->parseTermString(name, scope);
+
+    SemanticsContext context(linkage->getSemanticsForReflection());
+    context = context.allowStaticReferenceToNonStaticMember().withSink(sink);
+
+    SemanticsVisitor visitor(context);
+
+    GenericAppExpr* genericOuterExpr = nullptr;
+    if (as<GenericAppExpr>(expr))
+    {
+        // Unwrap the generic application, and re-wrap it around the static-member expr
+        genericOuterExpr = as<GenericAppExpr>(expr);
+        expr = genericOuterExpr->functionExpr;
+    }
+
+    if (!as<VarExpr>(expr))
+        return nullptr;
+
+    auto rs = astBuilder->create<StaticMemberExpr>();
+    auto typeExpr = astBuilder->create<SharedTypeExpr>();
+    auto typetype = astBuilder->getOrCreate<TypeType>(type);
+    typeExpr->type = typetype;
+    rs->baseExpression = typeExpr;
+    rs->name = as<VarExpr>(expr)->name;
+
+    expr = rs;
+
+    // If we have a generic-app expression, re-wrap the static-member expr
+    if (genericOuterExpr)
+    {
+        genericOuterExpr->functionExpr = expr;
+        expr = genericOuterExpr;
+    }
+    
+    auto checkedTerm = visitor.CheckTerm(expr);
+    auto resolvedTerm = visitor.maybeResolveOverloadedExpr(checkedTerm, mask, sink);
+    
+
+    if (auto overloadedExpr = as<OverloadedExpr>(resolvedTerm))
+    {
+        return overloadedExpr;
+    }
+    if (auto declRefExpr = as<DeclRefExpr>(resolvedTerm))
+    {
+        return declRefExpr;
+    }
+
+    return nullptr;
+}
+
+bool ComponentType::isSubType(Type* subType, Type* superType)
+{
+    SemanticsContext context(getLinkage()->getSemanticsForReflection());
+    SemanticsVisitor visitor(context);
+
+    return (visitor.isSubtype(subType, superType, IsSubTypeOptions::None) != nullptr);
+}
+
+static void collectExportedConstantInContainer(
+    Dictionary<String, IntVal*>& dict,
+    ASTBuilder* builder,
+    ContainerDecl* containerDecl)
+{
+    for (auto m : containerDecl->members)
+    {
+        auto varMember = as<VarDeclBase>(m);
+        if (!varMember)
+            continue;
+        if (!varMember->val)
+            continue;
+        bool isExported = false;
+        bool isConst = true;
+        bool isExtern = false;
+        for (auto modifier : m->modifiers)
+        {
+            if (as<HLSLExportModifier>(modifier))
+                isExported = true;
+            if (as<ExternAttribute>(modifier) || as<ExternModifier>(modifier))
+            {
+                isExtern = true;
+                isExported = true;
+            }
+            if (as<ConstModifier>(modifier))
+                isConst = true;
+            if (isExported && isConst)
+                break;
+        }
+        if (isExported && isConst)
+        {
+            auto mangledName = getMangledName(builder, m);
+            if (isExtern && dict.containsKey(mangledName))
+                continue;
+            dict[mangledName] = varMember->val;
+        }
+    }
+
+    for (auto member : containerDecl->members)
+    {
+        if (as<NamespaceDecl>(member) || as<FileDecl>(member))
+        {
+            collectExportedConstantInContainer(dict, builder, (ContainerDecl*)member);
+        }
+    }
+}
+
+Dictionary<String, IntVal*>& ComponentType::getMangledNameToIntValMap()
+{
+    if (m_mapMangledNameToIntVal)
+    {
+        return *m_mapMangledNameToIntVal;
+    }
+    m_mapMangledNameToIntVal = std::make_unique<Dictionary<String, IntVal*>>();
+    auto astBuilder = getLinkage()->getASTBuilder();
+    SLANG_AST_BUILDER_RAII(astBuilder);
+    Scope* scope = _getOrCreateScopeForLegacyLookup(astBuilder);
+    for (; scope; scope = scope->nextSibling)
+    {
+        if (scope->containerDecl)
+            collectExportedConstantInContainer(*m_mapMangledNameToIntVal, astBuilder, scope->containerDecl);
+    }
+    return *m_mapMangledNameToIntVal;
+}
+
+ConstantIntVal* ComponentType::tryFoldIntVal(IntVal* intVal)
+{
+    auto astBuilder = getLinkage()->getASTBuilder();
+    SLANG_AST_BUILDER_RAII(astBuilder);
+    return as<ConstantIntVal>(intVal->linkTimeResolve(getMangledNameToIntValMap()));
 }
 
 CompileRequestBase::CompileRequestBase(
@@ -2059,6 +2561,7 @@ FrontEndCompileRequest::FrontEndCompileRequest(
     : CompileRequestBase(linkage, sink)
     , m_writers(writers)
 {
+    optionSet.inheritFrom(linkage->m_optionSet);
 }
 
     /// Handlers for preprocessor callbacks to use when doing ordinary front-end compilation
@@ -2337,6 +2840,10 @@ static void _outputIncludes(const List<SourceFile*>& sourceFiles, SourceManager*
 void FrontEndCompileRequest::parseTranslationUnit(
     TranslationUnitRequest* translationUnit)
 {
+    SLANG_PROFILE;
+    if (translationUnit->isChecked)
+        return;
+
     auto linkage = getLinkage();
 
     SLANG_AST_BUILDER_RAII(linkage->getASTBuilder());
@@ -2347,20 +2854,7 @@ void FrontEndCompileRequest::parseTranslationUnit(
     // Here we should probably be using the searchDirectories on the FrontEndCompileRequest.
     // If searchDirectories.parent pointed to the one in the Linkage would mean linkage paths
     // would be checked too (after those on the FrontEndCompileRequest).
-    IncludeSystem includeSystem(&linkage->searchDirectories, linkage->getFileSystemExt(), linkage->getSourceManager());
-
-    Scope* languageScope = nullptr;
-    switch (translationUnit->sourceLanguage)
-    {
-    case SourceLanguage::HLSL:
-        languageScope = getSession()->hlslLanguageScope;
-        break;
-
-    case SourceLanguage::Slang:
-    default:
-        languageScope = getSession()->slangLanguageScope;
-        break;
-    }
+    IncludeSystem includeSystem(&linkage->getSearchDirectories(), linkage->getFileSystemExt(), linkage->getSourceManager());
 
     auto combinedPreprocessorDefinitions = translationUnit->getCombinedPreprocessorDefinitions();
     
@@ -2406,20 +2900,38 @@ void FrontEndCompileRequest::parseTranslationUnit(
 
     for (auto sourceFile : translationUnit->getSourceFiles())
     {
+        SourceLanguage sourceLanguage = SourceLanguage::Unknown;
         auto tokens = preprocessSource(
             sourceFile,
             getSink(),
             &includeSystem,
             combinedPreprocessorDefinitions,
             getLinkage(),
+            sourceLanguage,
             &preprocessorHandler);
 
-        if (outputIncludes)
+        if (sourceLanguage == SourceLanguage::Unknown)
+            sourceLanguage = translationUnit->sourceLanguage;
+
+        Scope* languageScope = nullptr;
+        switch (sourceLanguage)
+        {
+        case SourceLanguage::HLSL:
+            languageScope = getSession()->hlslLanguageScope;
+            break;
+
+        case SourceLanguage::Slang:
+        default:
+            languageScope = getSession()->slangLanguageScope;
+            break;
+        }
+
+        if (optionSet.getBoolOption(CompilerOptionName::OutputIncludes))
         {
             _outputIncludes(translationUnit->getSourceFiles(), getSink()->getSourceManager(), getSink());
         }
 
-        if (outputPreprocessor)
+        if (optionSet.getBoolOption(CompilerOptionName::PreprocessorOutput))
         {
             if (m_writers)
             {
@@ -2432,6 +2944,7 @@ void FrontEndCompileRequest::parseTranslationUnit(
         parseSourceFile(
             astBuilder,
             translationUnit,
+            sourceLanguage,
             tokens,
             getSink(),
             languageScope,
@@ -2439,7 +2952,7 @@ void FrontEndCompileRequest::parseTranslationUnit(
 
         // Let's try dumping
 
-        if (shouldDumpAST)
+        if (optionSet.getBoolOption(CompilerOptionName::DumpAst))
         {
             StringBuilder buf;
             SourceWriter writer(linkage->getSourceManager(), LineDirectiveMode::None, nullptr);
@@ -2492,6 +3005,9 @@ void FrontEndCompileRequest::checkAllTranslationUnits()
     // apply the semantic checking logic.
     for( auto& translationUnit : translationUnits )
     {
+        if (translationUnit->isChecked)
+            continue;
+
         checkTranslationUnit(translationUnit.Ptr(), loadedModules);
 
         // Add the checked module to list of loadedModules so that they can be
@@ -2507,6 +3023,7 @@ void FrontEndCompileRequest::checkAllTranslationUnits()
 
 void FrontEndCompileRequest::generateIR()
 {
+    SLANG_PROFILE;
     SLANG_AST_BUILDER_RAII(getLinkage()->getASTBuilder());
 
     // Our task in this function is to generate IR code
@@ -2520,6 +3037,10 @@ void FrontEndCompileRequest::generateIR()
     // in isolation.
     for( auto& translationUnit : translationUnits )
     {
+        // Skip if the module is precompiled.
+        if (translationUnit->getModule()->getIRModule())
+            continue;
+
         // We want to only run generateIRForTranslationUnit once here. This is for two side effects:
         // * it can dump ir
         // * it can generate diagnostics
@@ -2600,6 +3121,7 @@ static SourceLanguage inferSourceLanguage(FrontEndCompileRequest* request)
 
 SlangResult FrontEndCompileRequest::executeActionsInner()
 {
+    SLANG_PROFILE_SECTION(frontEndExecute);
     SLANG_AST_BUILDER_RAII(getLinkage()->getASTBuilder());
 
     for (TranslationUnitRequest* translationUnit : translationUnits)
@@ -2615,7 +3137,7 @@ SlangResult FrontEndCompileRequest::executeActionsInner()
         parseTranslationUnit(translationUnit);
     }
 
-    if (outputPreprocessor)
+    if (optionSet.getBoolOption(CompilerOptionName::PreprocessorOutput))
     {
         // If doing pre-processor output, then we are done
         return SLANG_OK;
@@ -2625,12 +3147,16 @@ SlangResult FrontEndCompileRequest::executeActionsInner()
         return SLANG_FAIL;
 
     // Perform semantic checking on the whole collection
-    checkAllTranslationUnits();
+    {
+        SLANG_PROFILE_SECTION(SemanticChecking);
+        checkAllTranslationUnits();
+    }
+
     if (getSink()->getErrorCount() != 0)
         return SLANG_FAIL;
 
     // After semantic checking is performed we can try and output doc information for this
-    if (shouldDocument)
+    if (optionSet.getBoolOption(CompilerOptionName::Doc))
     {
         // Not 100% clear where best to get the ASTBuilder from, but from the linkage shouldn't
         // cause any problems with scoping
@@ -2751,6 +3277,7 @@ void EndToEndCompileRequest::init()
 
 SlangResult EndToEndCompileRequest::executeActionsInner()
 {
+    SLANG_PROFILE_SECTION(endToEndActions);
     // If no code-generation target was specified, then try to infer one from the source language,
     // just to make sure we can do something reasonable when invoked from the command line.
     //
@@ -2775,6 +3302,11 @@ SlangResult EndToEndCompileRequest::executeActionsInner()
         }
     }
 
+    // Update compiler settings in target requests.
+    for (auto target : getLinkage()->targets)
+        target->getOptionSet().inheritFrom(getOptionSet());
+    m_frontEndReq->optionSet = getOptionSet();
+
     // We only do parsing and semantic checking if we *aren't* doing
     // a pass-through compilation.
     //
@@ -2783,7 +3315,7 @@ SlangResult EndToEndCompileRequest::executeActionsInner()
         SLANG_RETURN_ON_FAIL(getFrontEndReq()->executeActionsInner());
     }
 
-    if (getFrontEndReq()->outputPreprocessor)
+    if (getOptionSet().getBoolOption(CompilerOptionName::PreprocessorOutput))
     {
         return SLANG_OK;
     }
@@ -2791,8 +3323,7 @@ SlangResult EndToEndCompileRequest::executeActionsInner()
     // If command line specifies to skip codegen, we exit here.
     // Note: this is a debugging option.
     //
-    if (m_shouldSkipCodegen ||
-        ((getFrontEndReq()->compileFlags & SLANG_COMPILE_FLAG_NO_CODEGEN) != 0))
+    if (getOptionSet().getBoolOption(CompilerOptionName::SkipCodeGen))
     {
         // We will use the program (and matching layout information)
         // that was computed in the front-end for all subsequent
@@ -2803,10 +3334,28 @@ SlangResult EndToEndCompileRequest::executeActionsInner()
         m_specializedEntryPoints = getFrontEndReq()->getUnspecializedEntryPoints();
 
         SLANG_RETURN_ON_FAIL(maybeCreateContainer());
-        
+
         SLANG_RETURN_ON_FAIL(maybeWriteContainer(m_containerOutputPath));
 
         return SLANG_OK;
+    }
+
+    // If requested, attempt to compile the translation unit all the way down to the target language(s)
+    // and stash the result blobs in IR.
+    for (auto target : getLinkage()->targets)
+    {
+        SlangCompileTarget targetEnum = SlangCompileTarget(target->getTarget());
+        if (target->getOptionSet().getBoolOption(CompilerOptionName::EmbedDownstreamIR))
+        {
+            auto frontEndReq = getFrontEndReq();
+
+            for (auto translationUnit : frontEndReq->translationUnits)
+            {
+                SLANG_RETURN_ON_FAIL(translationUnit->getModule()->precompileForTarget(
+                    targetEnum,
+                    nullptr));
+            }
+        }
     }
 
     // If codegen is enabled, we need to move along to
@@ -2881,24 +3430,11 @@ SlangResult EndToEndCompileRequest::executeActions()
 
 int FrontEndCompileRequest::addTranslationUnit(SourceLanguage language, Name* moduleName)
 {
-    if (!moduleName)
-    {
-        // We want to ensure that symbols defined in different translation
-        // units get unique mangled names, so that we can, e.g., tell apart
-        // a `main()` function in `vertex.hlsl` and a `main()` in `fragment.hlsl`,
-        // even when they are being compiled together.
-        //
-        String generatedName = "tu";
-        generatedName.append(translationUnits.getCount());
-        moduleName = getNamePool()->getName(generatedName);
-    }
-
     RefPtr<TranslationUnitRequest> translationUnit = new TranslationUnitRequest(this);
     translationUnit->compileRequest = this;
     translationUnit->sourceLanguage = SourceLanguage(language);
 
-    translationUnit->moduleName = moduleName;
-
+    translationUnit->setModuleName(moduleName);
     return addTranslationUnit(translationUnit);
 }
 
@@ -2917,6 +3453,14 @@ void FrontEndCompileRequest::addTranslationUnitSourceArtifact(
 
     // Add the source file
     translationUnit->addSourceArtifact(sourceArtifact);
+
+    if (!translationUnit->moduleName)
+    {
+        translationUnit->setModuleName(
+            getNamePool()->getName(Path::getFileNameWithoutExt(sourceArtifact->getName())));
+    }
+    if (translationUnit->module->getFilePath() == nullptr)
+        translationUnit->module->setPathInfo(PathInfo::makePath(sourceArtifact->getName()));
 }
 
 void FrontEndCompileRequest::addTranslationUnitSourceBlob(
@@ -2930,7 +3474,7 @@ void FrontEndCompileRequest::addTranslationUnitSourceBlob(
     auto artifact = ArtifactUtil::createArtifact(sourceDesc, path.getBuffer());
     artifact->addRepresentationUnknown(sourceBlob);
 
-    translationUnit->addSourceArtifact(artifact);
+    addTranslationUnitSourceArtifact(translationUnitIndex, artifact);
 }
 
 void FrontEndCompileRequest::addTranslationUnitSourceFile(
@@ -2950,7 +3494,7 @@ void FrontEndCompileRequest::addTranslationUnitSourceFile(
 
     auto sourceDesc = ArtifactDescUtil::makeDescForSourceLanguage(asExternal(translationUnit->sourceLanguage));
 
-    auto sourceArtifact = ArtifactUtil::createArtifact(sourceDesc);
+    auto sourceArtifact = ArtifactUtil::createArtifact(sourceDesc, path.getBuffer());
 
     auto extRep = new ExtFileArtifactRepresentation(path.getUnownedSlice(), fileSystemExt);
     sourceArtifact->addRepresentation(extRep);
@@ -2983,7 +3527,7 @@ void FrontEndCompileRequest::addTranslationUnitSourceFile(
         return;
     }
 
-    translationUnit->addSourceArtifact(sourceArtifact);
+    addTranslationUnitSourceArtifact(translationUnitIndex, sourceArtifact);
 }
 
 int FrontEndCompileRequest::addEntryPoint(
@@ -3085,6 +3629,87 @@ void Linkage::loadParsedModule(
     loadedModulesList.add(loadedModule);
 }
 
+RefPtr<Module> Linkage::loadDeserializedModule(Name* name,
+    const PathInfo& filePathInfo,
+    SerialContainerData::Module& moduleEntry,
+    DiagnosticSink* sink)
+{
+    SLANG_AST_BUILDER_RAII(m_astBuilder);
+    RefPtr<Module> resultModule;
+    if (mapNameToLoadedModules.tryGetValue(name, resultModule))
+        return resultModule;
+    if (mapPathToLoadedModule.tryGetValue(filePathInfo.getMostUniqueIdentity(), resultModule))
+        return resultModule;
+
+    resultModule = new Module(this, m_astBuilder);
+    prepareDeserializedModule(moduleEntry, filePathInfo, resultModule, sink);
+
+    loadedModulesList.add(resultModule);
+    mapPathToLoadedModule.add(filePathInfo.getMostUniqueIdentity(), resultModule);
+    mapNameToLoadedModules.add(name, resultModule);
+    return resultModule;
+}
+
+RefPtr<Module> Linkage::loadModuleFromIRBlobImpl(
+    Name* name,
+    const PathInfo& filePathInfo,
+    ISlangBlob* fileContentsBlob,
+    SourceLoc const& loc,
+    DiagnosticSink* sink,
+    const LoadedModuleDictionary* additionalLoadedModules)
+{
+    SLANG_AST_BUILDER_RAII(m_astBuilder);
+
+    RefPtr<Module> resultModule = new Module(this, getASTBuilder());
+    resultModule->setName(name);
+    ModuleBeingImportedRAII moduleBeingImported(
+        this,
+        resultModule,
+        name,
+        loc);
+
+    String mostUniqueIdentity = filePathInfo.getMostUniqueIdentity();
+    SLANG_ASSERT(mostUniqueIdentity.getLength() > 0);
+
+    RiffContainer container;
+    MemoryStreamBase readStream(FileAccess::Read, fileContentsBlob->getBufferPointer(), fileContentsBlob->getBufferSize());
+    SLANG_RETURN_NULL_ON_FAIL(RiffUtil::read(&readStream, container));
+
+    if (m_optionSet.getBoolOption(CompilerOptionName::UseUpToDateBinaryModule))
+    {
+        if (!isBinaryModuleUpToDate(filePathInfo.foundPath, &container))
+            return nullptr;
+    }
+
+    mapPathToLoadedModule.add(mostUniqueIdentity, resultModule);
+    mapNameToLoadedModules.add(name, resultModule);
+
+    SerialContainerUtil::ReadOptions readOptions;
+    readOptions.linkage = this;
+    readOptions.astBuilder = getASTBuilder();
+    readOptions.session = getSessionImpl();
+    readOptions.sharedASTBuilder = getASTBuilder()->getSharedASTBuilder();
+    readOptions.sink = sink;
+    readOptions.sourceManager = getSourceManager();
+    readOptions.namePool = getNamePool();
+    readOptions.modulePath = filePathInfo.foundPath;
+    SerialContainerData containerData;
+    if (SLANG_FAILED(SerialContainerUtil::read(&container, readOptions, additionalLoadedModules, containerData)) ||
+        containerData.modules.getCount() != 1)
+    {
+        mapPathToLoadedModule.remove(mostUniqueIdentity);
+        mapNameToLoadedModules.remove(name);
+        return nullptr;
+    }
+    auto moduleEntry = containerData.modules.getFirst();
+
+    prepareDeserializedModule(moduleEntry, filePathInfo, resultModule, sink);
+
+    loadedModulesList.add(resultModule);
+    resultModule->setPathInfo(filePathInfo);
+    return resultModule;
+}
+
 Module* Linkage::loadModule(String const& name)
 {
     // TODO: We either need to have a diagnostics sink
@@ -3117,15 +3742,19 @@ RefPtr<Module> Linkage::loadModule(
     ISlangBlob*         sourceBlob,
     SourceLoc const&    srcLoc,
     DiagnosticSink*     sink,
-    const LoadedModuleDictionary* additionalLoadedModules)
+    const LoadedModuleDictionary* additionalLoadedModules,
+    ModuleBlobType      blobType)
 {
+    if (blobType == ModuleBlobType::IR)
+        return loadModuleFromIRBlobImpl(name, filePathInfo, sourceBlob, srcLoc, sink, additionalLoadedModules);
+
     RefPtr<FrontEndCompileRequest> frontEndReq = new FrontEndCompileRequest(this, nullptr, sink);
 
     frontEndReq->additionalLoadedModules = additionalLoadedModules;
 
     RefPtr<TranslationUnitRequest> translationUnit = new TranslationUnitRequest(frontEndReq);
     translationUnit->compileRequest = frontEndReq;
-    translationUnit->moduleName = name;
+    translationUnit->setModuleName(name);
     Stage impliedStage;
     translationUnit->sourceLanguage = SourceLanguage::Slang;
 
@@ -3189,21 +3818,33 @@ RefPtr<Module> Linkage::loadModule(
         return nullptr;
     }
 
-    loadParsedModule(
-        frontEndReq,
-        translationUnit,
-        name,
-        filePathInfo);
-
+    try
+    {
+        loadParsedModule(
+            frontEndReq,
+            translationUnit,
+            name,
+            filePathInfo);
+    }
+    catch (const Slang::AbortCompilationException&)
+    {
+        // Something is fatally wrong, we should return nullptr.
+        module = nullptr;
+    }
     errorCountAfter = sink->getErrorCount();
 
     if (errorCountAfter != errorCountBefore && !isInLanguageServer())
     {
+        // If something is fatally wrong, we want to report
+        // the diagnostic even if we are in language server
+        // and processing a different module.
         _diagnoseErrorInImportedModule(sink);
         // Something went wrong during the parsing, so we should bail out.
         return nullptr;
     }
 
+    if (module)
+        module->setPathInfo(filePathInfo);
     return module;
 }
 
@@ -3222,7 +3863,7 @@ bool Linkage::isBeingImported(Module* module)
     // and then appending `.slang`.
     //
     // For example, `foo_bar` becomes `foo-bar.slang`.
-String getFileNameFromModuleName(Name* name)
+String getFileNameFromModuleName(Name* name, bool translateUnderScore)
 {
     String fileName;
     if (!getText(name).getUnownedSlice().endsWithCaseInsensitive(".slang"))
@@ -3230,7 +3871,7 @@ String getFileNameFromModuleName(Name* name)
         StringBuilder sb;
         for (auto c : getText(name))
         {
-            if (c == '_')
+            if (translateUnderScore && c == '_')
                 c = '-';
 
             sb.append(c);
@@ -3287,86 +3928,197 @@ RefPtr<Module> Linkage::findOrImportModule(
         return previouslyLoadedModule;
     }
 
-    auto fileName = getFileNameFromModuleName(name);
 
     // Next, try to find the file of the given name,
     // using our ordinary include-handling logic.
 
-    IncludeSystem includeSystem(&searchDirectories, getFileSystemExt(), getSourceManager());
+    IncludeSystem includeSystem(&getSearchDirectories(), getFileSystemExt(), getSourceManager());
 
     // Get the original path info
     PathInfo pathIncludedFromInfo = getSourceManager()->getPathInfo(loc, SourceLocType::Actual);
     PathInfo filePathInfo;
 
-    ComPtr<ISlangBlob> fileContents;
 
-    // We have to load via the found path - as that is how file was originally loaded
-    if (SLANG_FAILED(includeSystem.findFile(fileName, pathIncludedFromInfo.foundPath, filePathInfo)))
+    // Look for a precompiled module first, if not exist, load from source.
+    bool shouldCheckBinaryModuleSettings[2] = { true, false };
+
+    for (auto checkBinaryModule : shouldCheckBinaryModuleSettings)
     {
-        if (name && name->text == "glsl")
+        // When in language server, we always prefer to use source module if it is available.
+        if (isInLanguageServer())
+            checkBinaryModule = !checkBinaryModule;
+
+        // Try without translating `_` to `-` first, if that fails, try translating.
+        for (int translateUnderScore = 0; translateUnderScore <= 1; translateUnderScore++)
         {
-            // This is a builtin glsl module, just load it from embedded definition.
-            fileContents = getSessionImpl()->getGLSLLibraryCode();
-            filePathInfo = PathInfo::makeFromString("glsl");
-        }
-        else
-        {
-            sink->diagnose(loc, Diagnostics::cannotFindFile, fileName);
-            mapNameToLoadedModules[name] = nullptr;
-            return nullptr;
+            auto moduleSourceFileName = getFileNameFromModuleName(name, translateUnderScore == 1);
+            String fileName;
+            if (checkBinaryModule == 1)
+                fileName = Path::replaceExt(moduleSourceFileName, "slang-module");
+            else
+                fileName = moduleSourceFileName;
+
+            ComPtr<ISlangBlob> fileContents;
+
+            // We have to load via the found path - as that is how file was originally loaded
+            if (SLANG_FAILED(includeSystem.findFile(fileName, pathIncludedFromInfo.foundPath, filePathInfo)))
+            {
+                if (name && name->text == "glsl")
+                {
+                    // This is a builtin glsl module, just load it from embedded definition.
+                    fileContents = getSessionImpl()->getGLSLLibraryCode();
+                    filePathInfo = PathInfo::makeFromString("glsl");
+                    checkBinaryModule = 0;
+                }
+                else
+                {
+                    continue;
+                }
+            }
+
+            // Maybe this was loaded previously at a different relative name?
+            if (mapPathToLoadedModule.tryGetValue(filePathInfo.getMostUniqueIdentity(), loadedModule))
+                return loadedModule;
+
+            // Try to load it
+            if (!fileContents && SLANG_FAILED(includeSystem.loadFile(filePathInfo, fileContents)))
+            {
+                continue;
+            }
+
+            // We've found a file that we can load for the given module, so
+            // go ahead and perform the module-load action
+            auto resultModule = loadModule(
+                name,
+                filePathInfo,
+                fileContents,
+                loc,
+                sink,
+                loadedModules,
+                (checkBinaryModule == 1 ? ModuleBlobType::IR : ModuleBlobType::Source));
+            if (resultModule)
+                return resultModule;
         }
     }
 
-    // Maybe this was loaded previously at a different relative name?
-    if (mapPathToLoadedModule.tryGetValue(filePathInfo.getMostUniqueIdentity(), loadedModule))
-        return loadedModule;
+    // Error: we cannot find the file.
+    sink->diagnose(loc, Diagnostics::cannotOpenFile, getFileNameFromModuleName(name, false));
+    mapNameToLoadedModules[name] = nullptr;
+    return nullptr;
+}
 
-    // Try to load it
-    if( !fileContents && SLANG_FAILED(includeSystem.loadFile(filePathInfo, fileContents)))
+SourceFile* Linkage::loadSourceFile(String pathFrom, String path)
+{
+    IncludeSystem includeSystem(&getSearchDirectories(), getFileSystemExt(), getSourceManager());
+    ComPtr<slang::IBlob> blob;
+    PathInfo pathInfo;
+    SLANG_RETURN_NULL_ON_FAIL(includeSystem.findFile(path, pathFrom, pathInfo));
+    SourceFile* sourceFile = nullptr;
+    SLANG_RETURN_NULL_ON_FAIL(includeSystem.loadFile(pathInfo, blob, sourceFile));
+    return sourceFile;
+}
+
+    // Check if a serialized module is up-to-date with current compiler options and source files.
+bool Linkage::isBinaryModuleUpToDate(String fromPath, RiffContainer* container)
+{
+    DiagnosticSink sink;
+    SerialContainerUtil::ReadOptions readOptions;
+    readOptions.linkage = this;
+    readOptions.astBuilder = getASTBuilder();
+    readOptions.session = getSessionImpl();
+    readOptions.sharedASTBuilder = getASTBuilder()->getSharedASTBuilder();
+    readOptions.sink = &sink;
+    readOptions.sourceManager = getSourceManager();
+    readOptions.namePool = getNamePool();
+    readOptions.readHeaderOnly = true;
+
+    SerialContainerData containerData;
+    if (SLANG_FAILED(SerialContainerUtil::read(container, readOptions, nullptr, containerData)))
+        return false;
+
+    if (containerData.modules.getCount() != 1)
+        return false;
+    
+    auto& moduleHeader = containerData.modules[0];
+    DigestBuilder<SHA1> digestBuilder;
+    auto version = String(getBuildTagString());
+    digestBuilder.append(version);
+    m_optionSet.buildHash(digestBuilder);
+
+    // Find the canonical path of the directory containing the module source file.
+    String moduleSrcPath = "";
+    if (moduleHeader.dependentFiles.getCount())
     {
-        sink->diagnose(loc, Diagnostics::cannotOpenFile, fileName);
-        mapNameToLoadedModules[name] = nullptr;
-        return nullptr;
+        moduleSrcPath = moduleHeader.dependentFiles.getFirst();
+        IncludeSystem includeSystem(&getSearchDirectories(), getFileSystemExt(), getSourceManager());
+        PathInfo modulePathInfo;
+        if (SLANG_SUCCEEDED(includeSystem.findFile(moduleSrcPath, fromPath, modulePathInfo)))
+        {
+            moduleSrcPath = modulePathInfo.foundPath;
+            Path::getCanonical(moduleSrcPath, moduleSrcPath);
+        }
     }
 
-    // We've found a file that we can load for the given module, so
-    // go ahead and perform the module-load action
-    return loadModule(
-        name,
-        filePathInfo,
-        fileContents,
-        loc,
-        sink,
-        loadedModules);
+    for (auto file : moduleHeader.dependentFiles)
+    {
+        auto sourceFile = loadSourceFile(fromPath, file);
+        if (!sourceFile)
+        {
+            // If we cannot find the source file from `fromPath`,
+            // try again from the module's source file path.
+            if (moduleHeader.dependentFiles.getCount() != 0)
+                sourceFile = loadSourceFile(moduleSrcPath, file);
+        }
+        if (!sourceFile)
+            return false;
+        digestBuilder.append(sourceFile->getDigest());
+    }
+    return digestBuilder.finalize() == moduleHeader.digest;
+}
+
+SLANG_NO_THROW bool SLANG_MCALL Linkage::isBinaryModuleUpToDate(const char* modulePath, slang::IBlob* binaryModuleBlob)
+{
+    RiffContainer container;
+    MemoryStreamBase readStream(FileAccess::Read, binaryModuleBlob->getBufferPointer(), binaryModuleBlob->getBufferSize());
+    if (SLANG_FAILED(RiffUtil::read(&readStream, container)))
+        return false;
+    return isBinaryModuleUpToDate(modulePath, &container);
 }
 
 SourceFile* Linkage::findFile(Name* name, SourceLoc loc, IncludeSystem& outIncludeSystem)
 {
-    auto fileName = getFileNameFromModuleName(name);
-
-    // Next, try to find the file of the given name,
-    // using our ordinary include-handling logic.
-
-    outIncludeSystem = IncludeSystem(&searchDirectories, getFileSystemExt(), getSourceManager());
-
-    // Get the original path info
-    PathInfo pathIncludedFromInfo = getSourceManager()->getPathInfo(loc, SourceLocType::Actual);
-    PathInfo filePathInfo;
-
-    ComPtr<ISlangBlob> fileContents;
-
-    // We have to load via the found path - as that is how file was originally loaded
-    if (SLANG_FAILED(outIncludeSystem.findFile(fileName, pathIncludedFromInfo.foundPath, filePathInfo)))
+    auto impl = [&](bool translateUnderScore)->SourceFile*
     {
-        return nullptr;
-    }
-    // Otherwise, try to load it.
-    SourceFile* sourceFile;
-    if (SLANG_FAILED(outIncludeSystem.loadFile(filePathInfo, fileContents, sourceFile)))
-    {
-        return nullptr;
-    }
-    return sourceFile;
+        auto fileName = getFileNameFromModuleName(name, translateUnderScore);
+
+        // Next, try to find the file of the given name,
+        // using our ordinary include-handling logic.
+
+        auto searchDirs = getSearchDirectories();
+        outIncludeSystem = IncludeSystem(&searchDirs, getFileSystemExt(), getSourceManager());
+
+        // Get the original path info
+        PathInfo pathIncludedFromInfo = getSourceManager()->getPathInfo(loc, SourceLocType::Actual);
+        PathInfo filePathInfo;
+
+        ComPtr<ISlangBlob> fileContents;
+
+        // We have to load via the found path - as that is how file was originally loaded
+        if (SLANG_FAILED(outIncludeSystem.findFile(fileName, pathIncludedFromInfo.foundPath, filePathInfo)))
+        {
+            return nullptr;
+        }
+        // Otherwise, try to load it.
+        SourceFile* sourceFile;
+        if (SLANG_FAILED(outIncludeSystem.loadFile(filePathInfo, fileContents, sourceFile)))
+        {
+            return nullptr;
+        }
+        return sourceFile;
+    };
+    if (auto rs = impl(false))
+        return rs;
+    return impl(true);
 }
 
 Linkage::IncludeResult Linkage::findAndIncludeFile(Module* module, TranslationUnitRequest* translationUnit, Name* name, SourceLoc const& loc, DiagnosticSink* sink)
@@ -3377,7 +4129,6 @@ Linkage::IncludeResult Linkage::findAndIncludeFile(Module* module, TranslationUn
 
     IncludeSystem includeSystem;
     auto sourceFile = findFile(name, loc, includeSystem);
-
     if (!sourceFile)
     {
         sink->diagnose(loc, Diagnostics::cannotOpenFile, getText(name));
@@ -3420,18 +4171,24 @@ Linkage::IncludeResult Linkage::findAndIncludeFile(Module* module, TranslationUn
 
     FrontEndPreprocessorHandler preprocessorHandler(module, module->getASTBuilder(), sink);
     auto combinedPreprocessorDefinitions = translationUnit->getCombinedPreprocessorDefinitions();
+    SourceLanguage sourceLanguage = SourceLanguage::Unknown;
     auto tokens = preprocessSource(
         sourceFile,
         sink,
         &includeSystem,
         combinedPreprocessorDefinitions,
         this,
+        sourceLanguage,
         &preprocessorHandler);
+    
+    if (sourceLanguage == SourceLanguage::Unknown)
+        sourceLanguage = translationUnit->sourceLanguage;
 
     auto outerScope = module->getModuleDecl()->ownedScope;
     parseSourceFile(
         module->getASTBuilder(),
         translationUnit,
+        sourceLanguage,
         tokens,
         sink,
         outerScope,
@@ -3519,7 +4276,7 @@ Module::Module(Linkage* linkage, ASTBuilder* astBuilder)
     {
         m_astBuilder = linkage->getASTBuilder();
     }
-
+    getOptionSet() = linkage->m_optionSet;
     addModuleDependency(this);
 }
 
@@ -3532,7 +4289,32 @@ ISlangUnknown* Module::getInterface(const Guid& guid)
 
 void Module::buildHash(DigestBuilder<SHA1>& builder)
 {
-    SLANG_UNUSED(builder);
+    builder.append(computeDigest());
+}
+
+slang::DeclReflection* Module::getModuleReflection()
+{
+    return (slang::DeclReflection*)m_moduleDecl;
+}
+
+SHA1::Digest Module::computeDigest()
+{
+    if (m_digest == SHA1::Digest())
+    {
+        DigestBuilder<SHA1> digestBuilder;
+        auto version = String(getBuildTagString());
+        digestBuilder.append(version);
+        getOptionSet().buildHash(digestBuilder);
+
+        auto fileDependencies = getFileDependencies();
+
+        for (auto file : fileDependencies)
+        {
+            digestBuilder.append(file->getDigest());
+        }
+        m_digest = digestBuilder.finalize();
+    }
+    return m_digest;
 }
 
 void Module::addModuleDependency(Module* module)
@@ -3549,17 +4331,17 @@ void Module::addFileDependency(SourceFile* sourceFile)
 void Module::setModuleDecl(ModuleDecl* moduleDecl)
 {
     m_moduleDecl = moduleDecl;
+    moduleDecl->module = this;
 }
+
+void Module::setName(String name)
+{
+    m_name = getLinkage()->getNamePool()->getName(name);
+}
+
 
 RefPtr<EntryPoint> Module::findEntryPointByName(UnownedStringSlice const& name)
 {
-    // TODO: We should consider having this function be expanded to be able
-    // to look up and validate possible entry-point functions in teh module
-    // even if they were not marked with `[shader(...)]` in the source code.
-    //
-    // With such a change the function would probably need to accept a stage
-    // to use and a sink to write validation errors to.
-
     for(auto entryPoint : m_entryPoints)
     {
         if(entryPoint->getName()->text.getUnownedSlice() == name)
@@ -3567,6 +4349,40 @@ RefPtr<EntryPoint> Module::findEntryPointByName(UnownedStringSlice const& name)
     }
 
     return nullptr;
+}
+
+RefPtr<EntryPoint> Module::findAndCheckEntryPoint(
+    UnownedStringSlice const& name,
+    SlangStage stage,
+    ISlangBlob** outDiagnostics)
+{
+    // If there is already an entrypoint marked with the [shader] attribute,
+    // we should just return that.
+    //
+    if (auto existingEntryPoint = findEntryPointByName(name))
+        return existingEntryPoint;
+
+    // If the function hasn't been marked as [shader], then it won't be discovered
+    // by findEntryPointByName. We need to route this to the `findAndValidateEntryPoint`
+    // function. To do that we need to setup a FrontEndCompileRequest and a FrontEndEntryPointRequest.
+    //
+    DiagnosticSink sink(getLinkage()->getSourceManager(), DiagnosticSink::SourceLocationLexer());
+    FrontEndCompileRequest frontEndRequest(getLinkage(), StdWriters::getSingleton(), &sink);
+    RefPtr<TranslationUnitRequest> tuRequest = new TranslationUnitRequest(&frontEndRequest);
+    tuRequest->module = this;
+    tuRequest->moduleName = m_name;
+    frontEndRequest.translationUnits.add(tuRequest);
+    FrontEndEntryPointRequest entryPointRequest(
+        &frontEndRequest,
+        0,
+        getLinkage()->getNamePool()->getName(name),
+        Profile((Stage)stage));
+    auto result = findAndValidateEntryPoint(&entryPointRequest);
+    if (outDiagnostics)
+    {
+        sink.getBlobIfNeeded(outDiagnostics);
+    }
+    return result;
 }
 
 void Module::_addEntryPoint(EntryPoint* entryPoint)
@@ -3684,7 +4500,6 @@ ISlangUnknown* ComponentType::getInterface(Guid const& guid)
     {
         return static_cast<slang::IComponentType*>(this);
     }
-
     return nullptr;
 }
 
@@ -3823,6 +4638,8 @@ SLANG_NO_THROW SlangResult SLANG_MCALL ComponentType::getEntryPointCode(
     auto targetProgram = getTargetProgram(target);
 
     DiagnosticSink sink(linkage->getSourceManager(), Lexer::sourceLocationLexer);
+    applySettingsToDiagnosticSink(&sink, &sink, linkage->m_optionSet);
+    applySettingsToDiagnosticSink(&sink, &sink, m_optionSet);
 
     IArtifact* artifact = targetProgram->getOrCreateEntryPointResult(entryPointIndex, &sink);
     sink.getBlobIfNeeded(outDiagnostics);
@@ -3847,14 +4664,6 @@ SLANG_NO_THROW void SLANG_MCALL ComponentType::getEntryPointHash(
     // Consequently, any encoding differences as a result of different compiler versions
     // will already be reflected in the resulting hash.
     getLinkage()->buildHash(builder, targetIndex);
-
-    // Enumerate all file dependencies and add them to the hash.
-    for (SourceFile* sourceFile : getFileDependencies())
-    {
-        // TODO: We want to lazily evaluate & cache the source file digest
-        SHA1::Digest digest = SHA1::compute(sourceFile->getContent().begin(), sourceFile->getContent().getLength());
-        builder.append(digest);
-    }
 
     buildHash(builder);
 
@@ -3884,6 +4693,8 @@ SLANG_NO_THROW SlangResult SLANG_MCALL ComponentType::getEntryPointHostCallable(
     auto targetProgram = getTargetProgram(target);
 
     DiagnosticSink sink(linkage->getSourceManager(), Lexer::sourceLocationLexer);
+    applySettingsToDiagnosticSink(&sink, &sink, m_optionSet);
+
     IArtifact* artifact = targetProgram->getOrCreateEntryPointResult(entryPointIndex, &sink);
     sink.getBlobIfNeeded(outDiagnostics);
 
@@ -4007,6 +4818,23 @@ SLANG_NO_THROW SlangResult SLANG_MCALL ComponentType::link(
     return SLANG_OK;
 }
 
+SLANG_NO_THROW SlangResult SLANG_MCALL ComponentType::linkWithOptions(
+    slang::IComponentType** outLinkedComponentType,
+    uint32_t count,
+    slang::CompilerOptionEntry* entries,
+    ISlangBlob** outDiagnostics)
+{
+    SLANG_RETURN_ON_FAIL(link(outLinkedComponentType, outDiagnostics));
+
+    auto linked = *outLinkedComponentType;
+
+    if (linked)
+    {
+        static_cast<ComponentType*>(linked)->getOptionSet().load(count, entries);
+    }
+
+    return SLANG_OK;
+}
 
     /// Visitor used by `ComponentType::enumerateModules`
 struct EnumerateModulesVisitor : ComponentTypeVisitor
@@ -4103,6 +4931,57 @@ void ComponentType::enumerateIRModules(EnumerateIRModulesCallback callback, void
 {
     EnumerateIRModulesVisitor visitor(callback, userData);
     acceptVisitor(&visitor, nullptr);
+}
+
+SLANG_NO_THROW SlangResult SLANG_MCALL ComponentType::getTargetCode(
+    Int             targetIndex,
+    slang::IBlob** outCode,
+    slang::IBlob** outDiagnostics)
+{
+    auto linkage = getLinkage();
+    if (targetIndex < 0 || targetIndex >= linkage->targets.getCount())
+        return SLANG_E_INVALID_ARG;
+
+    // If the user hasn't specified any entry points, then we should
+    // discover all entrypoints that are defined in linked modules, and
+    // include all of them in the compile.
+    //
+    if (getEntryPointCount() == 0)
+    {
+        List<Module*> modules;
+        this->enumerateModules([&](Module* module)
+            {
+                modules.add(module);
+            });
+        List<RefPtr<ComponentType>> components;
+        components.add(this);
+        for (auto module : modules)
+        {
+            for (auto entryPoint : module->getEntryPoints())
+            {
+                components.add(entryPoint);
+            }
+        }
+        RefPtr<CompositeComponentType> composite = new CompositeComponentType(linkage, components);
+        ComPtr<IComponentType> linkedComponentType;
+        SLANG_RETURN_ON_FAIL(composite->link(linkedComponentType.writeRef(), outDiagnostics));
+        return linkedComponentType->getTargetCode(targetIndex, outCode, outDiagnostics);
+    }
+
+    auto target = linkage->targets[targetIndex];
+    auto targetProgram = getTargetProgram(target);
+
+    DiagnosticSink sink(linkage->getSourceManager(), Lexer::sourceLocationLexer);
+    applySettingsToDiagnosticSink(&sink, &sink, linkage->m_optionSet);
+    applySettingsToDiagnosticSink(&sink, &sink, m_optionSet);
+
+    IArtifact* artifact = targetProgram->getOrCreateWholeProgramResult(&sink);
+    sink.getBlobIfNeeded(outDiagnostics);
+
+    if (artifact == nullptr)
+        return SLANG_FAIL;
+
+    return artifact->loadBlob(ArtifactKeep::Yes, outCode);
 }
 
 //
@@ -4450,6 +5329,8 @@ SpecializedComponentType::SpecializedComponentType(
     , m_specializationInfo(specializationInfo)
     , m_specializationArgs(specializationArgs)
 {
+    m_optionSet.overrideWith(base->getOptionSet());
+
     m_irModule = generateIRForSpecializedComponentType(this, sink);
 
     // We need to account for the fact that a specialized
@@ -4751,12 +5632,11 @@ TargetProgram::TargetProgram(
     , m_targetReq(targetReq)
 {
     m_entryPointResults.setCount(componentType->getEntryPointCount());
+    m_optionSet.overrideWith(m_program->getOptionSet());
+    m_optionSet.inheritFrom(targetReq->getOptionSet());
 }
 
 //
-
-
-
 
 Session* CompileRequestBase::getSession()
 {
@@ -4810,6 +5690,52 @@ void Linkage::setFileSystem(ISlangFileSystem* inFileSystem)
     getSourceManager()->setFileSystemExt(m_fileSystemExt);
 }
 
+void Linkage::prepareDeserializedModule(SerialContainerData::Module& moduleEntry, const PathInfo& filePathInfo, Module* module, DiagnosticSink* sink)
+{
+    module->setIRModule(moduleEntry.irModule);
+    module->setModuleDecl(as<ModuleDecl>(moduleEntry.astRootNode));
+    module->clearFileDependency();
+    String moduleSourcePath = filePathInfo.foundPath;
+    bool isFirst = true;
+    for (auto file : moduleEntry.dependentFiles)
+    {
+        auto sourceFile = loadSourceFile(filePathInfo.foundPath, file);
+        if (isFirst)
+        {
+            // The first file is the source for the main module file.
+            // We store the module path as the basis for finding the remaining
+            // dependent files.
+            if (sourceFile)
+                moduleSourcePath = sourceFile->getPathInfo().foundPath;
+            isFirst = false;
+        }
+        // If we cannot find the dependent file directly, try to find
+        // it relative to the module source path.
+        if (!sourceFile)
+        {
+            sourceFile = loadSourceFile(moduleSourcePath, file);
+        }
+        if (sourceFile)
+        {
+            module->addFileDependency(sourceFile);
+        }
+    }
+    module->setPathInfo(filePathInfo);
+    module->setDigest(moduleEntry.digest);
+    module->_collectShaderParams();
+    module->_discoverEntryPoints(sink, targets);
+
+    // Hook up fileDecl's scope to module's scope.
+    auto moduleDecl = module->getModuleDecl();
+    for (auto globalDecl : moduleDecl->members)
+    {
+        if (auto fileDecl = as<FileDecl>(globalDecl))
+        {
+            addSiblingScopeForContainerDecl(m_astBuilder, moduleDecl->ownedScope, fileDecl);
+        }
+    }
+}
+
 void Linkage::setRequireCacheFileSystem(bool requireCacheFileSystem)
 {
     if (requireCacheFileSystem == m_requireCacheFileSystem)
@@ -4841,6 +5767,7 @@ void Session::addBuiltinSource(
     SourceManager* sourceManager = getBuiltinSourceManager();
 
     DiagnosticSink sink(sourceManager, Lexer::sourceLocationLexer);
+
     RefPtr<FrontEndCompileRequest> compileRequest = new FrontEndCompileRequest(
         m_builtinLinkage,
         nullptr,
@@ -4935,60 +5862,53 @@ void EndToEndCompileRequest::setFileSystem(ISlangFileSystem* fileSystem)
 
 void EndToEndCompileRequest::setCompileFlags(SlangCompileFlags flags)
 {
-    getFrontEndReq()->compileFlags = flags;
+    if (flags & SLANG_COMPILE_FLAG_NO_MANGLING)
+        getOptionSet().set(CompilerOptionName::NoMangle, true);
+    if (flags & SLANG_COMPILE_FLAG_NO_CODEGEN)
+        getOptionSet().set(CompilerOptionName::SkipCodeGen, true);
+    if (flags & SLANG_COMPILE_FLAG_OBFUSCATE)
+        getOptionSet().set(CompilerOptionName::Obfuscate, true);
 }
 
 SlangCompileFlags EndToEndCompileRequest::getCompileFlags()
 {
-    return getFrontEndReq()->compileFlags;
+    SlangCompileFlags result = 0;
+    if (getOptionSet().getBoolOption(CompilerOptionName::NoMangle))
+        result |= SLANG_COMPILE_FLAG_NO_MANGLING;
+    if (getOptionSet().getBoolOption(CompilerOptionName::SkipCodeGen))
+        result |= SLANG_COMPILE_FLAG_NO_CODEGEN;
+    if (getOptionSet().getBoolOption(CompilerOptionName::Obfuscate))
+        result |= SLANG_COMPILE_FLAG_OBFUSCATE;
+    return result;
 }
 
 void EndToEndCompileRequest::setDumpIntermediates(int enable)
 {
-    shouldDumpIntermediates = (enable != 0);
-
-    // Change all existing targets to use the new setting.
-    auto linkage = getLinkage();
-    for (auto& target : linkage->targets)
-    {
-        target->setDumpIntermediates(enable != 0);
-    }
+    getOptionSet().set(CompilerOptionName::DumpIntermediates, enable);
 }
 
 void EndToEndCompileRequest::setTrackLiveness(bool v)
 {
-    enableLivenessTracking = v;
-
-    // Change all existing targets to use the new setting.
-    auto linkage = getLinkage();
-    for (auto& target : linkage->targets)
-    {
-        target->setTrackLiveness(v);
-    }
+    getOptionSet().set(CompilerOptionName::TrackLiveness, v);
 }
 
 void EndToEndCompileRequest::setDumpIntermediatePrefix(const char* prefix)
 {
-    m_dumpIntermediatePrefix = prefix;
+    getOptionSet().set(CompilerOptionName::DumpIntermediatePrefix, String(prefix));
 }
 
 void EndToEndCompileRequest::setLineDirectiveMode(SlangLineDirectiveMode mode)
 {
-    // This method is deprecated and user should call `setTargetLineDirectiveMode` instead.
-    // We provide the implementation here for backward compatibility.
-    // Targets added later will use `m_lineDirectiveMode`, so we update it to the new `mode`
-    // set by the user.
-    m_lineDirectiveMode = LineDirectiveMode(mode);
-
-    // Change all existing targets to use the new mode.
-    auto linkage = getLinkage();
-    for (auto& target : linkage->targets)
-        target->setLineDirectiveMode(m_lineDirectiveMode);
+    getOptionSet().set(CompilerOptionName::LineDirectiveMode, mode);
 }
 
 void EndToEndCompileRequest::setCommandLineCompilerMode()
 {
     m_isCommandLineCompile = true;
+
+    // legacy slangc tool defaults to column major layout.
+    if (!getOptionSet().hasOption(CompilerOptionName::MatrixLayoutRow))
+        getOptionSet().setMatrixLayoutMode(kMatrixLayoutMode_ColumnMajor);
 }
 
 void EndToEndCompileRequest::_completeTargetRequest(UInt targetIndex)
@@ -4997,14 +5917,8 @@ void EndToEndCompileRequest::_completeTargetRequest(UInt targetIndex)
 
     TargetRequest* targetRequest = linkage->targets[Index(targetIndex)];
 
-    // If we have vulkan layout options, and the target is khronos add the options
-    if (m_hlslToVulkanLayoutOptions && isKhronosTarget(targetRequest))
-    {
-        targetRequest->setHLSLToVulkanLayoutOptions(m_hlslToVulkanLayoutOptions);
-    }
-
-    // Set the current line directive
-    targetRequest->setLineDirectiveMode(m_lineDirectiveMode);
+    targetRequest->getOptionSet().inheritFrom(getLinkage()->m_optionSet);
+    targetRequest->getOptionSet().inheritFrom(m_optionSetForDefaultTarget);
 }
 
 void EndToEndCompileRequest::setCodeGenTarget(SlangCompileTarget target)
@@ -5025,45 +5939,54 @@ int EndToEndCompileRequest::addCodeGenTarget(SlangCompileTarget target)
 
 void EndToEndCompileRequest::setTargetProfile(int targetIndex, SlangProfileID profile)
 {
-    getLinkage()->targets[targetIndex]->setTargetProfile(Profile(profile));
-}
-
-void EndToEndCompileRequest::setHLSLToVulkanLayoutOptions(int targetIndex, HLSLToVulkanLayoutOptions* vulkanShiftOptions)
-{
-    getLinkage()->targets[targetIndex]->setHLSLToVulkanLayoutOptions(vulkanShiftOptions);
+    getTargetOptionSet(targetIndex).setProfile(Profile(profile));
 }
 
 void EndToEndCompileRequest::setTargetFlags(int targetIndex, SlangTargetFlags flags)
 {
-    getLinkage()->targets[targetIndex]->addTargetFlags(flags);
+    getTargetOptionSet(targetIndex).setTargetFlags(flags);
 }
 
 void EndToEndCompileRequest::setTargetForceGLSLScalarBufferLayout(int targetIndex, bool value)
 {
-    getLinkage()->targets[targetIndex]->setForceGLSLScalarBufferLayout(value);
+    getTargetOptionSet(targetIndex).set(CompilerOptionName::GLSLForceScalarLayout, value);
+}
+
+void EndToEndCompileRequest::setTargetForceDXLayout(int targetIndex, bool value)
+{
+    getTargetOptionSet(targetIndex).set(CompilerOptionName::ForceDXLayout, value);
 }
 
 void EndToEndCompileRequest::setTargetFloatingPointMode(int targetIndex, SlangFloatingPointMode  mode)
 {
-    getLinkage()->targets[targetIndex]->setFloatingPointMode(FloatingPointMode(mode));
+    getTargetOptionSet(targetIndex).set(CompilerOptionName::FloatingPointMode, FloatingPointMode(mode));
 }
 
 void EndToEndCompileRequest::setMatrixLayoutMode(SlangMatrixLayoutMode mode)
 {
-    getLinkage()->setMatrixLayoutMode(mode);
+    getOptionSet().setMatrixLayoutMode((MatrixLayoutMode)mode);
 }
 
 void EndToEndCompileRequest::setTargetMatrixLayoutMode(int targetIndex, SlangMatrixLayoutMode  mode)
 {
-    SLANG_UNUSED(targetIndex);
-    setMatrixLayoutMode(mode);
+    getTargetOptionSet(targetIndex).setMatrixLayoutMode(MatrixLayoutMode(mode));
+}
+
+void EndToEndCompileRequest::setTargetGenerateWholeProgram(int targetIndex, bool value)
+{
+    getTargetOptionSet(targetIndex).set(CompilerOptionName::GenerateWholeProgram, value);
+}
+
+void EndToEndCompileRequest::setTargetEmbedDownstreamIR(int targetIndex, bool value)
+{
+    getTargetOptionSet(targetIndex).set(CompilerOptionName::EmbedDownstreamIR, value);
 }
 
 void EndToEndCompileRequest::setTargetLineDirectiveMode(
     SlangInt targetIndex,
     SlangLineDirectiveMode mode)
 {
-    getLinkage()->targets[targetIndex]->setLineDirectiveMode(LineDirectiveMode(mode));
+    getTargetOptionSet(targetIndex).set(CompilerOptionName::LineDirectiveMode, LineDirectiveMode(mode));
 }
 
 void EndToEndCompileRequest::overrideDiagnosticSeverity(
@@ -5110,23 +6033,23 @@ SlangResult EndToEndCompileRequest::addTargetCapability(SlangInt targetIndex, Sl
     auto& targets = getLinkage()->targets;
     if(targetIndex < 0 || targetIndex >= targets.getCount())
         return SLANG_E_INVALID_ARG;
-    targets[targetIndex]->addCapability(CapabilityName(capability));
+    getTargetOptionSet(targetIndex).addCapabilityAtom(CapabilityName(capability));
     return SLANG_OK;
 }
 
 void EndToEndCompileRequest::setDebugInfoLevel(SlangDebugInfoLevel level)
 {
-    getLinkage()->debugInfoLevel = DebugInfoLevel(level);
+    getOptionSet().set(CompilerOptionName::DebugInformation, DebugInfoLevel(level));
 }
 
 void EndToEndCompileRequest::setDebugInfoFormat(SlangDebugInfoFormat format)
 {
-    getLinkage()->debugInfoFormat = DebugInfoFormat(format);
+    getOptionSet().set(CompilerOptionName::DebugInformationFormat, DebugInfoFormat(format));
 }
 
 void EndToEndCompileRequest::setOptimizationLevel(SlangOptimizationLevel level)
 {
-    getLinkage()->optimizationLevel = OptimizationLevel(level);
+    getOptionSet().set(CompilerOptionName::Optimization, OptimizationLevel(level));
 }
 
 void EndToEndCompileRequest::setOutputContainerFormat(SlangContainerFormat format)
@@ -5141,17 +6064,27 @@ void EndToEndCompileRequest::setPassThrough(SlangPassThrough inPassThrough)
 
 void EndToEndCompileRequest::setReportDownstreamTime(bool value)
 {
-    m_reportDownstreamCompileTime = value;
+    getOptionSet().set(CompilerOptionName::ReportDownstreamTime, value);
 }
 
 void EndToEndCompileRequest::setReportPerfBenchmark(bool value)
 {
-    m_reportPerfBenchmark = value;
+    getOptionSet().set(CompilerOptionName::ReportPerfBenchmark, value);
 }
 
 void EndToEndCompileRequest::setSkipSPIRVValidation(bool value)
 {
-    m_skipSPIRVValidation = value;
+    getOptionSet().set(CompilerOptionName::SkipSPIRVValidation, value);
+}
+
+void EndToEndCompileRequest::setTargetUseMinimumSlangOptimization(int targetIndex, bool value)
+{
+    getTargetOptionSet(targetIndex).set(CompilerOptionName::MinimumSlangOptimization, value);
+}
+
+void EndToEndCompileRequest::setIgnoreCapabilityCheck(bool value)
+{
+    getOptionSet().set(CompilerOptionName::IgnoreCapabilities, value);
 }
 
 void EndToEndCompileRequest::setDiagnosticCallback(SlangDiagnosticCallback callback, void const* userData)
@@ -5172,17 +6105,17 @@ ISlangWriter* EndToEndCompileRequest::getWriter(SlangWriterChannel chan)
 
 void EndToEndCompileRequest::addSearchPath(const char* path)
 {
-    getLinkage()->addSearchPath(path);
+    getOptionSet().addSearchPath(path);
 }
 
 void EndToEndCompileRequest::addPreprocessorDefine(const char* key, const char* value)
 {
-    getLinkage()->addPreprocessorDefine(key, value);
+    getOptionSet().addPreprocessorDefine(key, value);
 }
 
 void EndToEndCompileRequest::setEnableEffectAnnotations(bool value)
 {
-    getLinkage()->setEnableEffectAnnotations(value);
+    getOptionSet().set(CompilerOptionName::EnableEffectAnnotations, value);
 }
 
 char const* EndToEndCompileRequest::getDiagnosticOutput()
@@ -5223,19 +6156,29 @@ void EndToEndCompileRequest::setDefaultModuleName(const char* defaultModuleName)
     frontEndReq->m_defaultModuleName = namePool->getName(defaultModuleName);
 }
 
-SlangResult _addLibraryReference(EndToEndCompileRequest* req, IArtifact* artifact, ModuleLibrary* moduleLibrary)
+SlangResult _addLibraryReference(EndToEndCompileRequest* req, ModuleLibrary* moduleLibrary, bool includeEntryPoint)
 {
     FrontEndCompileRequest* frontEndRequest = req->getFrontEndReq();
-    frontEndRequest->m_extraEntryPoints.addRange(moduleLibrary->m_entryPoints.getBuffer(), moduleLibrary->m_entryPoints.getCount());
 
-    // Add to the m_libModules
-    auto linkage = req->getLinkage();
-    linkage->m_libModules.add(ComPtr<IArtifact>(artifact));
+    if (includeEntryPoint)
+    {
+        frontEndRequest->m_extraEntryPoints.addRange(
+            moduleLibrary->m_entryPoints.getBuffer(), moduleLibrary->m_entryPoints.getCount());
+    }
 
+    for (auto m : moduleLibrary->m_modules)
+    {
+        RefPtr<TranslationUnitRequest> tu = new TranslationUnitRequest(frontEndRequest, m);
+        frontEndRequest->translationUnits.add(tu);
+        // For modules loaded for EndToEndCompileRequest,
+        // we don't need the automatically discovered entrypoints.
+        if (!includeEntryPoint)
+            m->getEntryPoints().clear();
+    }
     return SLANG_OK;
 }
 
-SlangResult _addLibraryReference(EndToEndCompileRequest* req, IArtifact* artifact)
+SlangResult _addLibraryReference(EndToEndCompileRequest* req, String path, IArtifact* artifact, bool includeEntryPoint)
 {
     auto desc = artifact->getDesc();
 
@@ -5258,7 +6201,7 @@ SlangResult _addLibraryReference(EndToEndCompileRequest* req, IArtifact* artifac
         }
 
         ComPtr<IModuleLibrary> libraryIntf;
-        SLANG_RETURN_ON_FAIL(loadModuleLibrary(ArtifactKeep::Yes, container, req, libraryIntf));
+        SLANG_RETURN_ON_FAIL(loadModuleLibrary(ArtifactKeep::Yes, container, path, req, libraryIntf));
 
         auto library = as<ModuleLibrary>(libraryIntf);
         
@@ -5287,9 +6230,9 @@ SlangResult _addLibraryReference(EndToEndCompileRequest* req, IArtifact* artifac
                 // for leaking.
                 // 
                 // That isn't a risk from -r though because, it doesn't create a translation unit(s).
-                for (auto irModule : library->m_modules)
+                for (auto module : library->m_modules)
                 {
-                    irModule->setObfuscatedSourceMap(sourceMap);
+                    module->getIRModule()->setObfuscatedSourceMap(sourceMap);
                 }
 
                 // Look up the source file
@@ -5305,7 +6248,7 @@ SlangResult _addLibraryReference(EndToEndCompileRequest* req, IArtifact* artifac
             }
         }
 
-        SLANG_RETURN_ON_FAIL(_addLibraryReference(req, container, library));
+        SLANG_RETURN_ON_FAIL(_addLibraryReference(req, library, includeEntryPoint));
         return SLANG_OK;
     }
 
@@ -5313,7 +6256,7 @@ SlangResult _addLibraryReference(EndToEndCompileRequest* req, IArtifact* artifac
     {
         ComPtr<IModuleLibrary> libraryIntf;
 
-        SLANG_RETURN_ON_FAIL(loadModuleLibrary(ArtifactKeep::Yes, artifact, req, libraryIntf));
+        SLANG_RETURN_ON_FAIL(loadModuleLibrary(ArtifactKeep::Yes, artifact, path, req, libraryIntf));
 
         auto library = as<ModuleLibrary>(libraryIntf);
         if (!library)
@@ -5321,7 +6264,7 @@ SlangResult _addLibraryReference(EndToEndCompileRequest* req, IArtifact* artifac
             return SLANG_FAIL;
         }
 
-        SLANG_RETURN_ON_FAIL(_addLibraryReference(req, artifact, library));
+        SLANG_RETURN_ON_FAIL(_addLibraryReference(req, library, includeEntryPoint));
         return SLANG_OK;
     }
 
@@ -5335,18 +6278,18 @@ SlangResult _addLibraryReference(EndToEndCompileRequest* req, IArtifact* artifac
     return SLANG_OK;
 }
 
-SlangResult EndToEndCompileRequest::addLibraryReference(const void* libData, size_t libDataSize)
+SlangResult EndToEndCompileRequest::addLibraryReference(const char* basePath, const void* libData, size_t libDataSize)
 {
     // We need to deserialize and add the modules
     ComPtr<IModuleLibrary> library;
 
-    SLANG_RETURN_ON_FAIL(loadModuleLibrary((const Byte*)libData, libDataSize, this, library));
+    SLANG_RETURN_ON_FAIL(loadModuleLibrary((const Byte*)libData, libDataSize, basePath, this, library));
 
     // Create an artifact without any name (as one is not provided)
     auto artifact = Artifact::create(ArtifactDesc::make(ArtifactKind::Library, ArtifactPayload::SlangIR));
     artifact->addRepresentation(library);
 
-    return _addLibraryReference(this, artifact);
+    return _addLibraryReference(this, basePath, artifact, true);
 }
 
 void EndToEndCompileRequest::addTranslationUnitPreprocessorDefine(int translationUnitIndex, const char* key, const char* value)
@@ -5382,7 +6325,7 @@ void EndToEndCompileRequest::addTranslationUnitSourceStringSpan(int translationU
     const auto slice = UnownedStringSlice(sourceBegin, sourceEnd);
 
     auto blob = RawBlob::create(slice.begin(), slice.getLength());
-
+    
     frontEndReq->addTranslationUnitSourceBlob(translationUnitIndex, path, blob);
 }
 
@@ -5459,18 +6402,19 @@ SlangResult EndToEndCompileRequest::setTypeNameForEntryPointExistentialTypeParam
 
 void EndToEndCompileRequest::setAllowGLSLInput(bool value)
 {
-    getLinkage()->setAllowGLSLInput(value);
+    getOptionSet().set(CompilerOptionName::AllowGLSL, value);
 }
 
-SlangResult EndToEndCompileRequest::EndToEndCompileRequest::compile()
+SlangResult EndToEndCompileRequest::compile()
 {
     SlangResult res = SLANG_FAIL;
     double downstreamStartTime = 0.0;
     double totalStartTime = 0.0;
 
-    if (m_reportDownstreamCompileTime)
+    if (getOptionSet().getBoolOption(CompilerOptionName::ReportDownstreamTime))
     {
         getSession()->getCompilerElapsedTime(&totalStartTime, &downstreamStartTime);
+        PerformanceProfiler::getProfiler()->clear();
     }
 #if !defined(SLANG_DEBUG_INTERNAL_ERROR)
     // By default we'd like to catch as many internal errors as possible,
@@ -5485,6 +6429,7 @@ SlangResult EndToEndCompileRequest::EndToEndCompileRequest::compile()
 
     try
     {
+        SLANG_PROFILE_SECTION(compileInner);
         res = executeActions();
     }
     catch (const AbortCompilationException& e)
@@ -5525,7 +6470,7 @@ SlangResult EndToEndCompileRequest::EndToEndCompileRequest::compile()
     }
 #endif
 
-    if (m_reportDownstreamCompileTime)
+    if (getOptionSet().getBoolOption(CompilerOptionName::ReportDownstreamTime))
     {
         double downstreamEndTime = 0;
         double totalEndTime = 0;
@@ -5534,7 +6479,7 @@ SlangResult EndToEndCompileRequest::EndToEndCompileRequest::compile()
         String downstreamTimeStr = String(downstreamTime, "%.2f");
         getSink()->diagnose(SourceLoc(), Diagnostics::downstreamCompileTime, downstreamTimeStr);
     }
-    if (m_reportPerfBenchmark)
+    if (getOptionSet().getBoolOption(CompilerOptionName::ReportPerfBenchmark))
     {
         StringBuilder perfResult;
         PerformanceProfiler::getProfiler()->getResult(perfResult);
@@ -5544,16 +6489,19 @@ SlangResult EndToEndCompileRequest::EndToEndCompileRequest::compile()
 
     // Repro dump handling
     {
-        if (m_dumpRepro.getLength())
+        auto dumpRepro = getOptionSet().getStringOption(CompilerOptionName::DumpRepro);
+        auto dumpReproOnError = getOptionSet().getBoolOption(CompilerOptionName::DumpReproOnError);
+
+        if (dumpRepro.getLength())
         {
-            SlangResult saveRes = ReproUtil::saveState(this, m_dumpRepro);
+            SlangResult saveRes = ReproUtil::saveState(this, dumpRepro);
             if (SLANG_FAILED(saveRes))
             {
-                getSink()->diagnose(SourceLoc(), Diagnostics::unableToWriteReproFile, m_dumpRepro);
+                getSink()->diagnose(SourceLoc(), Diagnostics::unableToWriteReproFile, dumpRepro);
                 return saveRes;
             }
         }
-        else if (m_dumpReproOnError && SLANG_FAILED(res))
+        else if (dumpReproOnError && SLANG_FAILED(res))
         {
             String reproFileName;
             SlangResult saveRes = SLANG_FAIL;
@@ -5586,7 +6534,7 @@ char const* EndToEndCompileRequest::getDependencyFilePath(int index)
     auto frontEndReq = getFrontEndReq();
     auto program = frontEndReq->getGlobalAndEntryPointsComponentType();
     SourceFile* sourceFile = program->getFileDependencies()[index];
-    return sourceFile->getPathInfo().hasFileFoundPath() ? sourceFile->getPathInfo().foundPath.getBuffer() : "unknown";
+    return sourceFile->getPathInfo().hasFoundPath() ? sourceFile->getPathInfo().foundPath.getBuffer() : "unknown";
 }
 
 int EndToEndCompileRequest::getTranslationUnitCount()
@@ -5635,6 +6583,25 @@ void const* EndToEndCompileRequest::getEntryPointCode(int entryPointIndex, size_
     }
 
     return (void*)blob->getBufferPointer();
+}
+
+SlangResult EndToEndCompileRequest::getCompileTimeProfile(ISlangProfiler** compileTimeProfile, bool shouldClear)
+{
+    if (compileTimeProfile == nullptr)
+    {
+        return SLANG_E_INVALID_ARG;
+    }
+
+    SlangProfiler* profiler = new SlangProfiler(PerformanceProfiler::getProfiler());
+
+    if (shouldClear)
+    {
+        PerformanceProfiler::getProfiler()->clear();
+    }
+
+    ComPtr<ISlangProfiler> result(profiler);
+    *compileTimeProfile = result.detach();
+    return SLANG_OK;
 }
 
 static SlangResult _getEntryPointResult(
@@ -5707,7 +6674,7 @@ SlangResult EndToEndCompileRequest::getEntryPointCodeBlob(int entryPointIndex, i
     SLANG_RETURN_ON_FAIL(_getEntryPointResult(this, entryPointIndex, targetIndex, artifact));
     SLANG_RETURN_ON_FAIL(artifact->loadBlob(ArtifactKeep::Yes, outBlob));
 
-    return SLANG_E_NOT_AVAILABLE;
+    return SLANG_OK;
 }
 
 SlangResult EndToEndCompileRequest::getEntryPointHostCallable(int entryPointIndex, int targetIndex, ISlangSharedLibrary** outSharedLibrary)
@@ -5716,7 +6683,7 @@ SlangResult EndToEndCompileRequest::getEntryPointHostCallable(int entryPointInde
     ComPtr<IArtifact> artifact;
     SLANG_RETURN_ON_FAIL(_getEntryPointResult(this, entryPointIndex, targetIndex, artifact));
     SLANG_RETURN_ON_FAIL(artifact->loadSharedLibrary(ArtifactKeep::Yes, outSharedLibrary));
-    return SLANG_E_NOT_AVAILABLE;
+    return SLANG_OK;
 }
 
 SlangResult EndToEndCompileRequest::getTargetCodeBlob(int targetIndex, ISlangBlob** outBlob)
@@ -5756,7 +6723,7 @@ ISlangMutableFileSystem* EndToEndCompileRequest::getCompileRequestResultAsFileSy
 
             // Filter the containerArtifact into things that can be written
             ComPtr<IArtifact> writeArtifact;
-            if (SLANG_SUCCEEDED(ArtifactContainerUtil::filter(m_containerArtifact, writeArtifact)))
+            if (SLANG_SUCCEEDED(ArtifactContainerUtil::filter(m_containerArtifact, writeArtifact)) && writeArtifact)
             {
                 if (SLANG_SUCCEEDED(ArtifactContainerUtil::writeContainer(writeArtifact, "", fileSystem)))
                 {
@@ -5912,6 +6879,9 @@ SlangResult EndToEndCompileRequest::isParameterLocationUsed(Int entryPointIndex,
     ComPtr<IArtifact> artifact;
     if (SLANG_FAILED(_getEntryPointResult(this, static_cast<int>(entryPointIndex), static_cast<int>(targetIndex), artifact)))
         return SLANG_E_INVALID_ARG;
+
+    if (!artifact)
+        return SLANG_E_NOT_AVAILABLE;
 
     // Find a rep
     auto metadata = findAssociatedRepresentation<IArtifactPostEmitMetadata>(artifact);

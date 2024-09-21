@@ -161,6 +161,22 @@ Result DeviceImpl::initVulkanInstanceAndDevice(
 
     m_queueAllocCount = 0;
 
+    bool enableRayTracingValidation = false;
+
+    // Read properties from extended device descriptions
+    for (GfxIndex i = 0; i < m_desc.extendedDescCount; i++)
+    {
+        StructType stype;
+        memcpy(&stype, m_desc.extendedDescs[i], sizeof(stype));
+        switch (stype)
+        {
+        case StructType::RayTracingValidationDesc:
+            enableRayTracingValidation = static_cast<RayTracingValidationDesc*>(m_desc.extendedDescs[i])->enableRaytracingValidation;
+            break;
+        }
+    }
+
+
     VkInstance instance = VK_NULL_HANDLE;
     if (handles[0].handleValue == 0)
     {
@@ -189,7 +205,7 @@ Result DeviceImpl::initVulkanInstanceAndDevice(
 #if SLANG_WINDOWS_FAMILY
             instanceExtensions.add(VK_KHR_WIN32_SURFACE_EXTENSION_NAME);
 #elif SLANG_APPLE_FAMILY
-            instanceExtensions.add(VK_MVK_MACOS_SURFACE_EXTENSION_NAME);
+            instanceExtensions.add(VK_EXT_METAL_SURFACE_EXTENSION_NAME);
 #elif defined(SLANG_ENABLE_XLIB)
 
             instanceExtensions.add(VK_KHR_XLIB_SURFACE_EXTENSION_NAME);
@@ -288,7 +304,8 @@ Result DeviceImpl::initVulkanInstanceAndDevice(
     if (!instance)
         return SLANG_FAIL;
     SLANG_RETURN_ON_FAIL(m_api.initInstanceProcs(instance));
-    if (useValidationLayer && m_api.vkCreateDebugReportCallbackEXT)
+
+    if ((enableRayTracingValidation || useValidationLayer) && m_api.vkCreateDebugReportCallbackEXT)
     {
         VkDebugReportFlagsEXT debugFlags =
             VK_DEBUG_REPORT_ERROR_BIT_EXT | VK_DEBUG_REPORT_WARNING_BIT_EXT;
@@ -460,6 +477,14 @@ Result DeviceImpl::initVulkanInstanceAndDevice(
         extendedFeatures.accelerationStructureFeatures.pNext = deviceFeatures2.pNext;
         deviceFeatures2.pNext = &extendedFeatures.accelerationStructureFeatures;
 
+        // Variable pointer features.
+        extendedFeatures.variablePointersFeatures.pNext = deviceFeatures2.pNext;
+        deviceFeatures2.pNext = &extendedFeatures.variablePointersFeatures;
+        
+        // Compute shader derivative features.
+        extendedFeatures.computeShaderDerivativeFeatures.pNext = deviceFeatures2.pNext;
+        deviceFeatures2.pNext = &extendedFeatures.computeShaderDerivativeFeatures;
+
         // Extended dynamic states
         extendedFeatures.extendedDynamicStateFeatures.pNext = deviceFeatures2.pNext;
         deviceFeatures2.pNext = &extendedFeatures.extendedDynamicStateFeatures;
@@ -476,12 +501,21 @@ Result DeviceImpl::initVulkanInstanceAndDevice(
         extendedFeatures.clockFeatures.pNext = deviceFeatures2.pNext;
         deviceFeatures2.pNext = &extendedFeatures.clockFeatures;
 
-        // Atomic Float
+        // Atomic Float 
         // To detect atomic float we need
         // https://www.khronos.org/registry/vulkan/specs/1.2-extensions/man/html/VkPhysicalDeviceShaderAtomicFloatFeaturesEXT.html
 
         extendedFeatures.atomicFloatFeatures.pNext = deviceFeatures2.pNext;
         deviceFeatures2.pNext = &extendedFeatures.atomicFloatFeatures;
+
+        // https://registry.khronos.org/vulkan/specs/1.3-extensions/man/html/VkPhysicalDeviceShaderAtomicFloat2FeaturesEXT.html
+        extendedFeatures.atomicFloat2Features.pNext = deviceFeatures2.pNext;
+        deviceFeatures2.pNext = &extendedFeatures.atomicFloat2Features;
+
+        // Image Int64 Atomic
+        // https://registry.khronos.org/vulkan/specs/1.3-extensions/man/html/VkPhysicalDeviceShaderImageAtomicInt64FeaturesEXT.html
+        extendedFeatures.imageInt64AtomicFeatures.pNext = deviceFeatures2.pNext;
+        deviceFeatures2.pNext = &extendedFeatures.imageInt64AtomicFeatures;
 
         // mesh shader features
         extendedFeatures.meshShaderFeatures.pNext = deviceFeatures2.pNext;
@@ -494,6 +528,10 @@ Result DeviceImpl::initVulkanInstanceAndDevice(
         // fragment shading rate features
         extendedFeatures.fragmentShadingRateFeatures.pNext = deviceFeatures2.pNext;
         deviceFeatures2.pNext = &extendedFeatures.fragmentShadingRateFeatures;
+
+        // raytracing validation features
+        extendedFeatures.rayTracingValidationFeatures.pNext = deviceFeatures2.pNext;
+        deviceFeatures2.pNext = &extendedFeatures.rayTracingValidationFeatures;
 
         if (VK_MAKE_VERSION(majorVersion, minorVersion, 0) >= VK_API_VERSION_1_2)
         {
@@ -543,7 +581,7 @@ Result DeviceImpl::initVulkanInstanceAndDevice(
         // SIMPLE_EXTENSION_FEATURE(struct, feature member name, extension
         // name, features...) will check for the presence of the boolean
         // feature member in struct and the availability of the extensions. If
-        // they are both present then the extensions are addded, the struct
+        // they are both present then the extensions are added, the struct
         // linked into the deviceCreateInfo chain and the features added to the
         // supported features list.
 #define SIMPLE_EXTENSION_FEATURE(s, m, e, ...) \
@@ -563,9 +601,23 @@ Result DeviceImpl::initVulkanInstanceAndDevice(
 
         SIMPLE_EXTENSION_FEATURE(
             extendedFeatures.atomicFloatFeatures,
-            shaderBufferFloat32AtomicAdd,
+            shaderBufferFloat32Atomics,
             VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME,
             "atomic-float"
+        );
+
+        SIMPLE_EXTENSION_FEATURE(
+            extendedFeatures.atomicFloat2Features,
+            shaderBufferFloat16Atomics,
+            VK_EXT_SHADER_ATOMIC_FLOAT_2_EXTENSION_NAME,
+            "atomic-float-2"
+        );
+
+        SIMPLE_EXTENSION_FEATURE(
+            extendedFeatures.imageInt64AtomicFeatures,
+            shaderImageInt64Atomics,
+            VK_EXT_SHADER_IMAGE_ATOMIC_INT64_EXTENSION_NAME,
+            "image-atomic-int64"
         );
 
         SIMPLE_EXTENSION_FEATURE(
@@ -592,8 +644,7 @@ Result DeviceImpl::initVulkanInstanceAndDevice(
                 rayQuery,
                 VK_KHR_RAY_QUERY_EXTENSION_NAME,
                 "ray-query",
-                "ray-tracing",
-                "sm_6_6"
+                "ray-tracing"
             );
 
             SIMPLE_EXTENSION_FEATURE(
@@ -652,6 +703,31 @@ Result DeviceImpl::initVulkanInstanceAndDevice(
             VK_NV_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME,
             "shader-execution-reorder"
         );
+
+        SIMPLE_EXTENSION_FEATURE(
+            extendedFeatures.variablePointersFeatures,
+            variablePointers,
+            VK_KHR_VARIABLE_POINTERS_EXTENSION_NAME,
+            "variable-pointer"
+        );
+        
+        SIMPLE_EXTENSION_FEATURE(
+            extendedFeatures.computeShaderDerivativeFeatures,
+            computeDerivativeGroupLinear,
+            VK_NV_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME,
+            "computeDerivativeGroupLinear"
+        );
+
+        // Only enable raytracing validation if both requested and supported
+        if(enableRayTracingValidation && extendedFeatures.rayTracingValidationFeatures.rayTracingValidation)
+        {
+            SIMPLE_EXTENSION_FEATURE(
+                extendedFeatures.rayTracingValidationFeatures,
+                rayTracingValidation,
+                VK_NV_RAY_TRACING_VALIDATION_EXTENSION_NAME,
+                "ray-tracing-validation"
+            );
+        }
 
 #undef SIMPLE_EXTENSION_FEATURE
 
@@ -712,6 +788,11 @@ Result DeviceImpl::initVulkanInstanceAndDevice(
             if (extensionNames.contains("VK_KHR_external_memory_win32"))
             {
                 deviceExtensions.add(VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME);
+            }
+#else
+            if (extensionNames.contains("VK_KHR_external_memory_fd"))
+            {
+                deviceExtensions.add(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
             }
 #endif
             m_features.add("external-memory");
@@ -775,6 +856,46 @@ Result DeviceImpl::initVulkanInstanceAndDevice(
         {
             deviceExtensions.add(VK_NV_SHADER_SUBGROUP_PARTITIONED_EXTENSION_NAME);
             m_features.add("shader-subgroup-partitioned");
+        }
+
+        // Derive approximate DX12 shader model.
+        const char* featureTable[] = {
+            "sm_6_0", "wave-ops", "atomic-int64", nullptr,
+            "sm_6_1", "barycentrics", "multiview", nullptr,
+            "sm_6_2", "half", nullptr,
+            "sm_6_3", "ray-tracing-pipeline", nullptr,
+            "sm_6_4", "fragment-shading-rate", nullptr,
+            "sm_6_5", "ray-query", "mesh-shader", nullptr,
+            "sm_6_6", "wave-ops", "atomic-float", "atomic-int64", nullptr,
+            nullptr,
+        };
+
+        int i = 0;
+        while (i < SLANG_COUNT_OF(featureTable))
+        {
+            const char* sm = featureTable[i++];
+            if (sm == nullptr)
+            {
+                break;
+            }
+            bool hasAll = true;
+            while (i < SLANG_COUNT_OF(featureTable))
+            {
+                const char* feature = featureTable[i++];
+                if (feature == nullptr)
+                {
+                    break;
+                }
+                hasAll &= m_features.contains(feature);
+            }
+            if (hasAll)
+            {
+                m_features.add(sm);
+            }
+            else
+            {
+                break;
+            }
         }
     }
     if (m_api.m_module->isSoftware())
@@ -845,6 +966,7 @@ Result DeviceImpl::initVulkanInstanceAndDevice(
     {
         installPipelineDumpLayer(m_api);
     }
+
     return SLANG_OK;
 }
 
@@ -889,6 +1011,8 @@ SlangResult DeviceImpl::initialize(const Desc& desc)
 
     SLANG_RETURN_ON_FAIL(slangContext.initialize(
         desc.slang,
+        desc.extendedDescCount,
+        desc.extendedDescs,
         SLANG_SPIRV,
         "sm_5_1",
         makeArray(slang::PreprocessorMacroDesc{ "__VK__", "1" }).getView()));
@@ -1429,16 +1553,18 @@ Result DeviceImpl::createTextureResource(
 
     VkExternalMemoryImageCreateInfo externalMemoryImageCreateInfo = {
         VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO };
-#if SLANG_WINDOWS_FAMILY
     VkExternalMemoryHandleTypeFlags extMemoryHandleType =
+#if SLANG_WINDOWS_FAMILY
         VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+#else
+        VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+#endif
     if (descIn.isShared)
     {
         externalMemoryImageCreateInfo.pNext = nullptr;
         externalMemoryImageCreateInfo.handleTypes = extMemoryHandleType;
         imageInfo.pNext = &externalMemoryImageCreateInfo;
     }
-#endif
     SLANG_VK_RETURN_ON_FAIL(m_api.vkCreateImage(m_device, &imageInfo, nullptr, &texture->m_image));
 
     VkMemoryRequirements memRequirements;
@@ -1458,10 +1584,12 @@ Result DeviceImpl::createTextureResource(
 #if SLANG_WINDOWS_FAMILY
     VkExportMemoryWin32HandleInfoKHR exportMemoryWin32HandleInfo = {
         VK_STRUCTURE_TYPE_EXPORT_MEMORY_WIN32_HANDLE_INFO_KHR };
+#endif
     VkExportMemoryAllocateInfoKHR exportMemoryAllocateInfo = {
         VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO_KHR };
     if (descIn.isShared)
     {
+#if SLANG_WINDOWS_FAMILY
         exportMemoryWin32HandleInfo.pNext = nullptr;
         exportMemoryWin32HandleInfo.pAttributes = nullptr;
         exportMemoryWin32HandleInfo.dwAccess =
@@ -1472,10 +1600,10 @@ Result DeviceImpl::createTextureResource(
             extMemoryHandleType & VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT_KHR
             ? &exportMemoryWin32HandleInfo
             : nullptr;
+#endif
         exportMemoryAllocateInfo.handleTypes = extMemoryHandleType;
         allocInfo.pNext = &exportMemoryAllocateInfo;
     }
-#endif
     SLANG_VK_RETURN_ON_FAIL(
         m_api.vkAllocateMemory(m_device, &allocInfo, nullptr, &texture->m_imageMemory));
 
@@ -1577,6 +1705,97 @@ Result DeviceImpl::createTextureResource(
             VK_IMAGE_LAYOUT_UNDEFINED,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
+        if(desc.sampleDesc.numSamples != 1)
+        {
+            // Handle senario where texture is sampled. We cannot use
+            // a simple buffer copy for sampled textures. ClearColorImage
+            // is not data accurate but it is fine for testing & works.
+            FormatInfo formatInfo;
+            gfxGetFormatInfo(desc.format, &formatInfo);
+            uint32_t data = 0;
+            VkClearColorValue clearColor;
+            switch(formatInfo.channelType)
+            {
+            case SLANG_SCALAR_TYPE_INT32:
+                for(int i = 0; i < 4; i++)
+                    clearColor.int32[i] = *reinterpret_cast<int32_t*>(const_cast<void*>(initData->data));
+                break;
+            case SLANG_SCALAR_TYPE_UINT32:
+                for(int i = 0; i < 4; i++)
+                    clearColor.uint32[i] = *reinterpret_cast<uint32_t*>(const_cast<void*>(initData->data));
+                break;
+            case SLANG_SCALAR_TYPE_INT64:
+            {
+                for(int i = 0; i < 4; i++)
+                    clearColor.int32[i] = int32_t(*reinterpret_cast<int64_t*>(const_cast<void*>(initData->data)));
+                break;
+            }
+            case SLANG_SCALAR_TYPE_UINT64:
+            {
+                for(int i = 0; i < 4; i++)
+                    clearColor.uint32[i] = uint32_t(*reinterpret_cast<uint64_t*>(const_cast<void*>(initData->data)));
+                break;
+            }
+            case SLANG_SCALAR_TYPE_FLOAT16:
+            {
+                for(int i = 0; i < 4; i++)
+                    clearColor.float32[i] = HalfToFloat(*reinterpret_cast<uint16_t*>(const_cast<void*>(initData->data)));
+                break;
+            }
+            case SLANG_SCALAR_TYPE_FLOAT32:
+            {
+                for(int i = 0; i < 4; i++)
+                    clearColor.float32[i] = (*reinterpret_cast<float*>(const_cast<void*>(initData->data)));
+                break;
+            }
+            case SLANG_SCALAR_TYPE_FLOAT64:
+            {
+                for(int i = 0; i < 4; i++)
+                    clearColor.float32[i] = float(*reinterpret_cast<double*>(const_cast<void*>(initData->data)));
+                break;
+            }
+            case SLANG_SCALAR_TYPE_INT8:
+            {
+                for(int i = 0; i < 4; i++)
+                    clearColor.int32[i] = int32_t(*reinterpret_cast<int8_t*>(const_cast<void*>(initData->data)));
+                break;
+            }
+            case SLANG_SCALAR_TYPE_UINT8:
+            {
+                for(int i = 0; i < 4; i++)
+                    clearColor.uint32[i] = uint32_t(*reinterpret_cast<uint8_t*>(const_cast<void*>(initData->data)));
+                break;
+            }
+            case SLANG_SCALAR_TYPE_INT16:
+            {
+                for(int i = 0; i < 4; i++)
+                    clearColor.int32[i] = int32_t(*reinterpret_cast<int16_t*>(const_cast<void*>(initData->data)));
+                break;
+            }
+            case SLANG_SCALAR_TYPE_UINT16:
+            {
+                for(int i = 0; i < 4; i++)
+                    clearColor.uint32[i] = uint32_t(*reinterpret_cast<uint16_t*>(const_cast<void*>(initData->data)));
+                break;
+            }
+            };
+
+            VkImageSubresourceRange range{};
+            range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            range.baseMipLevel = 0;
+            range.levelCount = VK_REMAINING_MIP_LEVELS;
+            range.baseArrayLayer = 0;
+            range.layerCount = VK_REMAINING_ARRAY_LAYERS;
+
+            m_api.vkCmdClearColorImage(
+                commandBuffer,
+                texture->m_image,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                &clearColor,
+                1,
+                &range);
+        }
+        else
         {
             Offset srcOffset = 0;
             for (int i = 0; i < arraySize; ++i)
@@ -1688,17 +1907,27 @@ Result DeviceImpl::createBufferResourceImpl(
         reqMemoryProperties =
             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
     }
+    else
+    {
+        reqMemoryProperties = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    }
 
     RefPtr<BufferResourceImpl> buffer(new BufferResourceImpl(desc, this));
     if (desc.isShared)
     {
+        VkExternalMemoryHandleTypeFlagsKHR extMemHandleType
+#if SLANG_WINDOWS_FAMILY
+            = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+#else
+            = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+#endif
         SLANG_RETURN_ON_FAIL(buffer->m_buffer.init(
             m_api,
             desc.sizeInBytes,
             usage,
             reqMemoryProperties,
             desc.isShared,
-            VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT));
+            extMemHandleType));
     }
     else
     {
@@ -2004,26 +2233,10 @@ Result DeviceImpl::createBufferView(
 {
     auto resourceImpl = (BufferResourceImpl*)buffer;
 
-    // TODO: These should come from the `ResourceView::Desc`
-    auto stride = desc.bufferElementSize;
-    if (stride == 0)
-    {
-        if (desc.format == Format::Unknown)
-        {
-            stride = 1;
-        }
-        else
-        {
-            FormatInfo info;
-            gfxGetFormatInfo(desc.format, &info);
-            stride = info.blockSizeInBytes;
-            assert(info.pixelsPerBlock == 1);
-        }
-    }
-    VkDeviceSize offset = (VkDeviceSize)desc.bufferRange.firstElement * stride;
-    VkDeviceSize size = desc.bufferRange.elementCount == 0
+    VkDeviceSize offset = (VkDeviceSize)desc.bufferRange.offset;
+    VkDeviceSize size = desc.bufferRange.size == 0
         ? (buffer ? resourceImpl->getDesc()->sizeInBytes : 0)
-        : (VkDeviceSize)desc.bufferRange.elementCount * stride;
+        : (VkDeviceSize)desc.bufferRange.size;
 
     // There are two different cases we need to think about for buffers.
     //
@@ -2083,6 +2296,23 @@ Result DeviceImpl::createBufferView(
                 info.buffer = resourceImpl->m_buffer.m_buffer;
                 info.offset = offset;
                 info.range = size;
+                VkBufferUsageFlags2CreateInfoKHR bufferViewUsage{};
+                bufferViewUsage.sType = VK_STRUCTURE_TYPE_BUFFER_USAGE_FLAGS_2_CREATE_INFO_KHR;
+
+                if (desc.type == IResourceView::Type::UnorderedAccess)
+                {
+                    info.pNext = &bufferViewUsage;
+                    bufferViewUsage.usage = VK_BUFFER_USAGE_2_STORAGE_TEXEL_BUFFER_BIT_KHR;
+                }
+                else if (desc.type == IResourceView::Type::ShaderResource)
+                {
+                    info.pNext = &bufferViewUsage;
+                    bufferViewUsage.usage = VK_BUFFER_USAGE_2_UNIFORM_TEXEL_BUFFER_BIT_KHR;
+                }
+                else
+                {
+                    assert(!"unhandled");
+                }
 
                 SLANG_VK_RETURN_ON_FAIL(m_api.vkCreateBufferView(m_device, &info, nullptr, &view));
             }
@@ -2163,16 +2393,23 @@ Result DeviceImpl::createProgram(
         shaderProgram->linkedProgram->getLayout(),
         shaderProgram->m_rootObjectLayout.writeRef());
 
+    if (!shaderProgram->isSpecializable())
+    {
+        SLANG_RETURN_ON_FAIL(shaderProgram->compileShaders(this));
+    }
+
     returnComPtr(outProgram, shaderProgram);
     return SLANG_OK;
 }
 
 Result DeviceImpl::createShaderObjectLayout(
-    slang::TypeLayoutReflection* typeLayout, ShaderObjectLayoutBase** outLayout)
+    slang::ISession* session,
+    slang::TypeLayoutReflection* typeLayout,
+    ShaderObjectLayoutBase** outLayout)
 {
     RefPtr<ShaderObjectLayoutImpl> layout;
     SLANG_RETURN_ON_FAIL(
-        ShaderObjectLayoutImpl::createForElementType(this, typeLayout, layout.writeRef()));
+        ShaderObjectLayoutImpl::createForElementType(this, session, typeLayout, layout.writeRef()));
     returnRefPtrMove(outLayout, layout);
     return SLANG_OK;
 }
@@ -2191,8 +2428,8 @@ Result DeviceImpl::createMutableShaderObject(
 {
     auto layoutImpl = static_cast<ShaderObjectLayoutImpl*>(layout);
 
-    RefPtr<MutableShaderObjectImpl> result = new MutableShaderObjectImpl();
-    SLANG_RETURN_ON_FAIL(result->init(this, layoutImpl));
+    RefPtr<ShaderObjectImpl> result;
+    SLANG_RETURN_ON_FAIL(ShaderObjectImpl::create(this, layoutImpl, result.writeRef()));
     returnComPtr(outObject, result);
 
     return SLANG_OK;
@@ -2200,8 +2437,9 @@ Result DeviceImpl::createMutableShaderObject(
 
 Result DeviceImpl::createMutableRootShaderObject(IShaderProgram* program, IShaderObject** outObject)
 {
-    RefPtr<MutableRootShaderObject> result =
-        new MutableRootShaderObject(this, static_cast<ShaderProgramBase*>(program));
+    RefPtr<MutableRootShaderObjectImpl> result = new MutableRootShaderObjectImpl();
+    auto programImpl = static_cast<ShaderProgramImpl*>(program);
+    SLANG_RETURN_ON_FAIL(result->init(this, programImpl->m_rootObjectLayout));
     returnComPtr(outObject, result);
     return SLANG_OK;
 }

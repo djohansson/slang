@@ -2,7 +2,7 @@
 
 // This tests that writing to individual components of the output struct works
 
-//TEST:CROSS_COMPILE:-target spirv -profile glsl_450+spirv_1_4 -entry main -stage mesh
+//TEST:CROSS_COMPILE:-target spirv -profile sm_6_5 -entry main -stage mesh
 
 const static uint MAX_VERTS = 3;
 const static uint MAX_PRIMS = 1;
@@ -11,8 +11,8 @@ const static uint MAX_PRIMS = 1;
 [numthreads(3, 1, 1)]
 void main(
     in uint tig : SV_GroupIndex,
-    out Vertices<float4, MAX_VERTS> verts : SV_Position,
-    out Indices<uint3, MAX_PRIMS> triangles
+    OutputVertices<float4, MAX_VERTS> verts : SV_Position,
+    OutputIndices<uint3, MAX_PRIMS> triangles
     )
 {
     const uint numVertices = 3;

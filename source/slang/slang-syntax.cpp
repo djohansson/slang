@@ -17,11 +17,16 @@ void printDiagnosticArg(StringBuilder& sb, Decl* decl)
 {
     if (!decl)
         return;
-    sb << getText(decl->getName());
+    if (decl->getName() && decl->getName()->text.getLength())
+        sb << getText(decl->getName());
+    else
+        printDiagnosticArg(sb, decl->astNodeType);
 }
 
 void printDiagnosticArg(StringBuilder& sb, DeclRefBase* declRefBase)
 {
+    if (!declRefBase)
+        return;
     printDiagnosticArg(sb, declRefBase->getDecl());
 }
 
@@ -92,6 +97,7 @@ void printDiagnosticArg(StringBuilder& sb, ASTNodeType nodeType)
         case ASTNodeType::EmptyDecl: sb << "empty"; break;
         case ASTNodeType::SyntaxDecl: sb << "syntax"; break;
         case ASTNodeType::DeclGroup: sb << "decl-group"; break;
+        case ASTNodeType::RequireCapabilityDecl: sb << "__require_capability"; break;
         default: sb << "decl"; break;
     }
 }
@@ -332,7 +338,7 @@ Index getFilterCountImpl(const ReflectClassInfo& clsInfo, MemberFilterStyle filt
         RefPtr<WitnessTable> result = new WitnessTable();
         result->baseType = as<Type>(newBaseType);
         result->witnessedType = as<Type>(newWitnessedType);
-        for (auto requirement : m_requirements)
+        for (auto requirement : m_requirementDictionary)
         {
             auto newRequirement = requirement.value.specialize(astBuilder, subst);
             result->add(requirement.key, newRequirement);
@@ -494,14 +500,13 @@ Index getFilterCountImpl(const ReflectClassInfo& clsInfo, MemberFilterStyle filt
 
     void WitnessTable::add(Decl* decl, RequirementWitness const& witness)
     {
-        m_requirements.add(KeyValuePair<Decl*, RequirementWitness>(decl, witness));
         m_requirementDictionary.add(decl, witness);
     }
 
     // TODO: need to figure out how to unify this with the logic
     // in the generic case...
     Type* DeclRefType::create(
-        ASTBuilder*     astBuilder,
+        ASTBuilder* astBuilder,
         DeclRef<Decl>   declRef)
     {
         if (declRef.getDecl()->findModifier<BuiltinTypeModifier>())
@@ -520,9 +525,6 @@ Index getFilterCountImpl(const ReflectClassInfo& clsInfo, MemberFilterStyle filt
             {
                 SLANG_UNEXPECTED("unhandled type");
             }
-            // Always create builtin types in global AST builder.
-            if (astBuilder->getSharedASTBuilder()->getInnerASTBuilder() != astBuilder)
-                return DeclRefType::create(astBuilder->getSharedASTBuilder()->getInnerASTBuilder(), declRef);
 
             declRef = createDefaultSubstitutionsIfNeeded(astBuilder, nullptr, declRef);
             ValNodeDesc nodeDesc = {};
@@ -700,7 +702,7 @@ Index getFilterCountImpl(const ReflectClassInfo& clsInfo, MemberFilterStyle filt
             auto paramType = getParamType(astBuilder, paramDeclRef);
             if( paramDecl->findModifier<RefModifier>() )
             {
-                paramType = astBuilder->getRefType(paramType);
+                paramType = astBuilder->getRefType(paramType, AddressSpace::Generic);
             }
             else if (paramDecl->findModifier<ConstRefModifier>())
             {
@@ -860,6 +862,18 @@ Decl* getParentDecl(Decl* decl)
     while (as<GenericDecl>(decl))
         decl = decl->parentDecl;
     return decl;
+}
+
+Decl* getParentAggTypeDecl(Decl* decl)
+{
+    decl = decl->parentDecl;
+    while (decl)
+    {
+        if (as<AggTypeDecl>(decl))
+            return decl;
+        decl = decl->parentDecl;
+    }
+    return nullptr;
 }
 
 Decl* getParentFunc(Decl* decl)

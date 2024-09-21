@@ -213,6 +213,8 @@ static void _lookUpDirectAndTransparentMembers(
             // it's unchecked or being checked then it isn't declared yet.
             if(!request.shouldConsiderAllLocalNames() && request.semantics && _isUncheckedLocalVar(m))
                 continue;
+            if (m == request.declToExclude)
+                continue;
 
             if (!DeclPassesLookupMask(m, request.mask))
                 continue;
@@ -222,13 +224,19 @@ static void _lookUpDirectAndTransparentMembers(
         }
     }
 
-    // TODO(tfoley): should we look up in the transparent decls
-    // if we already has a hit in the current container?
+    // Don't look up transparent members if we are looking for attributes, since
+    // they are always defined at global scope in the stdlib. Trying to lookup transparent
+    // members during attribute lookup can lead to infinite recursion on transparent types.
+    if ((int)request.mask & (int)LookupMask::Attribute)
+        return;
+
     for(auto transparentInfo : containerDecl->getTransparentMembers())
     {
         // The reference to the transparent member should use the same
         // path as we used in referring to its parent.
         DeclRef<Decl> transparentMemberDeclRef = astBuilder->getMemberDeclRef(parentDeclRef, transparentInfo.decl);
+        if (transparentMemberDeclRef.getDecl() == request.declToExclude)
+            continue;
 
         // We need to leave a breadcrumb so that we know that the result
         // of lookup involves a member lookup step here
@@ -253,13 +261,15 @@ LookupRequest initLookupRequest(
     Name* name,
     LookupMask mask,
     LookupOptions options,
-    Scope* scope)
+    Scope* scope,
+    Decl* declToExclude)
 {
     LookupRequest request;
     request.semantics = semantics;
     request.mask = mask;
     request.options = options;
     request.scope = scope;
+    request.declToExclude = declToExclude;
 
     if (semantics && semantics->getSession() &&
         name == semantics->getSession()->getCompletionRequestTokenName())
@@ -275,9 +285,10 @@ LookupResult lookUpDirectAndTransparentMembers(
     Name*                   name,
     ContainerDecl*          containerDecl,
     DeclRef<Decl>           parentDeclRef,
-    LookupMask              mask)
+    LookupMask              mask,
+    Decl*                   declToExclude)
 {
-    LookupRequest request = initLookupRequest(semantics, name, mask, LookupOptions::None, nullptr);
+    LookupRequest request = initLookupRequest(semantics, name, mask, LookupOptions::None, nullptr, declToExclude);
     LookupResult result;
     _lookUpDirectAndTransparentMembers(
         astBuilder,
@@ -376,53 +387,16 @@ static void _lookUpMembersInSuperType(
     _lookUpMembersInSuperTypeImpl(astBuilder, name, leafType, superType, leafIsSuperWitness, request, ioResult, &breadcrumb);
 }
 
-static void _lookUpMembersInSuperTypeDeclImpl(
-    ASTBuilder* astBuilder,
+static void _lookupMembersInSuperTypeFacets(ASTBuilder* astBuilder,
     Name* name,
-    DeclRef<Decl>           declRef,
+    Type* selfType,
+    InheritanceInfo const& inheritanceInfo,
     LookupRequest const& request,
     LookupResult& ioResult,
     BreadcrumbInfo* inBreadcrumbs)
 {
-    auto semantics = request.semantics;
-    if (!as<InterfaceDecl>(declRef.getDecl()) && getText(name) == "This")
-    {
-        // If we are looking for `This` in anything other than an InterfaceDecl,
-        // we just need to return the declRef itself.
-        AddToLookupResult(ioResult, CreateLookupResultItem(declRef, inBreadcrumbs));
-        return;
-    }
+    
 
-    // If the semantics context hasn't been established yet (e.g. when looking up during parsing),
-    // we simply do a direct lookup without considering subtypes or extensions.
-    //
-    if (!semantics)
-    {
-        // In this case we can only lookup in an aggregate type.
-        if (auto aggTypeDeclBaseRef = declRef.as<AggTypeDeclBase>())
-        {
-            _lookUpDirectAndTransparentMembers(astBuilder, name, aggTypeDeclBaseRef.getDecl(), aggTypeDeclBaseRef, request, ioResult, inBreadcrumbs);
-        }
-        return;
-    }
-
-    ensureDecl(semantics, declRef.getDecl(), DeclCheckState::ReadyForLookup);
-
-    // With semantics context, we can do a comprehensive lookup by scanning through
-    // the linearized inheritance list.
-
-    InheritanceInfo inheritanceInfo;
-    if (auto extDeclRef = declRef.as<ExtensionDecl>())
-    {
-        inheritanceInfo = semantics->getShared()->getInheritanceInfo(extDeclRef);
-    }
-    else
-    {
-        auto selfType = DeclRefType::create(astBuilder, declRef);
-        selfType = selfType->getCanonicalType();
-        inheritanceInfo = semantics->getShared()->getInheritanceInfo(selfType);
-    }
-        
     for (auto facet : inheritanceInfo.facets)
     {
         auto containerDeclRef = facet->getDeclRef().as<ContainerDecl>();
@@ -437,12 +411,21 @@ static void _lookUpMembersInSuperTypeDeclImpl(
             continue;
         }
 
+        auto extensionFacet = as<ExtensionDecl>(facet.getImpl()->getDeclRef().getDecl());
         // If we are looking up in an interface, and the lookup request told us
         // to skip interfaces, we should do so here.
         if (auto baseInterfaceDeclRef = containerDeclRef.as<InterfaceDecl>())
         {
             if (int(request.options) & int(LookupOptions::IgnoreBaseInterfaces))
                 continue;
+        }
+        // If we are looking up only immediate members, ignore non "Self" facets or extension to "Self"
+        else if (int(request.options) & int(LookupOptions::IgnoreInheritance)
+            && (facet.getImpl()->directness != Facet::Directness::Self
+                && (!extensionFacet || !extensionFacet->targetType.type->equals(selfType))
+                ))
+        {
+            continue;
         }
 
         // Some things that are syntactically `InheritanceDecl`s don't actually
@@ -507,6 +490,56 @@ static void _lookUpMembersInSuperTypeDeclImpl(
     }
 }
 
+static void _lookUpMembersInSuperTypeDeclImpl(
+    ASTBuilder* astBuilder,
+    Name* name,
+    DeclRef<Decl>           declRef,
+    LookupRequest const& request,
+    LookupResult& ioResult,
+    BreadcrumbInfo* inBreadcrumbs)
+{
+    auto semantics = request.semantics;
+    if (!as<InterfaceDecl>(declRef.getDecl()) && name == astBuilder->getSharedASTBuilder()->getThisTypeName())
+    {
+        // If we are looking for `This` in anything other than an InterfaceDecl,
+        // we just need to return the declRef itself.
+        AddToLookupResult(ioResult, CreateLookupResultItem(declRef, inBreadcrumbs));
+        return;
+    }
+
+    // If the semantics context hasn't been established yet (e.g. when looking up during parsing),
+    // we simply do a direct lookup without considering subtypes or extensions.
+    //
+    if (!semantics)
+    {
+        // In this case we can only lookup in an aggregate type.
+        if (auto aggTypeDeclBaseRef = declRef.as<AggTypeDeclBase>())
+        {
+            _lookUpDirectAndTransparentMembers(astBuilder, name, aggTypeDeclBaseRef.getDecl(), aggTypeDeclBaseRef, request, ioResult, inBreadcrumbs);
+        }
+        return;
+    }
+
+    ensureDecl(semantics, declRef.getDecl(), DeclCheckState::ReadyForLookup);
+
+    // With semantics context, we can do a comprehensive lookup by scanning through
+    // the linearized inheritance list.
+
+    auto selfType = DeclRefType::create(astBuilder, declRef);
+    InheritanceInfo inheritanceInfo;
+    if (auto extDeclRef = declRef.as<ExtensionDecl>())
+    {
+        inheritanceInfo = semantics->getShared()->getInheritanceInfo(extDeclRef);
+    }
+    else
+    {
+        selfType = selfType->getCanonicalType();
+        inheritanceInfo = semantics->getShared()->getInheritanceInfo(selfType);
+    }
+
+    _lookupMembersInSuperTypeFacets(astBuilder, name, selfType, inheritanceInfo, request, ioResult, inBreadcrumbs);
+}
+
 static void _lookUpMembersInSuperTypeImpl(
     ASTBuilder*             astBuilder,
     Name*                   name,
@@ -544,6 +577,12 @@ static void _lookUpMembersInSuperTypeImpl(
         auto declRef = declRefType->getDeclRef();
 
         _lookUpMembersInSuperTypeDeclImpl(astBuilder, name, declRef, request, ioResult, inBreadcrumbs);
+    }
+    else if (auto eachType = as<EachType>(superType))
+    {
+        auto canEachType = eachType->getCanonicalType();
+        InheritanceInfo inheritanceInfo = request.semantics->getShared()->getInheritanceInfo(canEachType);
+        _lookupMembersInSuperTypeFacets(astBuilder, name, canEachType, inheritanceInfo, request, ioResult, inBreadcrumbs);
     }
     else if (auto extractExistentialType = as<ExtractExistentialType>(superType))
     {
@@ -648,7 +687,8 @@ static void _lookUpMembersInValue(
     // in the *type* of that value.
     //
     auto valueType = getTypeForDeclRef(astBuilder, valueDeclRef, SourceLoc());
-
+    if (auto typeType = as<TypeType>(valueType))
+        valueType = typeType->getType();
     return _lookUpMembersInType(astBuilder, name, valueType, request, ioResult, breadcrumbs);
 }
 
@@ -766,6 +806,10 @@ static void _lookUpInScopes(
                     // a type that uses the "target type" of the `extension`.
                     //
                     type = getTargetType(astBuilder, extDeclRef);
+                    if (name == astBuilder->getSharedASTBuilder()->getThisTypeName())
+                    {
+                        breadcrumbPtr = nullptr;
+                    }
                 }
                 else
                 {
@@ -847,6 +891,13 @@ static void _lookUpInScopes(
                     //
                     thisParameterMode = LookupResultItem::Breadcrumb::ThisParameterMode::MutableValue;
                 }
+                else if (funcDeclRef.getDecl()->hasModifier<RefAttribute>())
+                {
+                    // In a non-`static` method marked `[ref]` there is
+                    // an implicit `this` parameter that is mutable.
+                    //
+                    thisParameterMode = LookupResultItem::Breadcrumb::ThisParameterMode::MutableValue;
+                }
                 else
                 {
                     // In all other cases, there is an implicit `this` parameter
@@ -891,13 +942,14 @@ LookupResult lookUp(
     Name*               name,
     Scope*              scope,
     LookupMask          mask,
-    bool                considerAllLocalNamesInScope)
+    bool                considerAllLocalNamesInScope,
+    Decl*               declToExclude)
 {
     LookupResult result;
     const auto options = considerAllLocalNamesInScope
         ? LookupOptions::ConsiderAllLocalNamesInScope
         : LookupOptions::None;
-    LookupRequest request = initLookupRequest(semantics, name, mask, options, scope);
+    LookupRequest request = initLookupRequest(semantics, name, mask, options, scope, declToExclude);
     _lookUpInScopes(astBuilder, name, request, result);
     return result;
 }
@@ -912,7 +964,7 @@ LookupResult lookUpMember(
     LookupOptions       options)
 {
     LookupResult result;
-    LookupRequest request = initLookupRequest(semantics, name, mask, options, sourceScope);
+    LookupRequest request = initLookupRequest(semantics, name, mask, options, sourceScope, nullptr);
     _lookUpMembersInType(astBuilder, name, type, request, result, nullptr);
     return result;
 }

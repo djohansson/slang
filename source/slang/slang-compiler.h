@@ -21,28 +21,28 @@
 
 #include "../core/slang-file-system.h"
 
-#include "../../slang-com-ptr.h"
+#include "slang-com-ptr.h"
 
 #include "slang-capability.h"
 #include "slang-diagnostics.h"
-
 #include "slang-preprocessor.h"
 #include "slang-profile.h"
 #include "slang-syntax.h"
 #include "slang-content-assist-info.h"
-
 #include "slang-hlsl-to-vulkan-layout-options.h"
-
+#include "slang-compiler-options.h"
 #include "slang-serialize-ir-types.h"
 
 #include "../compiler-core/slang-artifact-representation-impl.h"
 
-#include "../../slang.h"
+#include "slang.h"
 
 namespace Slang
 {
     struct PathInfo;
-    struct IncludeHandler;
+    struct IncludeHandler;    
+    struct SharedSemanticsContext;
+
     class ProgramLayout;
     class PtrType;
     class TargetProgram;
@@ -73,8 +73,6 @@ namespace Slang
         Unknown             = SLANG_TARGET_UNKNOWN,
         None                = SLANG_TARGET_NONE,
         GLSL                = SLANG_GLSL,
-        GLSL_Vulkan         = SLANG_GLSL_VULKAN,
-        GLSL_Vulkan_OneDesc = SLANG_GLSL_VULKAN_ONE_DESC,
         HLSL                = SLANG_HLSL,
         SPIRV               = SLANG_SPIRV,
         SPIRVAssembly       = SLANG_SPIRV_ASM,
@@ -87,6 +85,7 @@ namespace Slang
         PyTorchCppBinding   = SLANG_CPP_PYTORCH_BINDING,
         HostCPPSource       = SLANG_HOST_CPP_SOURCE,
         HostExecutable      = SLANG_HOST_EXECUTABLE,
+        HostSharedLibrary   = SLANG_HOST_SHARED_LIBRARY,
         ShaderSharedLibrary = SLANG_SHADER_SHARED_LIBRARY,
         ShaderHostCallable  = SLANG_SHADER_HOST_CALLABLE,
         CUDASource          = SLANG_CUDA_SOURCE,
@@ -94,6 +93,10 @@ namespace Slang
         CUDAObjectCode      = SLANG_CUDA_OBJECT_CODE,
         ObjectCode          = SLANG_OBJECT_CODE,
         HostHostCallable    = SLANG_HOST_HOST_CALLABLE,
+        Metal               = SLANG_METAL,
+        MetalLib            = SLANG_METAL_LIB,
+        MetalLibAssembly    = SLANG_METAL_LIB_ASM,
+        WGSL                = SLANG_WGSL,
         CountOf             = SLANG_TARGET_COUNT_OF,
     };
 
@@ -199,10 +202,16 @@ namespace Slang
         Name* getName() { return m_name; }
 
             /// Get the stage that the entry point is to be compiled for
-        Stage getStage() { return m_profile.getStage(); }
+        Stage getStage() 
+        {
+            return m_profile.getStage();
+        }
 
             /// Get the profile that the entry point is to be compiled for
-        Profile getProfile() { return m_profile; }
+        Profile getProfile()
+        {
+            return m_profile;
+        }
 
             /// Get the index to the translation unit
         int getTranslationUnitIndex() const { return m_translationUnitIndex; }
@@ -256,6 +265,12 @@ namespace Slang
             /// Add all of the paths that `module` depends on to the list
         void addDependency(Module* module);
 
+        void clear()
+        {
+            m_fileList.clear();
+            m_fileSet.clear();
+        }
+
     private:
 
         // TODO: We are using a `HashSet` here to deduplicate
@@ -269,6 +284,7 @@ namespace Slang
         List<SourceFile*>    m_fileList;
         HashSet<SourceFile*> m_fileSet;
     };
+
 
     class EntryPoint;
 
@@ -301,6 +317,10 @@ namespace Slang
             SlangInt        targetIndex,
             slang::IBlob**  outCode,
             slang::IBlob**  outDiagnostics) SLANG_OVERRIDE;
+        SLANG_NO_THROW SlangResult SLANG_MCALL getTargetCode(
+            SlangInt targetIndex,
+            slang::IBlob** outCode,
+            slang::IBlob** outDiagnostics = nullptr) SLANG_OVERRIDE;
 
         SLANG_NO_THROW SlangResult SLANG_MCALL getResultAsFileSystem(
             SlangInt    entryPointIndex,
@@ -331,6 +351,14 @@ namespace Slang
             SlangInt entryPointIndex,
             SlangInt targetIndex,
             slang::IBlob** outHash) SLANG_OVERRIDE;
+
+        SLANG_NO_THROW SlangResult SLANG_MCALL linkWithOptions(
+            slang::IComponentType** outLinkedComponentType,
+            uint32_t count,
+            slang::CompilerOptionEntry* entries,
+            ISlangBlob** outDiagnostics) override;
+
+        CompilerOptionSet& getOptionSet() { return m_optionSet; }
 
             /// Get the linkage (aka "session" in the public API) for this component type.
         Linkage* getLinkage() { return m_linkage; }
@@ -391,6 +419,21 @@ namespace Slang
         Type* getTypeFromString(
             String const&   typeStr,
             DiagnosticSink* sink);
+
+        Expr* findDeclFromString(
+            String const& name,
+            DiagnosticSink* sink);
+        
+        Expr* findDeclFromStringInType(
+            Type* type,
+            String const& name,
+            LookupMask mask,
+            DiagnosticSink* sink);
+        
+        bool isSubType(Type* subType, Type* superType);
+
+        Dictionary<String, IntVal*>& getMangledNameToIntValMap();
+        ConstantIntVal* tryFoldIntVal(IntVal* intVal);
 
             /// Get a list of modules that this component type depends on.
             ///
@@ -514,13 +557,14 @@ namespace Slang
             /// This facility is only needed to support legacy APIs for string-based lookup
             /// and parsing via Slang reflection, and is not recommended for future APIs to use.
             ///
-        Scope* _createScopeForLegacyLookup(ASTBuilder* astBuilder);
-
+        Scope* _getOrCreateScopeForLegacyLookup(ASTBuilder* astBuilder);
     protected:
         ComponentType(Linkage* linkage);
 
-    private:
+    protected:
         Linkage* m_linkage;
+        
+        CompilerOptionSet m_optionSet;
 
         // Cache of target-specific programs for each target.
         Dictionary<TargetRequest*, RefPtr<TargetProgram>> m_targetPrograms;
@@ -530,6 +574,12 @@ namespace Slang
         // TODO: Remove this. Type lookup should only be supported on `Module`s.
         //
         Dictionary<String, Type*> m_types;
+
+        // Any decls looked up dynamically using `findDeclFromString`.
+        Dictionary<String, Expr*> m_decls;
+
+        Scope* m_lookupScope = nullptr;
+        std::unique_ptr<Dictionary<String, IntVal*>> m_mapMangledNameToIntVal;
     };
 
         /// A component type built up from other component types.
@@ -578,11 +628,12 @@ namespace Slang
             Index                       argCount,
             DiagnosticSink*             sink) SLANG_OVERRIDE;
 
-    private:
+    public:
         CompositeComponentType(
             Linkage*                            linkage,
             List<RefPtr<ComponentType>> const&  childComponents);
 
+    private:
         List<RefPtr<ComponentType>> m_childComponents;
 
         // The following arrays hold the concatenated entry points, parameters,
@@ -855,6 +906,14 @@ namespace Slang
             return Super::getEntryPointCode(entryPointIndex, targetIndex, outCode, outDiagnostics);
         }
 
+        SLANG_NO_THROW SlangResult SLANG_MCALL getTargetCode(
+            SlangInt        targetIndex,
+            slang::IBlob** outCode,
+            slang::IBlob** outDiagnostics) SLANG_OVERRIDE
+        {
+            return Super::getTargetCode(targetIndex, outCode, outDiagnostics);
+        }
+
         SLANG_NO_THROW SlangResult SLANG_MCALL getResultAsFileSystem(
             SlangInt        entryPointIndex,
             SlangInt        targetIndex,
@@ -889,6 +948,15 @@ namespace Slang
             return Super::link(
                 outLinkedComponentType,
                 outDiagnostics);
+        }
+
+        virtual SLANG_NO_THROW SlangResult SLANG_MCALL linkWithOptions(
+            slang::IComponentType** outLinkedComponentType,
+            uint32_t count,
+            slang::CompilerOptionEntry* entries,
+            ISlangBlob** outDiagnostics) override
+        {
+            return Super::linkWithOptions(outLinkedComponentType, count, entries, outDiagnostics);
         }
 
         SLANG_NO_THROW SlangResult SLANG_MCALL getEntryPointHostCallable(
@@ -992,6 +1060,10 @@ namespace Slang
             List<ExpandedSpecializationArg> existentialSpecializationArgs;
         };
 
+        SLANG_NO_THROW slang::FunctionReflection* SLANG_MCALL getFunctionReflection() SLANG_OVERRIDE
+        {
+            return (slang::FunctionReflection*)m_funcDeclRef.declRefBase;
+        }
     protected:
         void acceptVisitor(ComponentTypeVisitor* visitor, SpecializationInfo* specializationInfo) SLANG_OVERRIDE;
 
@@ -1079,6 +1151,14 @@ namespace Slang
             return Super::getEntryPointCode(entryPointIndex, targetIndex, outCode, outDiagnostics);
         }
 
+        SLANG_NO_THROW SlangResult SLANG_MCALL getTargetCode(
+            SlangInt        targetIndex,
+            slang::IBlob** outCode,
+            slang::IBlob** outDiagnostics) SLANG_OVERRIDE
+        {
+            return Super::getTargetCode(targetIndex, outCode, outDiagnostics);
+        }
+
         SLANG_NO_THROW SlangResult SLANG_MCALL getResultAsFileSystem(
             SlangInt        entryPointIndex,
             SlangInt        targetIndex,
@@ -1111,6 +1191,15 @@ namespace Slang
             ISlangBlob** outDiagnostics) SLANG_OVERRIDE
         {
             return Super::link(outLinkedComponentType, outDiagnostics);
+        }
+
+        virtual SLANG_NO_THROW SlangResult SLANG_MCALL linkWithOptions(
+            slang::IComponentType** outLinkedComponentType,
+            uint32_t count,
+            slang::CompilerOptionEntry* entries,
+            ISlangBlob** outDiagnostics) override
+        {
+            return Super::linkWithOptions(outLinkedComponentType, count, entries, outDiagnostics);
         }
 
         SLANG_NO_THROW SlangResult SLANG_MCALL getEntryPointHostCallable(
@@ -1198,6 +1287,7 @@ namespace Slang
         NVRTC = SLANG_PASS_THROUGH_NVRTC,                   ///< NVRTC CUDA compiler
         LLVM = SLANG_PASS_THROUGH_LLVM,                     ///< LLVM 'compiler'
         SpirvOpt = SLANG_PASS_THROUGH_SPIRV_OPT,            ///< pass thorugh spirv to spirv-opt
+        MetalC = SLANG_PASS_THROUGH_METAL,
         CountOf = SLANG_PASS_THROUGH_COUNT_OF,              
     };
     void printDiagnosticArg(StringBuilder& sb, PassThroughMode val);
@@ -1241,6 +1331,14 @@ namespace Slang
             slang::IBlob**  outDiagnostics) SLANG_OVERRIDE
         {
             return Super::getEntryPointCode(entryPointIndex, targetIndex, outCode, outDiagnostics);
+        }
+
+        SLANG_NO_THROW SlangResult SLANG_MCALL getTargetCode(
+            SlangInt        targetIndex,
+            slang::IBlob** outCode,
+            slang::IBlob** outDiagnostics) SLANG_OVERRIDE
+        {
+            return Super::getTargetCode(targetIndex, outCode, outDiagnostics);
         }
 
         SLANG_NO_THROW SlangResult SLANG_MCALL getResultAsFileSystem(
@@ -1292,8 +1390,32 @@ namespace Slang
             char const*             name,
             slang::IEntryPoint**     outEntryPoint) SLANG_OVERRIDE
         {
+            if (outEntryPoint == nullptr)
+            {
+                return SLANG_E_INVALID_ARG;
+            }
+
             ComPtr<slang::IEntryPoint> entryPoint(findEntryPointByName(UnownedStringSlice(name)));
             if((!entryPoint))
+                return SLANG_FAIL;
+
+            *outEntryPoint = entryPoint.detach();
+            return SLANG_OK;
+        }
+
+        virtual SLANG_NO_THROW SlangResult SLANG_MCALL findAndCheckEntryPoint(
+            char const* name,
+            SlangStage stage,
+            slang::IEntryPoint** outEntryPoint,
+            ISlangBlob** outDiagnostics) override
+        {
+            if (outEntryPoint == nullptr)
+            {
+                return SLANG_E_INVALID_ARG;
+            }
+
+            ComPtr<slang::IEntryPoint> entryPoint(findAndCheckEntryPoint(UnownedStringSlice(name), stage, outDiagnostics));
+            if ((!entryPoint))
                 return SLANG_FAIL;
 
             *outEntryPoint = entryPoint.detach();
@@ -1310,11 +1432,24 @@ namespace Slang
             if (index < 0 || index >= m_entryPoints.getCount())
                 return SLANG_E_INVALID_ARG;
 
+            if (outEntryPoint == nullptr)
+            {
+                return SLANG_E_INVALID_ARG;
+            }
+
             ComPtr<slang::IEntryPoint> entryPoint(m_entryPoints[index].Ptr());
             *outEntryPoint = entryPoint.detach();
             return SLANG_OK;
         }
 
+        virtual SLANG_NO_THROW SlangResult SLANG_MCALL linkWithOptions(
+            slang::IComponentType** outLinkedComponentType,
+            uint32_t count,
+            slang::CompilerOptionEntry* entries,
+            ISlangBlob** outDiagnostics) override
+        {
+            return Super::linkWithOptions(outLinkedComponentType, count, entries, outDiagnostics);
+        }
         //
 
         SLANG_NO_THROW void SLANG_MCALL getEntryPointHash(
@@ -1325,7 +1460,42 @@ namespace Slang
             return Super::getEntryPointHash(entryPointIndex, targetIndex, outHash);
         }
 
+        /// Get a serialized representation of the checked module.
+        virtual SLANG_NO_THROW SlangResult SLANG_MCALL serialize(ISlangBlob** outSerializedBlob) override;
+
+        /// Write the serialized representation of this module to a file.
+        virtual SLANG_NO_THROW SlangResult SLANG_MCALL writeToFile(char const* fileName) override;
+
+        /// Get the name of the module.
+        virtual SLANG_NO_THROW const char* SLANG_MCALL getName() override;
+
+        /// Get the path of the module.
+        virtual SLANG_NO_THROW const char* SLANG_MCALL getFilePath() override;
+
+        /// Get the unique identity of the module.
+        virtual SLANG_NO_THROW const char* SLANG_MCALL getUniqueIdentity() override;
+
+        /// Get the number of dependency files that this module depends on.
+        /// This includes both the explicit source files, as well as any
+        /// additional files that were transitively referenced (e.g., via
+        /// a `#include` directive).
+        virtual SLANG_NO_THROW SlangInt32 SLANG_MCALL getDependencyFileCount() override;
+
+        /// Get the path to a file this module depends on.
+        virtual SLANG_NO_THROW char const* SLANG_MCALL getDependencyFilePath(
+            SlangInt32 index) override;
+
+        /// Precompile TU to target language
+        virtual SLANG_NO_THROW SlangResult SLANG_MCALL precompileForTarget(
+            SlangCompileTarget target,
+            slang::IBlob** outDiagnostics) override;
+
         virtual void buildHash(DigestBuilder<SHA1>& builder) SLANG_OVERRIDE;
+
+        virtual slang::DeclReflection* getModuleReflection() SLANG_OVERRIDE;
+
+        void setDigest(SHA1::Digest const& digest) { m_digest = digest; }
+        SHA1::Digest computeDigest();
 
             /// Create a module (initially empty).
         Module(Linkage* linkage, ASTBuilder* astBuilder = nullptr);
@@ -1348,11 +1518,16 @@ namespace Slang
             /// Register a source file that this module depends on
         void addFileDependency(SourceFile* sourceFile);
 
+        void clearFileDependency() { m_fileDependencyList.clear(); }
             /// Set the AST for this module.
             ///
             /// This should only be called once, during creation of the module.
             ///
         void setModuleDecl(ModuleDecl* moduleDecl);// { m_moduleDecl = moduleDecl; }
+
+        void setName(String name);
+        void setName(Name* name) { m_name = name; }
+        void setPathInfo(PathInfo pathInfo) { m_pathInfo = pathInfo; }
 
             /// Set the IR for this module.
             ///
@@ -1395,6 +1570,10 @@ namespace Slang
             ///
         void _collectShaderParams();
 
+        void _discoverEntryPoints(DiagnosticSink* sink, const List<RefPtr<TargetRequest>>& targets);
+        void _discoverEntryPointsImpl(ContainerDecl* containerDecl, DiagnosticSink* sink, const List<RefPtr<TargetRequest>>& targets);
+
+
         class ModuleSpecializationInfo : public SpecializationInfo
         {
         public:
@@ -1409,8 +1588,9 @@ namespace Slang
         };
 
         RefPtr<EntryPoint> findEntryPointByName(UnownedStringSlice const& name);
+        RefPtr<EntryPoint> findAndCheckEntryPoint(UnownedStringSlice const& name, SlangStage stage, ISlangBlob** outDiagnostics);
 
-        List<RefPtr<EntryPoint>> const& getEntryPoints() { return m_entryPoints; }
+        List<RefPtr<EntryPoint>>& getEntryPoints() { return m_entryPoints; }
         void _addEntryPoint(EntryPoint* entryPoint);
         void _processFindDeclsExportSymbolsRec(Decl* decl);
 
@@ -1426,6 +1606,9 @@ namespace Slang
             DiagnosticSink*             sink) SLANG_OVERRIDE;
 
     private:
+        Name* m_name = nullptr;
+        PathInfo m_pathInfo;
+
         // The AST for the module
         ModuleDecl*  m_moduleDecl = nullptr;
 
@@ -1437,13 +1620,16 @@ namespace Slang
 
         List<Module*> m_requirements;
 
+        // A digest that uniquely identifies the contents of the module.
+        SHA1::Digest m_digest;
+
         // List of modules this module depends on
         ModuleDependencyList m_moduleDependencyList;
 
         // List of source files this module depends on
         FileDependencyList m_fileDependencyList;
 
-        // Entry points that were defined in thsi module
+        // Entry points that were defined in this module
         //
         // Note: the entry point defined in the module are *not*
         // part of the memory image/layout of the module when
@@ -1483,6 +1669,8 @@ namespace Slang
     public:
         TranslationUnitRequest(
             FrontEndCompileRequest* compileRequest);
+        TranslationUnitRequest(
+            FrontEndCompileRequest* compileRequest, Module* m);
 
         // The parent compile request
         FrontEndCompileRequest* compileRequest = nullptr;
@@ -1528,6 +1716,8 @@ namespace Slang
             /// Result of compiling this translation unit (a module)
         RefPtr<Module> module;
 
+        bool isChecked = false;
+
         Module* getModule() { return module; }
         ModuleDecl* getModuleDecl() { return module->getModuleDecl(); }
 
@@ -1538,6 +1728,13 @@ namespace Slang
         Scope* getLanguageScope();
 
         Dictionary<String, String> getCombinedPreprocessorDefinitions();
+
+        void setModuleName(Name* name)
+        {
+            moduleName = name;
+            if (module)
+                module->setName(name);
+        }
 
     protected:
         void _addSourceFile(SourceFile* sourceFile);
@@ -1580,107 +1777,75 @@ namespace Slang
     /// Are we generating code for a D3D API?
     bool isD3DTarget(TargetRequest* targetReq);
 
+    // Are we generating code for Metal?
+    bool isMetalTarget(TargetRequest* targetReq);
+
     /// Are we generating code for a Khronos API (OpenGL or Vulkan)?
     bool isKhronosTarget(TargetRequest* targetReq);
 
     /// Are we generating code for a CUDA API (CUDA / OptiX)?
     bool isCUDATarget(TargetRequest* targetReq);
 
+    // Are we generating code for a CPU target
+    bool isCPUTarget(TargetRequest* targetReq);
 
         /// A request to generate output in some target format.
     class TargetRequest : public RefObject
     {
     public:
-        
         TargetRequest(Linkage* linkage, CodeGenTarget format);
 
-        void addTargetFlags(SlangTargetFlags flags)
-        {
-            targetFlags |= flags;
-        }
-        void setTargetProfile(Slang::Profile profile)
-        {
-            targetProfile = profile;
-        }
-        void setFloatingPointMode(FloatingPointMode mode)
-        {
-            floatingPointMode = mode;
-        }
-        void setLineDirectiveMode(LineDirectiveMode mode)
-        {
-            lineDirectiveMode = mode;
-        }
-        
-        void setDumpIntermediates(bool value)
-        {
-            dumpIntermediates = value;
-        }
-        void setForceGLSLScalarBufferLayout(bool value)
-        {
-            forceGLSLScalarBufferLayout = value;
-        }
-
-        void addCapability(CapabilityName capability);
-
-        bool shouldEmitSPIRVDirectly()
-        {
-            return isKhronosTarget(this) && ((targetFlags & SLANG_TARGET_FLAG_GENERATE_SPIRV_DIRECTLY) != 0);
-        }
-
-        bool isWholeProgramRequest()
-        {
-            return (targetFlags & SLANG_TARGET_FLAG_GENERATE_WHOLE_PROGRAM) != 0;
-        }
-
-        void setHLSLToVulkanLayoutOptions(HLSLToVulkanLayoutOptions* opts);
-
-        const HLSLToVulkanLayoutOptions* getHLSLToVulkanLayoutOptions() const { return hlslToVulkanLayoutOptions; }
-
-        bool shouldDumpIntermediates() { return dumpIntermediates; }
-
-        void setTrackLiveness(bool enable) { enableLivenessTracking = enable; }
-
-        bool shouldTrackLiveness() { return enableLivenessTracking; }
+        TargetRequest(const TargetRequest& other);
 
         Linkage* getLinkage() { return linkage; }
-        CodeGenTarget getTarget() { return format; }
-        Profile getTargetProfile() { return targetProfile; }
-        FloatingPointMode getFloatingPointMode() { return floatingPointMode; }
-        LineDirectiveMode getLineDirectiveMode() { return lineDirectiveMode; }
-        SlangTargetFlags getTargetFlags() { return targetFlags; }
-        CapabilitySet getTargetCaps();
-        bool getForceGLSLScalarBufferLayout() { return forceGLSLScalarBufferLayout; }
+       
         Session* getSession();
-        MatrixLayoutMode getDefaultMatrixLayoutMode();
+
+        CodeGenTarget getTarget() { return optionSet.getEnumOption<CodeGenTarget>(CompilerOptionName::Target); }
 
         // TypeLayouts created on the fly by reflection API
-        Dictionary<Type*, RefPtr<TypeLayout>> typeLayouts;
+        struct TypeLayoutKey
+        {
+            Type* type;
+            slang::LayoutRules rules;
+            HashCode getHashCode() const
+            {
+                Hasher hasher;
+                hasher.hashValue(type);
+                hasher.hashValue(rules);
+                return hasher.getResult();
+            }
+            bool operator==(TypeLayoutKey other) const
+            {
+                return type == other.type && rules == other.rules;
+            }
+        };
+        Dictionary<TypeLayoutKey, RefPtr<TypeLayout>> typeLayouts;
 
-        Dictionary<Type*, RefPtr<TypeLayout>>& getTypeLayouts() { return typeLayouts; }
+        Dictionary<TypeLayoutKey, RefPtr<TypeLayout>>& getTypeLayouts() { return typeLayouts; }
 
-        TypeLayout* getTypeLayout(Type* type);
+        TypeLayout* getTypeLayout(Type* type, slang::LayoutRules rules);
+
+        CompilerOptionSet& getOptionSet() { return optionSet; }
+
+        CapabilitySet getTargetCaps();
+
+        void setTargetCaps(CapabilitySet capSet);
+
+        HLSLToVulkanLayoutOptions* getHLSLToVulkanLayoutOptions();
 
     private:
         Linkage*                linkage = nullptr;
-        CodeGenTarget           format = CodeGenTarget::Unknown;
-        SlangTargetFlags        targetFlags = kDefaultTargetFlags;
-        Slang::Profile          targetProfile = Slang::Profile();
-        FloatingPointMode       floatingPointMode = FloatingPointMode::Default;
-        List<CapabilityName>    rawCapabilities;
+        CompilerOptionSet       optionSet;
         CapabilitySet           cookedCapabilities;
-        LineDirectiveMode       lineDirectiveMode = LineDirectiveMode::Default;
-        bool                    dumpIntermediates = false;
-        bool                    forceGLSLScalarBufferLayout = false;
-        bool                    enableLivenessTracking = false;
-
-        RefPtr<HLSLToVulkanLayoutOptions> hlslToVulkanLayoutOptions;           ///< Optional vulkan layout options
+        RefPtr<HLSLToVulkanLayoutOptions> hlslToVulkanOptions;
     };
 
         /// Given a target request returns which (if any) intermediate source language is required
         /// to produce it.
         ///
         /// If no intermediate source language is required, will return SourceLanguage::Unknown
-    SourceLanguage getIntermediateSourceLanguageForTarget(TargetRequest* req);
+    SourceLanguage getIntermediateSourceLanguageForTarget(TargetProgram* req);
 
         /// Are resource types "bindless" (implemented as ordinary data) on the given `target`?
     bool areResourceTypesBindlessOnTarget(TargetRequest* target);
@@ -1730,11 +1895,20 @@ namespace Slang
         /// lookup additional loaded modules.
     typedef Dictionary<Name*, Module*> LoadedModuleDictionary;
 
+    enum ModuleBlobType
+    {
+        Source, IR
+    };
+
+    struct SerialContainerDataModule;
+
         /// A context for loading and re-using code modules.
     class Linkage : public RefObject, public slang::ISession
     {
     public:
         SLANG_REF_OBJECT_IUNKNOWN_ALL
+
+        CompilerOptionSet m_optionSet;
 
         ISlangUnknown* getInterface(const Guid& guid);
 
@@ -1742,10 +1916,26 @@ namespace Slang
         SLANG_NO_THROW slang::IModule* SLANG_MCALL loadModule(
             const char* moduleName,
             slang::IBlob**     outDiagnostics = nullptr) override;
+        slang::IModule* loadModuleFromBlob(
+            const char* moduleName,
+            const char* path,
+            slang::IBlob* source,
+            ModuleBlobType blobType,
+            slang::IBlob** outDiagnostics = nullptr);
+        SLANG_NO_THROW slang::IModule* SLANG_MCALL loadModuleFromIRBlob(
+            const char* moduleName,
+            const char* path,
+            slang::IBlob* source,
+            slang::IBlob** outDiagnostics = nullptr) override;
         SLANG_NO_THROW slang::IModule* SLANG_MCALL loadModuleFromSource(
             const char* moduleName,
             const char* path,
             slang::IBlob* source,
+            slang::IBlob** outDiagnostics = nullptr) override;
+        SLANG_NO_THROW slang::IModule* SLANG_MCALL loadModuleFromSourceString(
+            const char* moduleName,
+            const char* path,
+            const char* string,
             slang::IBlob** outDiagnostics = nullptr) override;
         SLANG_NO_THROW SlangResult SLANG_MCALL createCompositeComponentType(
             slang::IComponentType* const*   componentTypes,
@@ -1786,11 +1976,14 @@ namespace Slang
             ISlangBlob** outDiagnostics) override;
         SLANG_NO_THROW SlangResult SLANG_MCALL createCompileRequest(
             SlangCompileRequest**   outCompileRequest) override;
+        virtual SLANG_NO_THROW SlangInt SLANG_MCALL getLoadedModuleCount() override;
+        virtual SLANG_NO_THROW slang::IModule* SLANG_MCALL getLoadedModule(SlangInt index) override;
+        virtual SLANG_NO_THROW bool SLANG_MCALL isBinaryModuleUpToDate(const char* modulePath, slang::IBlob* binaryModuleBlob) override;
 
         // Updates the supplied builder with linkage-related information, which includes preprocessor
         // defines, the compiler version, and other compiler options. This is then merged with the hash
         // produced for the program to produce a key that can be used with the shader cache.
-        void buildHash(DigestBuilder<SHA1>& builder, SlangInt targetIndex);
+        void buildHash(DigestBuilder<SHA1>& builder, SlangInt targetIndex = -1);
 
         void addTarget(
             slang::TargetDesc const& desc);
@@ -1807,50 +2000,22 @@ namespace Slang
             /// Dtor
         ~Linkage();
 
-        slang::SessionFlags m_flag = 0;
-        void setFlags(slang::SessionFlags flags) { m_flag = flags; }
         bool isInLanguageServer() { return contentAssistInfo.checkingMode != ContentAssistCheckingMode::None; }
 
             /// Get the parent session for this linkage
         Session* getSessionImpl() { return m_session; }
-
-        bool getEnableEffectAnnotations()
-        {
-            return m_enableEffectAnnotations;
-        }
-        void setEnableEffectAnnotations(bool value)
-        {
-            m_enableEffectAnnotations = value;
-        }
-        bool getAllowGLSLInput()
-        {
-            return m_allowGLSLInput;
-        }
-        void setAllowGLSLInput(bool value)
-        {
-            m_allowGLSLInput = value;
-        }
 
         // Information on the targets we are being asked to
         // generate code for.
         List<RefPtr<TargetRequest>> targets;
 
         // Directories to search for `#include` files or `import`ed modules
-        SearchDirectoryList searchDirectories;
-
-        SearchDirectoryList const& getSearchDirectories() { return searchDirectories; }
-
-        // Definitions to provide during preprocessing
-        Dictionary<String, String> preprocessorDefinitions;
+        SearchDirectoryList& getSearchDirectories();
 
         // Source manager to help track files loaded
         SourceManager m_defaultSourceManager;
         SourceManager* m_sourceManager = nullptr;
-
-        bool m_obfuscateCode = false;
-        
-        /// Holds any args that are destined for downstream compilers/tools etc
-        DownstreamArgs m_downstreamArgs;
+        RefPtr<CommandLineContext> m_cmdLineContext;
 
         // Name pool for looking up names
         NamePool namePool;
@@ -1859,7 +2024,6 @@ namespace Slang
 
         ASTBuilder* getASTBuilder() { return m_astBuilder; }
 
-       
         RefPtr<ASTBuilder> m_astBuilder;
 
         // Cache for container types.
@@ -1888,6 +2052,8 @@ namespace Slang
 
         // Counters for allocating sequential IDs to witness tables conforming to each interface type.
         Dictionary<String, uint32_t> mapInterfaceMangledNameToSequentialIDCounters;
+
+        SearchDirectoryList searchDirectoryCache;
 
         // The resulting specialized IR module for each entry point request
         List<RefPtr<IRModule>> compiledModules;
@@ -1935,7 +2101,23 @@ namespace Slang
             ISlangBlob*         fileContentsBlob,
             SourceLoc const&    loc,
             DiagnosticSink*     sink,
+            const LoadedModuleDictionary* additionalLoadedModules,
+            ModuleBlobType      blobType);
+
+        RefPtr<Module> loadModuleFromIRBlobImpl(
+            Name* name,
+            const PathInfo& filePathInfo,
+            ISlangBlob* fileContentsBlob,
+            SourceLoc const& loc,
+            DiagnosticSink* sink,
             const LoadedModuleDictionary* additionalLoadedModules);
+        RefPtr<Module> loadDeserializedModule(
+            Name* name,
+            const PathInfo& filePathInfo,
+            SerialContainerDataModule& m,
+            DiagnosticSink* sink);
+
+        SourceFile* loadSourceFile(String pathFrom, String path);
 
         void loadParsedModule(
             RefPtr<FrontEndCompileRequest>  compileRequest,
@@ -1946,11 +2128,15 @@ namespace Slang
             /// Load a module of the given name.
         Module* loadModule(String const& name);
 
+        bool isBinaryModuleUpToDate(String fromPath, RiffContainer* container);
+
         RefPtr<Module> findOrImportModule(
             Name*               name,
             SourceLoc const&    loc,
             DiagnosticSink*     sink,
             const LoadedModuleDictionary* loadedModules = nullptr);
+
+        void prepareDeserializedModule(SerialContainerDataModule& moduleEntry, const PathInfo& pathInfo, Module* module, DiagnosticSink* sink);
 
         SourceFile* findFile(Name* name, SourceLoc loc, IncludeSystem& outIncludeSystem);
         struct IncludeResult
@@ -1982,23 +2168,19 @@ namespace Slang
 
         void setFileSystem(ISlangFileSystem* fileSystem);
 
-        /// The layout to use for matrices by default (row/column major)
-        MatrixLayoutMode defaultMatrixLayoutMode = kMatrixLayoutMode_ColumnMajor;
-        MatrixLayoutMode getDefaultMatrixLayoutMode() { return defaultMatrixLayoutMode; }
-
-        DebugInfoLevel debugInfoLevel = DebugInfoLevel::None;
-        DebugInfoFormat debugInfoFormat = DebugInfoFormat::Default;
-
-        OptimizationLevel optimizationLevel = OptimizationLevel::Default;
-
-        SerialCompressionType serialCompressionType = SerialCompressionType::VariableByteLite;
+        DeclRef<Decl> specializeGeneric(
+            DeclRef<Decl>                       declRef,
+            List<Expr*>                         argExprs,
+            DiagnosticSink*                     sink);
+        
+        DeclRef<Decl> specializeWithArgTypes(
+            Expr*               funcExpr,
+            List<Type*>         argTypes,
+            DiagnosticSink*     sink);
 
         DiagnosticSink::Flags diagnosticSinkFlags = 0;
 
         bool m_requireCacheFileSystem = false;
-        bool m_useFalcorCustomSharedKeywordSemantics = false;
-        bool m_enableEffectAnnotations = false;
-        bool m_allowGLSLInput = false;
 
         // Modules that have been read in with the -r option
         List<ComPtr<IArtifact>> m_libModules;
@@ -2007,6 +2189,9 @@ namespace Slang
         {
             m_retainedSession = nullptr;
         }
+
+        // Get shared semantics information for reflection purposes.
+        SharedSemanticsContext* getSemanticsForReflection();
 
     private:
             /// The global Slang library session that this linkage is a child of
@@ -2061,6 +2246,8 @@ namespace Slang
 
         List<Type*> m_specializedTypes;
 
+        RefPtr<SharedSemanticsContext> m_semanticsForReflection;
+
     };
 
         /// Shared functionality between front- and back-end compile requests.
@@ -2089,17 +2276,6 @@ namespace Slang
         NamePool* getNamePool() { return getLinkage()->getNamePool(); }
         ISlangFileSystemExt* getFileSystemExt() { return getLinkage()->getFileSystemExt(); }
         SlangResult loadFile(String const& path, PathInfo& outPathInfo, ISlangBlob** outBlob) { return getLinkage()->loadFile(path, outPathInfo, outBlob); }
-
-        bool shouldDumpIR = false;
-        bool shouldValidateIR = false;
-
-        bool shouldDumpAST = false;
-        bool shouldDocument = false;
-
-        bool outputPreprocessor = false;
-
-            /// If true will after lexical analysis output the hierarchy of includes to stdout
-        bool outputIncludes = false;
 
     protected:
         CompileRequestBase(
@@ -2135,9 +2311,6 @@ namespace Slang
 
         RefPtr<TranslationUnitRequest> getTranslationUnit(UInt index) { return translationUnits[index]; }
 
-        // Compile flags to be shared by all translation units
-        SlangCompileFlags compileFlags = 0;
-
         // If true then generateIR will serialize out IR, and serialize back in again. Making 
         // serialization a bottleneck or firewall between the front end and the backend
         bool useSerialIRBottleneck = false; 
@@ -2145,21 +2318,13 @@ namespace Slang
         // If true will serialize and de-serialize with debug information
         bool verifyDebugSerialization = false;
 
+        CompilerOptionSet optionSet;
+
         List<RefPtr<FrontEndEntryPointRequest>> m_entryPointReqs;
 
         List<RefPtr<FrontEndEntryPointRequest>> const& getEntryPointReqs() { return m_entryPointReqs; }
         UInt getEntryPointReqCount() { return m_entryPointReqs.getCount(); }
         FrontEndEntryPointRequest* getEntryPointReq(UInt index) { return m_entryPointReqs[index]; }
-
-        // Directories to search for `#include` files or `import`ed modules
-        // NOTE! That for now these search directories are not settable via the API
-        // so the search directories on Linkage is used for #include as well as for modules.
-        SearchDirectoryList searchDirectories;
-
-        SearchDirectoryList const& getSearchDirectories() { return searchDirectories; }
-
-        // Definitions to provide during preprocessing
-        Dictionary<String, String> preprocessorDefinitions;
 
         void parseTranslationUnit(
             TranslationUnitRequest* translationUnit);
@@ -2360,6 +2525,15 @@ namespace Slang
             return m_irModuleForLayout;
         }
 
+        CompilerOptionSet& getOptionSet() { return m_optionSet; }
+
+        HLSLToVulkanLayoutOptions* getHLSLToVulkanLayoutOptions() { return m_targetReq->getHLSLToVulkanLayoutOptions(); }
+
+        bool shouldEmitSPIRVDirectly()
+        {
+            return isKhronosTarget(m_targetReq) && getOptionSet().shouldEmitSPIRVDirectly();
+        }
+
     private:
         RefPtr<IRModule> createIRModuleForLayout(DiagnosticSink* sink);
 
@@ -2371,6 +2545,8 @@ namespace Slang
 
         // The computed layout, if it has been generated yet
         RefPtr<ProgramLayout> m_layout;
+
+        CompilerOptionSet m_optionSet;
 
         // Generated compile results for each entry point
         // in the parent `Program` (indexing matches
@@ -2552,6 +2728,7 @@ namespace Slang
 
         bool shouldValidateIR();
         bool shouldDumpIR();
+        bool shouldReportCheckpointIntermediates();
 
         bool shouldTrackLiveness();
 
@@ -2570,7 +2747,13 @@ namespace Slang
 
         SlangResult emitEntryPoints(ComPtr<IArtifact>& outArtifact);
 
+        SlangResult emitPrecompiledDownstreamIR(ComPtr<IArtifact>& outArtifact);
+
         void maybeDumpIntermediate(IArtifact* artifact);
+
+        // Used to cause instructions available in precompiled blobs to be
+        // removed between IR linking and target source generation.
+        bool removeAvailableInDownstreamIR = false;
 
     protected:
         CodeGenTarget m_targetFormat = CodeGenTarget::Unknown;
@@ -2608,7 +2791,6 @@ namespace Slang
 
 
         SlangResult _emitEntryPoints(ComPtr<IArtifact>& outArtifact);
-
     private:
         Shared* m_shared = nullptr;
     };
@@ -2646,6 +2828,9 @@ namespace Slang
         virtual SLANG_NO_THROW void SLANG_MCALL setTargetFloatingPointMode(int targetIndex, SlangFloatingPointMode mode) SLANG_OVERRIDE;
         virtual SLANG_NO_THROW void SLANG_MCALL setTargetMatrixLayoutMode(int targetIndex, SlangMatrixLayoutMode mode) SLANG_OVERRIDE;
         virtual SLANG_NO_THROW void SLANG_MCALL setTargetForceGLSLScalarBufferLayout(int targetIndex, bool value) SLANG_OVERRIDE;
+        virtual SLANG_NO_THROW void SLANG_MCALL setTargetForceDXLayout(int targetIndex, bool value) SLANG_OVERRIDE;
+        virtual SLANG_NO_THROW void SLANG_MCALL setTargetGenerateWholeProgram(int targetIndex, bool value) SLANG_OVERRIDE;
+        virtual SLANG_NO_THROW void SLANG_MCALL setTargetEmbedDownstreamIR(int targetIndex, bool value) SLANG_OVERRIDE;
         virtual SLANG_NO_THROW void SLANG_MCALL setMatrixLayoutMode(SlangMatrixLayoutMode mode) SLANG_OVERRIDE;
         virtual SLANG_NO_THROW void SLANG_MCALL setDebugInfoLevel(SlangDebugInfoLevel level) SLANG_OVERRIDE;
         virtual SLANG_NO_THROW void SLANG_MCALL setOptimizationLevel(SlangOptimizationLevel level) SLANG_OVERRIDE;
@@ -2662,7 +2847,7 @@ namespace Slang
         virtual SLANG_NO_THROW void SLANG_MCALL addTranslationUnitPreprocessorDefine(int translationUnitIndex, const char* key, const char* value) SLANG_OVERRIDE;
         virtual SLANG_NO_THROW void SLANG_MCALL addTranslationUnitSourceFile(int translationUnitIndex, char const* path) SLANG_OVERRIDE;
         virtual SLANG_NO_THROW void SLANG_MCALL addTranslationUnitSourceString(int translationUnitIndex, char const* path, char const* source) SLANG_OVERRIDE;
-        virtual SLANG_NO_THROW SlangResult SLANG_MCALL addLibraryReference(const void* libData, size_t libDataSize) SLANG_OVERRIDE;
+        virtual SLANG_NO_THROW SlangResult SLANG_MCALL addLibraryReference(const char* basePath, const void* libData, size_t libDataSize) SLANG_OVERRIDE;
         virtual SLANG_NO_THROW void SLANG_MCALL addTranslationUnitSourceStringSpan(int translationUnitIndex, char const* path, char const* sourceBegin, char const* sourceEnd) SLANG_OVERRIDE;
         virtual SLANG_NO_THROW void SLANG_MCALL addTranslationUnitSourceBlob(int translationUnitIndex, char const* path, ISlangBlob* sourceBlob) SLANG_OVERRIDE;
         virtual SLANG_NO_THROW int SLANG_MCALL addEntryPoint(int translationUnitIndex, char const* name, SlangStage stage) SLANG_OVERRIDE;
@@ -2710,8 +2895,11 @@ namespace Slang
         virtual SLANG_NO_THROW void SLANG_MCALL setReportDownstreamTime(bool value) SLANG_OVERRIDE;
         virtual SLANG_NO_THROW void SLANG_MCALL setReportPerfBenchmark(bool value) SLANG_OVERRIDE;
         virtual SLANG_NO_THROW void SLANG_MCALL setSkipSPIRVValidation(bool value) SLANG_OVERRIDE;
+        virtual SLANG_NO_THROW void SLANG_MCALL setTargetUseMinimumSlangOptimization(int targetIndex, bool value) SLANG_OVERRIDE;
+        virtual SLANG_NO_THROW void SLANG_MCALL setIgnoreCapabilityCheck(bool value) SLANG_OVERRIDE;
+        virtual SLANG_NO_THROW SlangResult SLANG_MCALL getCompileTimeProfile(ISlangProfiler** compileTimeProfile, bool isClear) SLANG_OVERRIDE;
 
-        void setHLSLToVulkanLayoutOptions(int targetIndex, HLSLToVulkanLayoutOptions* vulkanLayoutOptions);
+        void setTrackLiveness(bool v);
 
         EndToEndCompileRequest(
             Session* session);
@@ -2753,34 +2941,13 @@ namespace Slang
             /// Source code for the specialization arguments to use for the global specialization parameters of the program.
         List<String> m_globalSpecializationArgStrings;
 
-        bool m_shouldSkipCodegen = false;
-
         // Are we being driven by the command-line `slangc`, and should act accordingly?
         bool m_isCommandLineCompile = false;
-
-        bool m_reportDownstreamCompileTime = false;
-
-        // If set, will print out compiler performance benchmark results.
-        bool m_reportPerfBenchmark = false;
-
-        bool m_skipSPIRVValidation = false;
         
         String m_diagnosticOutput;
 
-
-            // If set, will dump the compilation state 
-        String m_dumpRepro;
-
-            /// If set, if a compilation failure occurs will attempt to save off a dump repro with a unique name
-        bool m_dumpReproOnError = false;
-
             /// A blob holding the diagnostic output
         ComPtr<ISlangBlob> m_diagnosticOutputBlob;
-
-            /// Line directive mode for new targets to be added to this request.
-            /// This is needed to support the legacy `setLineDirectiveMode` API.
-            /// We can remove this field if we move to `setTargetLineDirectiveMode`.
-        LineDirectiveMode m_lineDirectiveMode = LineDirectiveMode::Default;
 
             /// Per-entry-point information not tracked by other compile requests
         class EntryPointInfo : public RefObject
@@ -2800,9 +2967,16 @@ namespace Slang
             // the given entry point.
             Dictionary<Int, String> entryPointOutputPaths;
             String wholeTargetOutputPath;
+            CompilerOptionSet targetOptions;
         };
         Dictionary<TargetRequest*, RefPtr<TargetInfo>> m_targetInfos;
-        
+
+        CompilerOptionSet m_optionSetForDefaultTarget;
+
+        CompilerOptionSet& getTargetOptionSet(TargetRequest* req);
+
+        CompilerOptionSet& getTargetOptionSet(Index targetIndex);
+
         String m_dependencyOutputPath;
 
             /// Writes the modules in a container to the stream
@@ -2833,9 +3007,6 @@ namespace Slang
         DiagnosticSink* getSink() { return &m_sink; }
         NamePool* getNamePool() { return getLinkage()->getNamePool(); }
 
-        void setHLSLToVulkanLayoutOptions(HLSLToVulkanLayoutOptions* hlslToVulkanLayoutOptions) { m_hlslToVulkanLayoutOptions = hlslToVulkanLayoutOptions; }
-        HLSLToVulkanLayoutOptions* getHLSLToVulkanLayoutOptions() const { return m_hlslToVulkanLayoutOptions; }
-
         FrontEndCompileRequest* getFrontEndReq() { return m_frontEndReq; }
 
         ComponentType* getUnspecializedGlobalComponentType() { return getFrontEndReq()->getGlobalComponentType(); }
@@ -2856,36 +3027,7 @@ namespace Slang
 
         void generateOutput();
 
-        void setTrackLiveness(bool enable);
-
-        // Note: The following settings used to be considered part of the "back-end" compile
-        // request, but were only being used as part of end-to-end compilation anyway,
-        // so they were moved here.
-        //
-
-        // Should we dump intermediate results along the way, for debugging?
-        bool shouldDumpIntermediates = false;
-
-        // True if liveness tracking is enabled
-        bool enableLivenessTracking = false;
-
-        // Should R/W images without explicit formats be assumed to have "unknown" format?
-        //
-        // The default behavior is to make a best-effort guess as to what format is intended.
-        //
-        bool useUnknownImageFormatAsDefault = false;
-
-        // If true will disable generics/existential value specialization pass.
-        bool disableSpecialization = false;
-
-        // If true will disable generating dynamic dispatch code.
-        bool disableDynamicDispatch = false;
-
-        // The default IR dumping options
-//        IRDumpOptions m_irDumpOptions;
-
-        String m_dumpIntermediatePrefix;
-
+        CompilerOptionSet& getOptionSet() { return m_linkage->m_optionSet; }
     private:
         
         String _getWholeProgramPath(TargetRequest* targetReq);
@@ -2912,8 +3054,6 @@ namespace Slang
         RefPtr<ComponentType>           m_specializedGlobalComponentType;
         RefPtr<ComponentType>           m_specializedGlobalAndEntryPointsComponentType;
         List<RefPtr<ComponentType>>     m_specializedEntryPoints;
-
-        RefPtr<HLSLToVulkanLayoutOptions> m_hlslToVulkanLayoutOptions;
         
         // For output
 
@@ -3001,9 +3141,11 @@ namespace Slang
     class Session : public RefObject, public slang::IGlobalSession
     {
     public:
-        SLANG_REF_OBJECT_IUNKNOWN_ALL
+        SLANG_COM_INTERFACE(0xd6b767eb, 0xd786, 0x4343, { 0x2a, 0x8c, 0x6d, 0xa0, 0x3d, 0x5a, 0xb4, 0x4a })
 
-        ISlangUnknown* getInterface(const Guid& guid);
+        SLANG_NO_THROW SlangResult SLANG_MCALL queryInterface(SlangUUID const& uuid, void** outObject) SLANG_OVERRIDE;
+        SLANG_REF_OBJECT_IUNKNOWN_ADD_REF
+        SLANG_REF_OBJECT_IUNKNOWN_RELEASE
 
         // slang::IGlobalSession 
         SLANG_NO_THROW SlangResult SLANG_MCALL createSession(slang::SessionDesc const&  desc, slang::ISession** outSession) override;
@@ -3041,6 +3183,11 @@ namespace Slang
         }
 
         SLANG_NO_THROW SlangResult SLANG_MCALL setSPIRVCoreGrammar(char const* jsonPath) override;
+
+        SLANG_NO_THROW SlangResult SLANG_MCALL parseCommandLineArguments(
+            int argc, const char* const* argv, slang::SessionDesc* outSessionDesc, ISlangUnknown** outAllocation) override;
+
+        SLANG_NO_THROW SlangResult SLANG_MCALL getSessionDescDigest(slang::SessionDesc* sessionDesc, ISlangBlob** outBlob) override;
 
             /// Get the downstream compiler for a transition
         IDownstreamCompiler* getDownstreamCompiler(CodeGenTarget source, CodeGenTarget target);
@@ -3204,9 +3351,11 @@ SLANG_FORCE_INLINE slang::IGlobalSession* asExternal(Session* session)
     return static_cast<slang::IGlobalSession*>(session);
 }
 
-SLANG_FORCE_INLINE Session* asInternal(slang::IGlobalSession* session)
+SLANG_FORCE_INLINE ComPtr<Session> asInternal(slang::IGlobalSession* session)
 {
-    return static_cast<Session*>(session);
+    Slang::Session* internalSession = nullptr;
+    session->queryInterface(SLANG_IID_PPV_ARGS(&internalSession));
+    return ComPtr<Session>(INIT_ATTACH, static_cast<Session*>(internalSession));
 }
 
 SLANG_FORCE_INLINE slang::ISession* asExternal(Linkage* linkage)
@@ -3244,6 +3393,16 @@ SLANG_FORCE_INLINE Type* asInternal(slang::TypeReflection* type)
 SLANG_FORCE_INLINE slang::TypeReflection* asExternal(Type* type)
 {
     return reinterpret_cast<slang::TypeReflection*>(type);
+}
+
+SLANG_FORCE_INLINE DeclRef<Decl> asInternal(slang::GenericReflection* generic)
+{
+    return DeclRef<Decl>(reinterpret_cast<DeclRefBase*>(generic));
+}
+
+SLANG_FORCE_INLINE slang::GenericReflection* asExternal(DeclRef<Decl> generic)
+{
+    return reinterpret_cast<slang::GenericReflection*>(generic.declRefBase);
 }
 
 SLANG_FORCE_INLINE TypeLayout* asInternal(slang::TypeLayoutReflection* type)
@@ -3294,6 +3453,34 @@ struct CompileTimerRAII
         session->addTotalCompileTime(elapsedTime);
     }
 };
+
+// helpers for error/warning reporting
+enum class DiagnosticCategory
+{
+    None = 0,
+    Capability = 1 << 0,
+};
+template<typename P, typename... Args>
+bool maybeDiagnose(DiagnosticSink* sink, CompilerOptionSet& optionSet, DiagnosticCategory errorType, P const& pos, DiagnosticInfo const& info, Args const&... args)
+{
+    if ((int)errorType & (int)DiagnosticCategory::Capability && optionSet.getBoolOption(CompilerOptionName::IgnoreCapabilities))
+        return false;
+    return sink->diagnose(pos, info, args...);
+}
+
+template<typename P, typename... Args>
+bool maybeDiagnoseWarningOrError(DiagnosticSink* sink, CompilerOptionSet& optionSet, DiagnosticCategory errorType, P const& pos, DiagnosticInfo const& warningInfo, DiagnosticInfo const& errorInfo, Args const&... args)
+{
+    if ((int)errorType & (int)DiagnosticCategory::Capability && optionSet.getBoolOption(CompilerOptionName::RestrictiveCapabilityCheck))
+    {
+        return maybeDiagnose(sink, optionSet, errorType, pos, errorInfo, args...);
+    }
+    else
+    {
+        return maybeDiagnose(sink, optionSet, errorType, pos, warningInfo, args...);
+    }
+}
+
 }
 
 #endif

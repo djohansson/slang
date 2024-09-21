@@ -920,7 +920,7 @@ Result ShaderObjectImpl::bindOrdinaryDataBufferIfNeeded(
     // the given `descriptorSet` and update the base range index for
     // subsequent binding operations to account for it.
     //
-    if (m_constantBuffer)
+    if (m_constantBuffer && m_constantBufferSize > 0)
     {
         auto bufferImpl = static_cast<BufferResourceImpl*>(m_constantBuffer);
         writeBufferDescriptor(
@@ -977,6 +977,7 @@ Result ShaderObjectImpl::_createSpecializedLayout(ShaderObjectLayoutImpl** outLa
     auto device = getDevice();
     RefPtr<ShaderObjectLayoutImpl> layout;
     SLANG_RETURN_ON_FAIL(device->getShaderObjectLayout(
+        m_layout->m_slangSession,
         extendedType.slangType,
         m_layout->getContainerType(),
         (ShaderObjectLayoutBase**)layout.writeRef()));

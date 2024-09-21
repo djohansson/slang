@@ -49,19 +49,26 @@ function(slang_add_target dir type)
         EXPLICIT_SOURCE
         # Additional directories from which to glob source
         EXTRA_SOURCE_DIRS
-        # Additional compile definitions
+        # Additional compile definitions and options
         EXTRA_COMPILE_DEFINITIONS_PRIVATE
         EXTRA_COMPILE_DEFINITIONS_PUBLIC
+        EXTRA_COMPILE_OPTIONS_PRIVATE
         # Targets with which to link privately
         LINK_WITH_PRIVATE
+        # Frameworks with which to link privately
+        LINK_WITH_FRAMEWORK
         # Targets whose headers we use, but don't link with
         INCLUDE_FROM_PRIVATE
         # Any include directories other targets need to use this target
         INCLUDE_DIRECTORIES_PUBLIC
+        # Any include directories this target only needs
+        INCLUDE_DIRECTORIES_PRIVATE
         # Add a dependency on the new target to the specified targets
         REQUIRED_BY
         # Add a dependency to the new target on the specified targets
         REQUIRES
+        # Add a dependency to the new target on the specified targets if they exist
+        OPTIONAL_REQUIRES
         # Globs for any headers to install
         PUBLIC_HEADERS
     )
@@ -208,6 +215,12 @@ function(slang_add_target dir type)
     #
     target_link_libraries(${target} PRIVATE ${ARG_LINK_WITH_PRIVATE})
 
+    if(CMAKE_SYSTEM_NAME MATCHES "Darwin")
+        foreach(link_framework ${ARG_LINK_WITH_FRAMEWORK})
+            target_link_libraries(${target} PRIVATE "-framework ${link_framework}")
+        endforeach()
+    endif()
+
     foreach(include_from ${ARG_INCLUDE_FROM_PRIVATE})
         target_include_directories(
             ${target}
@@ -226,6 +239,13 @@ function(slang_add_target dir type)
             PUBLIC "$<BUILD_INTERFACE:${inc_abs}>"
         )
     endforeach()
+    foreach(inc ${ARG_INCLUDE_DIRECTORIES_PRIVATE})
+        get_filename_component(inc_abs ${inc} ABSOLUTE)
+        target_include_directories(
+            ${target}
+            PRIVATE "$<BUILD_INTERFACE:${inc_abs}>"
+        )
+    endforeach()
 
     #
     # Set up export macros
@@ -241,6 +261,13 @@ function(slang_add_target dir type)
                 PUBLIC "${ARG_EXPORT_MACRO_PREFIX}_DYNAMIC"
                 PRIVATE "${ARG_EXPORT_MACRO_PREFIX}_DYNAMIC_EXPORT"
             )
+        elseif(
+            target_type STREQUAL STATIC_LIBRARY
+        )
+            target_compile_definitions(
+                ${target}
+                PUBLIC "${ARG_EXPORT_MACRO_PREFIX}_STATIC"
+            )
         endif()
     endif()
 
@@ -255,8 +282,14 @@ function(slang_add_target dir type)
         add_dependencies(${target} ${ARG_REQUIRES})
     endif()
 
+    foreach(required ${ARG_OPTIONAL_REQUIRES})
+        if(TARGET ${required})
+            add_dependencies(${target} ${required})
+        endif()
+    endforeach()
+
     #
-    # Other preprocessor defines
+    # Other preprocessor defines and options
     #
     if(ARG_EXTRA_COMPILE_DEFINITIONS_PRIVATE)
         target_compile_definitions(
@@ -268,6 +301,12 @@ function(slang_add_target dir type)
         target_compile_definitions(
             ${target}
             PUBLIC ${ARG_EXTRA_COMPILE_DEFINITIONS_PUBLIC}
+        )
+    endif()
+    if(ARG_EXTRA_COMPILE_OPTIONS_PRIVATE)
+        target_compile_options(
+            ${target}
+            PRIVATE ${ARG_EXTRA_COMPILE_OPTIONS_PRIVATE}
         )
     endif()
 
@@ -286,12 +325,12 @@ function(slang_add_target dir type)
     set_property(
         TARGET ${target}
         APPEND
-        PROPERTY BUILD_RPATH "${ORIGIN}/../${library_subdir}"
+        PROPERTY BUILD_RPATH "${ORIGIN}/../${library_subdir};${ORIGIN}"
     )
     set_property(
         TARGET ${target}
         APPEND
-        PROPERTY INSTALL_RPATH "${ORIGIN}/../${library_subdir}"
+        PROPERTY INSTALL_RPATH "${ORIGIN}/../${library_subdir};${ORIGIN}"
     )
 
     # On the same topic, give everything a dylib suffix on Mac OS

@@ -75,6 +75,7 @@ add_custom_command(
 slang_add_target(
     slang-capability-defs
     OBJECT
+    USE_EXTRA_WARNINGS
     EXPLICIT_SOURCE ${SLANG_CAPABILITY_GENERATED_HEADERS}
     LINK_WITH_PRIVATE core
     INCLUDE_DIRECTORIES_PUBLIC
@@ -86,6 +87,7 @@ slang_add_target(
 slang_add_target(
     slang-capability-lookup
     OBJECT
+    USE_EXTRA_WARNINGS
     EXPLICIT_SOURCE ${SLANG_CAPABILITY_GENERATED_SOURCE}
     LINK_WITH_PRIVATE core slang-capability-defs
     EXCLUDE_FROM_ALL
@@ -159,6 +161,11 @@ set(SLANG_LOOKUP_GENERATOR_OUTPUT_DIR
 set(SLANG_LOOKUP_GENERATED_SOURCE
     "${SLANG_LOOKUP_GENERATOR_OUTPUT_DIR}/slang-lookup-GLSLstd450.cpp"
 )
+set(SLANG_RECORD_REPLAY_SYSTEM
+    "${slang_SOURCE_DIR}/source/slang-record-replay/record"
+    "${slang_SOURCE_DIR}/source/slang-record-replay/util"
+)
+
 add_custom_command(
     OUTPUT ${SLANG_LOOKUP_GENERATED_SOURCE}
     COMMAND
@@ -171,43 +178,32 @@ add_custom_command(
     VERBATIM
 )
 
+set(SLANG_SPIRV_CORE_SOURCE_JSON
+    "${slang_SOURCE_DIR}/external/spirv-headers/include/spirv/unified1/spirv.core.grammar.json"
+)
+set(SLANG_SPIRV_CORE_GRAMMAR_SOURCE
+    "${SLANG_LOOKUP_GENERATOR_OUTPUT_DIR}/slang-spirv-core-grammar-embed.cpp"
+)
+add_custom_command(
+    OUTPUT ${SLANG_SPIRV_CORE_GRAMMAR_SOURCE}
+    COMMAND
+        ${CMAKE_COMMAND} -E make_directory ${SLANG_LOOKUP_GENERATOR_OUTPUT_DIR}
+    COMMAND
+        slang-spirv-embed-generator
+        ${SLANG_SPIRV_CORE_SOURCE_JSON}
+        ${SLANG_SPIRV_CORE_GRAMMAR_SOURCE}
+    DEPENDS ${SLANG_SPIRV_CORE_SOURCE_JSON} slang-spirv-embed-generator
+    VERBATIM
+)
+
 slang_add_target(
     slang-lookup-tables
     OBJECT
-    EXPLICIT_SOURCE ${SLANG_LOOKUP_GENERATED_SOURCE}
+    USE_EXTRA_WARNINGS
+    EXPLICIT_SOURCE ${SLANG_LOOKUP_GENERATED_SOURCE} ${SLANG_SPIRV_CORE_GRAMMAR_SOURCE}
     LINK_WITH_PRIVATE core
     EXCLUDE_FROM_ALL
     FOLDER generated
-)
-
-#
-# Slang static
-#
-
-# TODO: Avoid compiling everything in this directory twice (once here and again
-# for the shared library). This will be easier once premake is gone and we can
-# move slang-stdlib-api.cpp to the build directory. It's basically instant with
-# ccache, but that's not available everywhere.
-slang_add_target(
-    .
-    OBJECT
-    TARGET_NAME slang-no-embedded-stdlib
-    EXCLUDE_FROM_ALL
-    EXTRA_COMPILE_DEFINITIONS_PUBLIC SLANG_STATIC
-    LINK_WITH_PRIVATE
-        core
-        compiler-core
-        # Bundle the source unconditionally
-        slang-capability-defs
-        slang-capability-lookup
-        slang-meta-headers
-        slang-reflect-headers
-        slang-lookup-tables
-    FOLDER generators
-)
-target_compile_definitions(
-    slang-no-embedded-stdlib
-    PRIVATE SLANG_WITHOUT_EMBEDDED_STD_LIB
 )
 
 #
@@ -238,35 +234,68 @@ target_include_directories(
 )
 
 #
+# Generate the version header
+#
+
+configure_file(${slang_SOURCE_DIR}/slang-tag-version.h.in slang-version-header/slang-tag-version.h)
+
+#
 # Slang itself
 #
-slang_add_target(
-    .
-    SHARED
+
+set(slang_common_args
+    EXTRA_SOURCE_DIRS ${SLANG_RECORD_REPLAY_SYSTEM}
+    USE_EXTRA_WARNINGS
     LINK_WITH_PRIVATE
         core
         compiler-core
-        prelude
         slang-capability-defs
         slang-capability-lookup
         slang-reflect-headers
         slang-lookup-tables        
+    EXTRA_COMPILE_OPTIONS_PRIVATE
+        # a warning is disabled for a memset boundary check.
+        # everything looked fine and it is unclear why the checking fails
+        $<$<CXX_COMPILER_ID:GNU>:-Wno-error=stringop-overflow>
     # slang.h is in the project root, so include that directory in the interface
     # for slang
     INCLUDE_DIRECTORIES_PUBLIC ${slang_SOURCE_DIR}
+    INCLUDE_DIRECTORIES_PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/slang-version-header
     EXPORT_MACRO_PREFIX SLANG
-    INSTALL
-    PUBLIC_HEADERS ${slang_SOURCE_DIR}/slang*.h
 )
 
-if(SLANG_EMBED_STDLIB_SOURCE)
-    target_link_libraries(slang PRIVATE slang-meta-headers)
-else()
-    target_compile_definitions(slang PRIVATE SLANG_DISABLE_STDLIB_SOURCE)
-endif()
+#
+# Minimal static slang used in generating the embedded stdlib
+#
 
-if(SLANG_EMBED_STDLIB)
-    target_link_libraries(slang PRIVATE slang-stdlib-embed-headers)
-else()
-    target_compile_definitions(slang PRIVATE SLANG_WITHOUT_EMBEDDED_STD_LIB)
-endif()
+slang_add_target(
+    .
+    OBJECT
+    ${slang_common_args}
+    TARGET_NAME slang-no-embedded-stdlib
+    EXCLUDE_FROM_ALL
+    LINK_WITH_PRIVATE slang-meta-headers
+    EXTRA_COMPILE_DEFINITIONS_PUBLIC SLANG_STATIC
+    EXTRA_COMPILE_DEFINITIONS_PRIVATE SLANG_WITHOUT_EMBEDDED_STD_LIB
+    FOLDER generators
+)
+
+#
+# Slang with whatever options
+#
+
+slang_add_target(
+    .
+    ${SLANG_LIB_TYPE}
+    ${slang_common_args}
+    LINK_WITH_PRIVATE
+        prelude
+        $<$<BOOL:${SLANG_EMBED_STDLIB}>:slang-stdlib-embed-headers>
+        $<$<BOOL:${SLANG_EMBED_STDLIB_SOURCE}>:slang-meta-headers>
+    EXTRA_COMPILE_DEFINITIONS_PRIVATE
+        $<$<NOT:$<BOOL:${SLANG_EMBED_STDLIB}>>:SLANG_WITHOUT_EMBEDDED_STD_LIB>
+        $<$<NOT:$<BOOL:${SLANG_EMBED_STDLIB_SOURCE}>>:SLANG_DISABLE_STDLIB_SOURCE>
+    EXPORT_MACRO_PREFIX SLANG
+    INSTALL
+    PUBLIC_HEADERS ${slang_SOURCE_DIR}/slang*.h ${CMAKE_CURRENT_BINARY_DIR}/slang-version-header/*.h
+)

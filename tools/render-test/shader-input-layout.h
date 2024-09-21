@@ -6,11 +6,11 @@
 
 #include "source/core/slang-writer.h"
 
-#include "slang-gfx.h"
+#include <slang-rhi.h>
 
 namespace renderer_test {
 
-using namespace gfx;
+using namespace rhi;
 
 enum class ShaderInputType
 {
@@ -31,6 +31,16 @@ enum class InputTextureContent
     Zero, One, ChessBoard, Gradient
 };
 
+enum InputTextureSampleCount
+{
+    One = 1,
+    Two = 2,
+    Four = 4,
+    Eight = 8,
+    Sixteen = 16,
+    ThirtyTwo = 32,
+    SixtyFour = 64,
+};
 struct InputTextureDesc
 {
     int dimension = 2;
@@ -41,6 +51,7 @@ struct InputTextureDesc
     int size = 4;
     int mipMapCount = 0;            ///< 0 means the maximum number of mips will be bound
 
+    InputTextureSampleCount sampleCount = InputTextureSampleCount::One;
     Format format = Format::R8G8B8A8_UNORM;            
 
     InputTextureContent content = InputTextureContent::One;
@@ -57,6 +68,7 @@ struct InputBufferDesc
 {
     InputBufferType type = InputBufferType::StorageBuffer;
     int stride = 0; // stride == 0 indicates an unstructured buffer.
+    int elementCount = 1;
     Format format = Format::Unknown;
     // For RWStructuredBuffer, AppendStructuredBuffer, ConsumeStructuredBuffer
     // the default value of 0xffffffff indicates that a counter buffer should
@@ -116,7 +128,7 @@ struct TextureData
         clearSlices();
 
         FormatInfo formatSizeInfo;
-        gfxGetFormatInfo(format, &formatSizeInfo);
+        rhiGetFormatInfo(format, &formatSizeInfo);
         m_formatSize = uint8_t(formatSizeInfo.blockSizeInBytes / formatSizeInfo.pixelsPerBlock);
         m_format = format;
     }
@@ -135,7 +147,7 @@ struct TextureData
         m_slices.clear();
     }
 
-    gfx::Format m_format = gfx::Format::Unknown;
+    rhi::Format m_format = rhi::Format::Unknown;
     uint8_t m_formatSize = 0;
 
     Slang::List<Slice> m_slices;

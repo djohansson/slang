@@ -10,7 +10,7 @@ namespace Slang
 
 struct ReinterpretLoweringContext
 {
-    TargetRequest* targetReq;
+    TargetProgram* targetProgram;
     DiagnosticSink* sink;
     IRModule* module;
     OrderedHashSet<IRInst*> workList;
@@ -60,14 +60,22 @@ struct ReinterpretLoweringContext
         auto fromType = operand->getDataType();
         auto toType = inst->getDataType();
         SlangInt fromTypeSize = getAnyValueSize(fromType);
+        bool cantPack = false;
         if (fromTypeSize < 0)
         {
+            cantPack = true;
             sink->diagnose(inst->sourceLoc, Slang::Diagnostics::typeCannotBePackedIntoAnyValue, fromType);
         }
         SlangInt toTypeSize = getAnyValueSize(toType);
         if (toTypeSize < 0)
         {
+            cantPack = true;
             sink->diagnose(inst->sourceLoc, Slang::Diagnostics::typeCannotBePackedIntoAnyValue, toType);
+        }
+        if (fromTypeSize != toTypeSize
+            && cantPack == false)
+        {
+            sink->diagnose(inst->sourceLoc, Slang::Diagnostics::notEqualReinterpretCastSize, fromType, fromTypeSize, toType, toTypeSize);
         }
         SlangInt anyValueSize = Math::Max(fromTypeSize, toTypeSize);
 
@@ -83,16 +91,16 @@ struct ReinterpretLoweringContext
     }
 };
 
-void lowerReinterpret(TargetRequest* targetReq, IRModule* module, DiagnosticSink* sink)
+void lowerReinterpret(TargetProgram* target, IRModule* module, DiagnosticSink* sink)
 {
     // Before processing reinterpret insts, ensure that existential types without 
     // user-defined sizes have inferred sizes where possible.
     // 
-    inferAnyValueSizeWhereNecessary(targetReq, module);
+    inferAnyValueSizeWhereNecessary(target, module);
 
     ReinterpretLoweringContext context;
     context.module = module;
-    context.targetReq = targetReq;
+    context.targetProgram = target;
     context.sink = sink;
     context.processModule();
 }

@@ -15,6 +15,9 @@ https://github.com/microsoft/DirectXShaderCompiler/blob/main/docs/SPIR-V.rst#des
 
 Options that allow for infering Vulkan bindings based on HLSL register bindings
   */
+
+struct CompilerOptionSet;
+
 struct HLSLToVulkanLayoutOptions : public RefObject
 {
 public:
@@ -61,7 +64,7 @@ public:
             /// Constant buffer (b)
             /// 
             /// ConstantBufferViews, CBuffer
-        ConstantBuffer,     
+        ConstantBuffer,
 
         CountOf,
     };
@@ -72,6 +75,7 @@ public:
     {
         enum Enum : KindFlags
         {
+            None            = 0,
             UnorderedAccess = KindFlags(1) << Index(Kind::UnorderedAccess),
             Sampler         = KindFlags(1) << Index(Kind::Sampler), 
             ShaderResource  = KindFlags(1) << Index(Kind::ShaderResource),
@@ -116,9 +120,6 @@ public:
         /// True if can infer a binding for a kind
     bool canInferBindingForKind(Kind kind) const { return (m_kindShiftEnabledFlags & getKindFlag(kind)) != 0; }
 
-        /// True if the compiler should invert the Y coordinate of any SV_Position output.
-    bool shouldInvertY() const { return m_invertY; }
-
     bool shouldUseGLLayout() const { return m_useGLLayout; }
 
     bool shouldEmitSPIRVReflectionInfo() const { return m_emitSPIRVReflectionInfo; }
@@ -149,13 +150,13 @@ public:
         /// Get the globals binding
     const Binding& getGlobalsBinding() const { return m_globalsBinding; }
 
-    void setInvertY(bool value) { m_invertY = value; }
-
     void setUseOriginalEntryPointName(bool value) { m_useOriginalEntryPointName = value; }
 
     void setUseGLLayout(bool value) { m_useGLLayout = value; }
 
     void setEmitSPIRVReflectionInfo(bool value) { m_emitSPIRVReflectionInfo = value; }
+
+    void loadFromOptionSet(CompilerOptionSet& optionSet);
 
         /// Ctor
     HLSLToVulkanLayoutOptions();
@@ -180,9 +181,6 @@ protected:
 
         /// Maps a key to the amount of shift
     Dictionary<Key, Index> m_shifts;
-
-        /// Whether to invert the Y coordinate of SV_Position output.
-    bool m_invertY = false;
 
         /// If set, will use the original entry point name in the generated SPIRV instead of "main".
     bool m_useOriginalEntryPointName = false;

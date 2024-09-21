@@ -97,7 +97,7 @@ struct WindowHandle
     {
         Unknown,
         Win32Handle,
-        NSViewHandle,
+        NSWindowHandle,
         XLibHandle,
     };
     Type type;
@@ -109,11 +109,11 @@ struct WindowHandle
         handle.handleValues[0] = (intptr_t)(hwnd);
         return handle;
     }
-    static WindowHandle fromNSView(void* nsview)
+    static WindowHandle fromNSWindow(void* nswindow)
     {
         WindowHandle handle = {};
-        handle.type = WindowHandle::Type::NSViewHandle;
-        handle.handleValues[0] = (intptr_t)(nsview);
+        handle.type = WindowHandle::Type::NSWindowHandle;
+        handle.handleValues[0] = (intptr_t)(nswindow);
         return handle;
     }
     static WindowHandle fromXWindow(void* xdisplay, uint32_t xwindow)
@@ -242,7 +242,7 @@ public:
             int /*showCommand*/)                \
         {                                       \
             platform::Application::init();      \
-            auto result = APPLICATION_ENTRY();  \
+            auto result = APPLICATION_ENTRY(0, nullptr);  \
             platform::Application::dispose();   \
             GFX_DUMP_LEAK                       \
             return result;                      \
@@ -251,10 +251,10 @@ public:
 #else
 
 #define PLATFORM_UI_MAIN(APPLICATION_ENTRY) \
-    int main()                              \
+    int main(int argc, char** argv)          \
     {                                       \
         platform::Application::init();      \
-        auto rs = APPLICATION_ENTRY();      \
+        auto rs = APPLICATION_ENTRY(argc, argv);      \
         platform::Application::dispose();   \
         return rs;                          \
     }

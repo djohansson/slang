@@ -6,7 +6,7 @@
 #include "slang-profile.h"
 #include "slang-syntax.h"
 
-#include "../../slang.h"
+#include "slang.h"
 
 namespace Slang {
 
@@ -271,7 +271,12 @@ typedef slang::ParameterCategory LayoutResourceKind;
     \
     x(SubElementRegisterSpace) \
     x(VertexInput) \
-    x(FragmentOutput)
+    x(FragmentOutput) \
+    x(InputAttachmentIndex) \
+    \
+    x(MetalBuffer) \
+    x(MetalTexture) \
+    x(MetalArgumentBufferElement)
 
 #define SLANG_PARAMETER_CATEGORY_FLAG(x) x = ParameterCategoryFlags(1) << int(slang::x), 
 
@@ -357,6 +362,21 @@ struct SimpleArrayLayoutInfo : SimpleLayoutInfo
         {
             return UniformArrayLayoutInfo(0, 1, 0);
         }
+    }
+};
+
+struct ObjectLayoutInfo
+{
+    ShortList<SimpleLayoutInfo, 2> layoutInfos;
+    ObjectLayoutInfo() = default;
+    ObjectLayoutInfo(SimpleLayoutInfo layoutInfo)
+    {
+        layoutInfos.add(layoutInfo);
+    }
+    SimpleLayoutInfo getSimple()
+    {
+        SLANG_ASSERT(layoutInfos.getCount() == 1);
+        return layoutInfos[0];
     }
 };
 
@@ -513,8 +533,8 @@ class VarLayout : public Layout
 {
 public:
     // The variable we are laying out
-    DeclRef<VarDeclBase>          varDecl;
-    VarDeclBase* getVariable() { return varDecl.getDecl(); }
+    DeclRef<Decl>          varDecl;
+    VarDeclBase* getVariable() { return varDecl.as<VarDeclBase>().getDecl(); }
 
     Name* getName() { return getVariable()->getName(); }
 
@@ -720,7 +740,7 @@ public:
     // TODO: This should map from a declaration to the *index*
     // in the array above, rather than to the actual pointer,
     // so that we 
-    Dictionary<VarDeclBase*, RefPtr<VarLayout>> mapVarToLayout;
+    Dictionary<Decl*, RefPtr<VarLayout>> mapVarToLayout;
 };
 
 class GenericParamTypeLayout : public TypeLayout
@@ -792,6 +812,8 @@ class EntryPointLayout : public ScopeLayout
 public:
     // The corresponding function declaration
     DeclRef<FuncDecl> entryPoint;
+
+    ComponentType* program = nullptr;
 
     DeclRef<FuncDecl> getFuncDeclRef() { return entryPoint; }
     FuncDecl* getFuncDecl() { return entryPoint.getDecl(); }
@@ -942,6 +964,10 @@ enum class ShaderParameterKind
     RegisterSpace,
 
     AppendConsumeStructuredBuffer,
+
+    AtomicUint,
+
+    SubpassInput,
 };
 
 struct SimpleLayoutRulesImpl
@@ -981,7 +1007,7 @@ struct ObjectLayoutRulesImpl
     };
 
     // Compute layout info for an object type
-    virtual SimpleLayoutInfo GetObjectLayout(ShaderParameterKind kind, const Options& options) = 0;
+    virtual ObjectLayoutInfo GetObjectLayout(ShaderParameterKind kind, const Options& options) = 0;
 };
 
 struct LayoutRulesImpl
@@ -1017,16 +1043,19 @@ struct LayoutRulesImpl
 
     UniformLayoutInfo BeginStructLayout()
     {
+        SLANG_ASSERT(simpleRules);
         return simpleRules->BeginStructLayout();
     }
 
     LayoutSize AddStructField(UniformLayoutInfo* ioStructInfo, UniformLayoutInfo fieldInfo)
     {
+        SLANG_ASSERT(simpleRules);
         return simpleRules->AddStructField(ioStructInfo, fieldInfo);
     }
 
     void EndStructLayout(UniformLayoutInfo* ioStructInfo)
     {
+        SLANG_ASSERT(simpleRules);
         return simpleRules->EndStructLayout(ioStructInfo);
     }
 
@@ -1039,7 +1068,7 @@ struct LayoutRulesImpl
 
     // Forward `ObjectLayoutRulesImpl` interface
 
-    SimpleLayoutInfo GetObjectLayout(ShaderParameterKind kind, const ObjectLayoutRulesImpl::Options& options)
+    ObjectLayoutInfo GetObjectLayout(ShaderParameterKind kind, const ObjectLayoutRulesImpl::Options& options)
     {
         return objectRules->GetObjectLayout(kind, options);
     }
@@ -1052,14 +1081,14 @@ struct LayoutRulesImpl
 struct LayoutRulesFamilyImpl
 {
     virtual LayoutRulesImpl* getAnyValueRules()             = 0;
-    virtual LayoutRulesImpl* getConstantBufferRules(TargetRequest* request) = 0;
+    virtual LayoutRulesImpl* getConstantBufferRules(CompilerOptionSet& compilerOptions) = 0;
     virtual LayoutRulesImpl* getPushConstantBufferRules()   = 0;
-    virtual LayoutRulesImpl* getTextureBufferRules()        = 0;
+    virtual LayoutRulesImpl* getTextureBufferRules(CompilerOptionSet& compilerOptions) = 0;
     virtual LayoutRulesImpl* getVaryingInputRules()         = 0;
     virtual LayoutRulesImpl* getVaryingOutputRules()        = 0;
     virtual LayoutRulesImpl* getSpecializationConstantRules()= 0;
-    virtual LayoutRulesImpl* getShaderStorageBufferRules(TargetRequest* request)  = 0;
-    virtual LayoutRulesImpl* getParameterBlockRules(TargetRequest* request) = 0;
+    virtual LayoutRulesImpl* getShaderStorageBufferRules(CompilerOptionSet& compilerOptions)  = 0;
+    virtual LayoutRulesImpl* getParameterBlockRules(CompilerOptionSet& compilerOptions) = 0;
 
     virtual LayoutRulesImpl* getRayPayloadParameterRules()  = 0;
     virtual LayoutRulesImpl* getCallablePayloadParameterRules()  = 0;
@@ -1067,7 +1096,7 @@ struct LayoutRulesFamilyImpl
 
     virtual LayoutRulesImpl* getShaderRecordConstantBufferRules() = 0;
 
-    virtual LayoutRulesImpl* getStructuredBufferRules(TargetRequest* request) = 0;
+    virtual LayoutRulesImpl* getStructuredBufferRules(CompilerOptionSet& compilerOptions) = 0;
 };
 
     /// A custom tuple to capture the outputs of type layout
@@ -1200,7 +1229,7 @@ public:
         /// One of the `beginLayout*()` functions must have been called previously.
         ///
     RefPtr<VarLayout> addField(
-        DeclRef<VarDeclBase>    field,
+        DeclRef<Decl>    field,
         TypeLayoutResult        fieldResult);
 
     RefPtr<VarLayout> addExplicitUniformField(
@@ -1258,8 +1287,9 @@ private:
 // the ordering of all global generic type paramters.
 //
 TypeLayoutContext getInitialLayoutContextForTarget(
-    TargetRequest*  targetReq,
-    ProgramLayout*  programLayout);
+    TargetRequest*  targetRequest,
+    ProgramLayout* programLayout,
+    slang::LayoutRules rules);
 
     /// Direction(s) of a varying shader parameter
 typedef unsigned int EntryPointParameterDirectionMask;

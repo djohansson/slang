@@ -1,5 +1,5 @@
 //TEST(compute):COMPARE_COMPUTE_EX(filecheck-buffer=CHECK): -task -output-using-type -dx12 -use-dxil -profile sm_6_6 -render-features mesh-shader
-//TEST(compute):COMPARE_COMPUTE_EX(filecheck-buffer=CHECK): -task -output-using-type -vk -profile glsl_450+spirv_1_4 -render-features mesh-shader
+//TEST(compute):COMPARE_COMPUTE_EX(filecheck-buffer=CHECK): -task -output-using-type -vk -profile sm_6_5 -render-features mesh-shader
 
 // Similar to task-simple, except that the payload is declared as a groupshared
 // variable. During lowerin to GLSL and SPIR-V we'll have to identify this as
@@ -71,8 +71,8 @@ const static uint MAX_PRIMS = 4;
 void meshMain(
     in uint tig : SV_GroupIndex,
     in payload MeshPayload meshPayload,
-    out Vertices<Vertex, MAX_VERTS> verts,
-    out Indices<uint3, MAX_PRIMS> triangles)
+    OutputVertices<Vertex, MAX_VERTS> verts,
+    OutputIndices<uint3, MAX_PRIMS> triangles)
 {
     const uint numVertices = 12;
     const uint numPrimitives = 4;

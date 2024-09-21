@@ -1,4 +1,5 @@
 // slang-check-overload.cpp
+#include "slang-ast-base.h"
 #include "slang-check-impl.h"
 
 #include "slang-lookup.h"
@@ -15,22 +16,37 @@ namespace Slang
         ParamCounts counts = { 0, 0 };
         for (auto param : params)
         {
-            counts.allowed++;
-
-            // No initializer means no default value
-            //
-            // TODO(tfoley): The logic here is currently broken in two ways:
-            //
-            // 1. We are assuming that once one parameter has a default, then all do.
-            //    This can/should be validated earlier, so that we can assume it here.
-            //
-            // 2. We are not handling the possibility of multiple declarations for
-            //    a single function, where we'd need to merge default parameters across
-            //    all the declarations.
-            if (!param.getDecl()->initExpr)
+            Index allowedArgCountToAdd = 1;
+            auto paramType = getParamType(m_astBuilder, param);
+            if (isTypePack(paramType))
             {
+                if (auto typePack = as<ConcreteTypePack>(paramType))
+                {
+                    counts.required += typePack->getTypeCount();
+                    allowedArgCountToAdd = typePack->getTypeCount();
+                }
+                else
+                {
+                    counts.allowed = -1;
+                }
+            }
+            else if (!param.getDecl()->initExpr)
+            {
+                // No initializer means no default value
+                //
+                // TODO(tfoley): The logic here is currently broken in two ways:
+                //
+                // 1. We are assuming that once one parameter has a default, then all do.
+                //    This can/should be validated earlier, so that we can assume it here.
+                //
+                // 2. We are not handling the possibility of multiple declarations for
+                //    a single function, where we'd need to merge default parameters across
+                //    all the declarations.
                 counts.required++;
             }
+
+            if (counts.allowed >= 0)
+                counts.allowed += allowedArgCountToAdd;
         }
         return counts;
     }
@@ -42,7 +58,8 @@ namespace Slang
         {
             if (auto typeParam = as<GenericTypeParamDecl>(m))
             {
-                counts.allowed++;
+                if (counts.allowed >= 0)
+                    counts.allowed++;
                 if (!typeParam->initType.Ptr())
                 {
                     counts.required++;
@@ -50,11 +67,16 @@ namespace Slang
             }
             else if (auto valParam = as<GenericValueParamDecl>(m))
             {
-                counts.allowed++;
+                if (counts.allowed >= 0)
+                    counts.allowed++;
                 if (!valParam->initExpr)
                 {
                     counts.required++;
                 }
+            }
+            else if (as<GenericTypePackParamDecl>(m))
+            {
+                counts.allowed = -1;
             }
         }
         return counts;
@@ -130,7 +152,7 @@ namespace Slang
             break;
         }
 
-        if (argCount >= paramCounts.required && argCount <= paramCounts.allowed)
+        if (argCount >= paramCounts.required && (paramCounts.allowed == -1 || argCount <= paramCounts.allowed))
             return true;
 
         // Emit an error message if we are checking this call for real
@@ -263,12 +285,42 @@ namespace Slang
         //
         bool success = true;
 
+        auto maybeReportGeneralError = [&]()
+        {
+            if (context.mode != OverloadResolveContext::Mode::JustTrying)
+            {
+                getSink()->diagnose(context.loc, Diagnostics::cannotSpecializeGeneric, candidate.item.declRef);
+            }
+        };
+        List<QualType> paramTypes;
+        for (auto memberRef : getMembers(m_astBuilder, genericDeclRef))
+        {
+            if (auto typeParamRef = memberRef.as<GenericTypeParamDecl>())
+            {
+                paramTypes.add(DeclRefType::create(m_astBuilder, typeParamRef));
+            }
+            else if (auto valParamRef = memberRef.as<GenericValueParamDecl>())
+            {
+                paramTypes.add(getType(m_astBuilder, valParamRef));
+            }
+            else if (auto typePackParam = memberRef.as<GenericTypePackParamDecl>())
+            {
+                paramTypes.add(DeclRefType::create(m_astBuilder, typePackParam));
+            }
+        }
+        ShortList<OverloadResolveContext::MatchedArg> matchedArgs;
+        if (!context.matchArgumentsToParams(this, paramTypes, false, matchedArgs))
+        {
+            maybeReportGeneralError();
+            return false;
+        }
+
         Index aa = 0;
         for (auto memberRef : getMembers(m_astBuilder, genericDeclRef))
         {
             if (auto typeParamRef = memberRef.as<GenericTypeParamDecl>())
             {
-                if (aa >= context.argCount)
+                if (aa >= matchedArgs.getCount())
                 {
                     if (allowPartialGenericApp)
                     {
@@ -287,7 +339,10 @@ namespace Slang
                         // or this reference is ill-formed.
                         auto substType = typeParamRef.substitute(m_astBuilder, typeParamRef.getDecl()->initType.type);
                         if (!substType)
+                        {
+                            maybeReportGeneralError();
                             return false;
+                        }
                         checkedArgs.add(substType);
                         continue;
                     }
@@ -308,15 +363,15 @@ namespace Slang
                 // the checking "for real" in which case any errors
                 // we run into need to be reported.
                 //
-                auto arg = context.getArg(aa++);
+                auto arg = matchedArgs[aa++];
                 if (context.mode == OverloadResolveContext::Mode::JustTrying)
                 {
-                    typeArg = tryCoerceToProperType(TypeExp(arg));
+                    typeArg = tryCoerceToProperType(TypeExp(arg.argExpr));
                 }
                 else
                 {
-                    arg = ExpectATypeRepr(arg);
-                    typeArg = CoerceToProperType(TypeExp(arg));
+                    arg.argExpr = ExpectATypeRepr(arg.argExpr);
+                    typeArg = CoerceToProperType(TypeExp(arg.argExpr));
                 }
 
                 // If we failed to get a valid type (either because
@@ -334,7 +389,7 @@ namespace Slang
             }
             else if (auto valParamRef = memberRef.as<GenericValueParamDecl>())
             {
-                if (aa >= context.argCount)
+                if (aa >= matchedArgs.getCount())
                 {
                     if (allowPartialGenericApp)
                     {
@@ -353,9 +408,12 @@ namespace Slang
                         // or this reference is ill-formed.
                         ensureDecl(valParamRef, DeclCheckState::DefinitionChecked);
                         ConstantFoldingCircularityInfo newCircularityInfo(valParamRef.getDecl(), nullptr);
-                        auto defaultVal = tryConstantFoldExpr(valParamRef.substitute(m_astBuilder, valParamRef.getDecl()->initExpr), &newCircularityInfo);
+                        auto defaultVal = tryConstantFoldExpr(valParamRef.substitute(m_astBuilder, valParamRef.getDecl()->initExpr), ConstantFoldingKind::CompileTime, &newCircularityInfo);
                         if (!defaultVal)
+                        {
+                            maybeReportGeneralError();
                             return false;
+                        }
                         checkedArgs.add(defaultVal);
                         continue;
                     }
@@ -370,7 +428,7 @@ namespace Slang
                 // to the type of the parameter (and fail if the
                 // coercion is not possible)
                 //
-                arg = context.getArg(aa++);
+                arg = matchedArgs[aa++].argExpr;
                 if (context.mode == OverloadResolveContext::Mode::JustTrying)
                 {
                     ConversionCost cost = kConversionCost_None;
@@ -401,6 +459,92 @@ namespace Slang
                 if( !val )
                 {
                     val = m_astBuilder->getOrCreate<ErrorIntVal>(m_astBuilder->getIntType());
+                }
+                checkedArgs.add(val);
+            }
+            else if (auto typePackParam = memberRef.as<GenericTypePackParamDecl>())
+            {
+                Val* val = nullptr;
+                if (aa >= matchedArgs.getCount())
+                {
+                    if (allowPartialGenericApp)
+                    {
+                        // If we have run out of arguments and the decl allows
+                        // partial specialization, then we don't apply any more
+                        // checks at this step. We will instead attempt to
+                        // *infer* an argument at this position at a later
+                        // stage.
+                        //
+                        candidate.flags |= OverloadCandidate::Flag::IsPartiallyAppliedGeneric;
+                        break;
+                    }
+                    else
+                    {
+                        // Otherwise, we will just create an empty pack.
+                        val = m_astBuilder->getTypePack(ArrayView<Type*>());
+                    }
+                }
+                else
+                {
+                    auto matchedArg = matchedArgs[aa++];
+                    if (auto packExpr = as<PackExpr>(matchedArg.argExpr))
+                    {
+                        // We are providing a concrete pack of types as arguments to a type pack parameter.
+                        // We need to create a `TypePack` type to serve as the argument.
+                        ShortList<Type*> coercedProperTypes;
+
+                        // Coerce all types in the pack to proper types.
+                        for (Index i = 0; i < packExpr->args.getCount(); i++)
+                        {
+                            TypeExp typeArg;
+                            auto elementTypeExpr = packExpr->args[i];
+                            if (context.mode == OverloadResolveContext::Mode::JustTrying)
+                            {
+                                typeArg = tryCoerceToProperType(TypeExp(elementTypeExpr));
+                                if (!typeArg.type)
+                                {
+                                    typeArg.type = m_astBuilder->getErrorType();
+                                    success = false;
+                                }
+                            }
+                            else
+                            {
+                                elementTypeExpr = ExpectATypeRepr(elementTypeExpr);
+                                typeArg = CoerceToProperType(TypeExp(elementTypeExpr));
+                            }
+                            // If we failed to get a valid type (either because
+                            // there was no matching argument, or because the
+                            // "just trying" coercion failed), then we create
+                            // an error type to stand in for the argument
+                            //
+                            if (!typeArg.type)
+                            {
+                                typeArg.type = m_astBuilder->getErrorType();
+                                success = false;
+                            }
+                            coercedProperTypes.add(typeArg.type);
+                        }
+                        val = m_astBuilder->getTypePack(coercedProperTypes.getArrayView().arrayView);
+                    }
+                    else if (auto expandExpr = as<ExpandExpr>(matchedArg.argExpr))
+                    {
+                        auto argType = expandExpr->type.type;
+                        if (auto typeType = as<TypeType>(argType))
+                            argType = typeType->getType();
+                        val = argType;
+                    }
+                    else if (auto typeType = as<TypeType>(matchedArg.argType))
+                    {
+                        if (isAbstractTypePack(typeType->getType()))
+                        {
+                            val = typeType->getType();
+                        }
+                    }
+                }
+                if (val == nullptr)
+                {
+                    maybeReportGeneralError();
+                    return false;
                 }
                 checkedArgs.add(val);
             }
@@ -475,44 +619,116 @@ namespace Slang
             break;
 
         case OverloadCandidate::Flavor::Generic:
-            return TryCheckGenericOverloadCandidateTypes(context, candidate);
-
+            {
+                return TryCheckGenericOverloadCandidateTypes(context, candidate);
+            }
         default:
             SLANG_UNEXPECTED("unknown flavor of overload candidate");
             break;
         }
 
-        // Note(tfoley): We might have fewer arguments than parameters in the
-        // case where one or more parameters had defaults.
-        SLANG_RELEASE_ASSERT(argCount <= paramTypes.getCount());
-
-        for (Index ii = 0; ii < argCount; ++ii)
+        Index paramIndex = 0;
+        Index argIndex = 0;
+        struct Arg { Expr* argExpr; Type* type; };
+        auto readArg = [&]() -> Arg
         {
-            auto& arg = context.getArg(ii);
-            auto paramType = paramTypes[ii];
-            auto argType = QualType(context.getArgType(ii), paramType.isLeftValue);
-            if (!paramType)
-                return false;
-            if (!argType)
-                return false;
-            if (context.mode == OverloadResolveContext::Mode::JustTrying)
+            if (argIndex >= argCount)
+                return { nullptr, nullptr };
+            auto arg = context.getArg(argIndex);
+            Arg result = { arg, context.getArgType(argIndex) };
+            argIndex++;
+            return result;
+        };
+
+        auto coerceArgToParam = [&](Arg arg, QualType paramType) -> Arg
             {
-                ConversionCost cost = kConversionCost_None;
-                if( context.disallowNestedConversions )
+                auto argType = QualType(arg.type, paramType.isLeftValue);
+                if (!paramType)
+                    return { nullptr, nullptr };
+                if (!argType)
+                    return { nullptr, nullptr };
+                if (context.mode == OverloadResolveContext::Mode::JustTrying)
                 {
-                    // We need an exact match in this case.
-                    if(!paramType->equals(argType))
+                    ConversionCost cost = kConversionCost_None;
+                    if (context.disallowNestedConversions)
+                    {
+                        // We need an exact match in this case.
+                        if (!paramType->equals(argType))
+                            return { nullptr, nullptr };
+                    }
+                    else if (!canCoerce(paramType, argType, arg.argExpr, &cost))
+                    {
+                        return { nullptr, nullptr };
+                    }
+                    candidate.conversionCostSum += cost;
+                }
+                else
+                {
+                    arg.argExpr = coerce(CoercionSite::Argument, paramType, arg.argExpr);
+                }
+                return arg;
+            };
+        ShortList<Expr*> resultArgs;
+
+        while (paramIndex < paramTypes.getCount())
+        {
+            auto paramType = paramTypes[paramIndex];
+            if (auto paramTypePack = as<ConcreteTypePack>(paramType))
+            {
+                ShortList<Expr*> innerArgs;
+                for (Index i = 0; i < paramTypePack->getTypeCount(); i++)
+                {
+                    auto arg = readArg();
+                    auto coercedArg = coerceArgToParam(arg, QualType(paramTypePack->getElementType(i), paramType.isLeftValue));
+                    if (!coercedArg.type)
+                    {
                         return false;
+                    }
+                    if (context.mode == OverloadResolveContext::Mode::ForReal)
+                        innerArgs.add(coercedArg.argExpr);
                 }
-                else if (!canCoerce(paramType, argType, arg, &cost))
+                if (context.mode == OverloadResolveContext::Mode::ForReal)
                 {
-                    return false;
+                    auto packArg = m_astBuilder->create<PackExpr>();
+                    for (auto aa : innerArgs)
+                        packArg->args.add(aa);
+                    packArg->type = paramType;
+                    resultArgs.add(packArg);
                 }
-                candidate.conversionCostSum += cost;
+
+                // Always add a flat cost for using an argument pack,
+                // so that we prefer non-pack overloads when possible.
+                candidate.conversionCostSum += kConversionCost_ParameterPack;
             }
             else
             {
-                arg = coerce(CoercionSite::Argument, paramType, arg);
+                auto arg = readArg();
+                if (!arg.type)
+                {
+                    // If we run out of arguments, we can exit the loop now.
+                    // Note that in this type we don't need to worry about
+                    // default arguments, because we already checked that
+                    // the number of arguments was correct in `TryCheckOverloadCandidateArity`.
+                    break;
+                }
+                auto coercedArg = coerceArgToParam(arg, paramType);
+                if (!coercedArg.type)
+                {
+                    return false;
+                }
+                if (context.mode == OverloadResolveContext::Mode::ForReal)
+                    resultArgs.add(coercedArg.argExpr);
+            }
+            paramIndex++;
+        }
+        if (context.mode == OverloadResolveContext::Mode::ForReal)
+        {
+            context.argCount = resultArgs.getCount();
+            if (context.args)
+            {
+                context.args->setCount(context.argCount);
+                for (Index i = 0; i < context.argCount; i++)
+                    (*context.args)[i] = resultArgs[i];
             }
         }
         return true;
@@ -522,7 +738,8 @@ namespace Slang
     {
         if(decl->hasModifier<MutatingAttribute>())
             return true;
-
+        if (decl->hasModifier<RefAttribute>())
+            return true;
         if(decl->hasModifier<NonmutatingAttribute>())
             return false;
 
@@ -681,7 +898,8 @@ namespace Slang
 
         for( auto constraintDecl : genericDeclRef.getDecl()->getMembersOfType<GenericTypeConstraintDecl>() )
         {
-            DeclRef<GenericTypeConstraintDecl> constraintDeclRef = m_astBuilder->getGenericAppDeclRef(genericDeclRef, substArgs, constraintDecl).as<GenericTypeConstraintDecl>();
+            DeclRef<GenericTypeConstraintDecl> constraintDeclRef = m_astBuilder->getGenericAppDeclRef(
+                genericDeclRef, newArgs.getArrayView(), constraintDecl).as<GenericTypeConstraintDecl>();
             
             auto sub = getSub(m_astBuilder, constraintDeclRef);
             auto sup = getSup(m_astBuilder, constraintDeclRef);
@@ -695,7 +913,7 @@ namespace Slang
             {
                 if(context.mode != OverloadResolveContext::Mode::JustTrying)
                 {
-                    subTypeWitness = isSubtype(sub, sup);
+                    subTypeWitness = isSubtype(sub, sup, IsSubTypeOptions::None);
                     getSink()->diagnose(context.loc, Diagnostics::typeArgumentDoesNotConformToInterface, sub, sup);
                 }
                 return false;
@@ -766,6 +984,7 @@ namespace Slang
         return ConstructDeclRefExpr(
             innerDeclRef,
             base,
+            innerDeclRef.getName(),
             originalExpr->loc,
             originalExpr);
     }
@@ -820,6 +1039,7 @@ namespace Slang
                 baseExpr = ConstructLookupResultExpr(
                     candidate.item,
                     context.baseExpr,
+                    candidate.item.declRef.getName(),
                     context.funcLoc,
                     context.originalExpr);
                 break;
@@ -970,6 +1190,18 @@ namespace Slang
         return CountParameters(parentGeneric).required;
     }
 
+    DeclRef<Decl> getParentDeclRef(DeclRef<Decl> declRef)
+    {
+        auto parent = declRef.getParent();
+        while (parent.as<GenericDecl>())
+        {
+            parent = parent.getParent();
+        }
+        return parent;
+    }
+
+    // Returns -1 if left is preferred, 1 if right is preferred, and 0 if they are equal.
+    //
     int SemanticsVisitor::CompareLookupResultItems(
         LookupResultItem const& left,
         LookupResultItem const& right)
@@ -987,10 +1219,30 @@ namespace Slang
         // directly (it is only visible through the requirement witness
         // information for inheritance declarations).
         //
+        auto leftDeclRefParent = getParentDeclRef(left.declRef);
+        auto rightDeclRefParent = getParentDeclRef(right.declRef);
         bool leftIsInterfaceRequirement = isInterfaceRequirement(left.declRef.getDecl());
         bool rightIsInterfaceRequirement = isInterfaceRequirement(right.declRef.getDecl());
         if(leftIsInterfaceRequirement != rightIsInterfaceRequirement)
             return int(leftIsInterfaceRequirement) - int(rightIsInterfaceRequirement);
+
+        // Prefer non-extension declarations over extension declarations.
+        bool leftIsExtension = as<ExtensionDecl>(leftDeclRefParent.getDecl()) != nullptr;
+        bool rightIsExtension = as<ExtensionDecl>(rightDeclRefParent.getDecl()) != nullptr;
+        if (leftIsExtension != rightIsExtension)
+        {
+            return int(leftIsExtension) - int(rightIsExtension);
+        }
+        else if (leftIsExtension)
+        {
+            // If both are declared in extensions, prefer the one that is least generic.
+            bool leftIsGeneric = leftDeclRefParent.getParent().as<GenericDecl>() != nullptr;
+            bool rightIsGeneric = rightDeclRefParent.getParent().as<GenericDecl>() != nullptr;
+            if (leftIsGeneric != rightIsGeneric)
+            {
+                return int(leftIsGeneric) - int(rightIsGeneric);
+            }
+        }
 
         // Any decl is strictly better than a module decl.
         bool leftIsModule = (as<ModuleDeclarationDecl>(left.declRef) != nullptr);
@@ -998,20 +1250,81 @@ namespace Slang
         if(leftIsModule != rightIsModule)
             return int(rightIsModule) - int(leftIsModule);
 
-        // If both are interface requirements, prefer to more derived interface.
+        // If both are interface requirements, prefer the more derived interface.
         if (leftIsInterfaceRequirement && rightIsInterfaceRequirement)
         {
-            auto leftType = DeclRefType::create(m_astBuilder, left.declRef.getParent());
-            auto rightType = DeclRefType::create(m_astBuilder, right.declRef.getParent());
+            auto leftType = DeclRefType::create(m_astBuilder, leftDeclRefParent);
+            auto rightType = DeclRefType::create(m_astBuilder, rightDeclRefParent);
 
             if (!leftType->equals(rightType))
             {
-                if (isSubtype(leftType, rightType))
+                if (isSubtype(leftType, rightType, IsSubTypeOptions::None))
                     return -1;
-                if (isSubtype(rightType, leftType))
+                if (isSubtype(rightType, leftType, IsSubTypeOptions::None))
                     return 1;
             }
         }
+
+        // If both parents are the same we have ambiguity
+        if(left.declRef.getParent() == right.declRef.getParent())
+            return 0;
+
+        auto leftAggType = leftDeclRefParent.as<AggTypeDeclBase>();
+        auto rightAggType = rightDeclRefParent.as<AggTypeDeclBase>();
+        if (leftAggType && rightAggType)
+        {
+            auto leftType = DeclRefType::create(m_astBuilder, leftDeclRefParent);
+            auto rightType = DeclRefType::create(m_astBuilder, rightDeclRefParent);
+
+            auto inheritanceInfo = getShared()->getInheritanceInfo(rightType);
+            for (auto facet : inheritanceInfo.facets)
+                if (facet.getImpl()->getDeclRef().equals(leftDeclRefParent))
+                    return 1;
+            inheritanceInfo = getShared()->getInheritanceInfo(leftType);
+            for (auto facet : inheritanceInfo.facets)
+                if (facet.getImpl()->getDeclRef().equals(rightDeclRefParent))
+                    return -1;
+        }
+
+        // If both are subscript decls, prefer the one that provides more
+        // accessors.
+        if (auto leftSubscriptDecl = left.declRef.as<SubscriptDecl>())
+        {
+            if (auto rightSubscriptDecl = right.declRef.as<SubscriptDecl>())
+            {
+                auto leftAccessorCount = leftSubscriptDecl.getDecl()->getMembersOfType<AccessorDecl>().getCount();
+                auto rightAccessorCount = rightSubscriptDecl.getDecl()->getMembersOfType<AccessorDecl>().getCount();
+                auto decl1IsSubsetOfDecl2 = [=](SubscriptDecl* decl1, SubscriptDecl* decl2)
+                    {
+                        for (auto accessorDecl1 : decl1->getMembersOfType<AccessorDecl>())
+                        {
+                            bool found = false;
+                            for (auto accessorDecl2 : decl2->getMembersOfType<AccessorDecl>())
+                            {
+                                if (accessorDecl1->astNodeType == accessorDecl2->astNodeType)
+                                {
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            if (!found)
+                                return false;
+                        }
+                        return true;
+                    };
+                if (leftAccessorCount > rightAccessorCount
+                    && decl1IsSubsetOfDecl2(rightSubscriptDecl.getDecl(), leftSubscriptDecl.getDecl()))
+                {
+                    return -1;
+                }
+                else if (rightAccessorCount > leftAccessorCount
+                    && decl1IsSubsetOfDecl2(leftSubscriptDecl.getDecl(), rightSubscriptDecl.getDecl()))
+                {
+                    return 1;
+                }
+            }
+        }
+
 
         // TODO: We should generalize above rules such that in a tie a declaration
         // A::m is better than B::m when all other factors are equal and
@@ -1118,6 +1431,79 @@ namespace Slang
         return 0;
     }
 
+    int getExportRank(DeclRef<Decl> left, DeclRef<Decl> right)
+    {
+        if (left.getDecl() && left.getDecl()->hasModifier<ExternModifier>())
+        {
+            return (right.getDecl() && right.getDecl()->hasModifier<HLSLExportModifier>()) ? -1 : 0;
+        }
+        return 0;
+    }
+
+    int getScopeRank(DeclRef<Decl> const& left,
+                DeclRef<Decl> const& right, Slang::Scope* referenceSiteScope)
+    {
+        if (!referenceSiteScope)
+            return 0;
+
+        DeclRef<Decl> prefixDecl = referenceSiteScope->containerDecl;
+
+        // Hold the path from reference site to the root
+        // key: Decl node, value: distance from reference site
+        Dictionary<Decl*, uint32_t> refPath;
+        for (auto node = prefixDecl; node != nullptr; node = node.getParent())
+        {
+            Decl* key = node.getDecl();
+            uint32_t value = (uint32_t)refPath.getCount();
+            refPath.add(key, value);
+        }
+
+        // find the common prefix decl of reference site and left
+        int leftDistance = 0;
+        int rightDistance = 0;
+        auto distanceToCommonPrefix = [](DeclRef<Decl> const& candidate, Dictionary<Decl*, uint32_t> refPath) -> int
+        {
+            uint32_t distanceToReferenceSite = 0;
+            uint32_t distanceToCandidate = 0;
+
+            // Sanity check
+            if (candidate.getDecl() == nullptr)
+                return -1;
+
+            // search from candidate to root, once we found the first node in the reference path, that is the first
+            // common prefix, and we can stop searching.
+            for (auto node = candidate; node != nullptr; node = node.getParent())
+            {
+                Decl* key = node.getDecl();
+                if (refPath.tryGetValue(key, distanceToReferenceSite))
+                {
+                    break;
+                }
+                distanceToCandidate++;
+            }
+
+            // If we don't find the common prefix, there must be something wrong, return the max value.
+            if (distanceToReferenceSite == 0)
+                return -1;
+
+            return distanceToReferenceSite + distanceToCandidate;
+        };
+
+        leftDistance = distanceToCommonPrefix(left, refPath);
+        rightDistance = distanceToCommonPrefix(right, refPath);
+
+        if (leftDistance == rightDistance)
+            return 0;
+
+        if (leftDistance == -1)
+            return 1;
+
+        if (rightDistance == -1)
+            return -1;
+
+        return leftDistance < rightDistance ? -1 : 1;
+    }
+
     int SemanticsVisitor::CompareOverloadCandidates(
         OverloadCandidate*	left,
         OverloadCandidate*	right)
@@ -1187,9 +1573,51 @@ namespace Slang
             auto itemDiff = CompareLookupResultItems(left->item, right->item);
             if(itemDiff)
                 return itemDiff;
+
             auto specificityDiff = compareOverloadCandidateSpecificity(left->item, right->item);
             if(specificityDiff)
                 return specificityDiff;
+
+            // `export` function is more flavored than `extern` function. But other modifiers are not considered.
+            auto externExportDiff = getExportRank(left->item.declRef, right->item.declRef);
+            if (externExportDiff)
+                return externExportDiff;
+
+            // We need to consider the distance of the declarations to the global scope to resolve this case:
+            //      float f(float x);
+            //      struct S
+            //      {
+            //          float f(float x);
+            //          float g(float y) { return f(y); }   // will call S::f() instead of ::f()
+            //      }
+            //  we will count the distance from the reference site to the declaration in the scope tree.
+
+            //  NOTE: We CAN'T do this for the generic function, because generic lookup is little bit complicated.
+            //  It will go through multiple passes of candidates compare.
+            //  In the first pass, it will lookup all the generic candidates that matches the generic parameter only,
+            //  e.g., the following generic functions are totally different, but they will be selected as candidates
+            //  because the function name and the generic parameters are the same:
+            //  void func<let Z0 : uint, let Z1 : uint>(Z0 a, Z1 b);
+            //  void func<let Z0 : uint, let Z1 : uint>(Z0 a, Z1 b, Z0 c);
+            //  void func<let Z0 : uint, let Z1 : uint>(Z0 a, Z1 b, Z0 c, Z1 d);
+            //
+            //  So in this case, we should not consider the scope rank and overload rank at all, because there is only
+            //  one of above candidates is valid, and the rank calculation doesn't consider the correctness of the
+            //  candidates, so it could select the wrong candidate.
+            //
+            //  In the next pass, the lookup system will match the input parameters in those candidates to find out the valid
+            //  match, the "flavor" field will become "Func" or "Expr". So the rank calculation can be applied.
+            if (left->flavor == OverloadCandidate::Flavor::Generic ||
+                left->flavor == OverloadCandidate::Flavor::UnspecializedGeneric ||
+                right->flavor == OverloadCandidate::Flavor::Generic ||
+                right->flavor == OverloadCandidate::Flavor::UnspecializedGeneric)
+            {
+                return 0;
+            }
+
+            auto scopeRank = getScopeRank(left->item.declRef, right->item.declRef, this->m_outerScope);
+            if (scopeRank)
+                return scopeRank;
 
             // If we reach here, we will attempt to use overload rank to break the ties.
             auto overloadRankDiff = getOverloadRank(right->item.declRef) - getOverloadRank(left->item.declRef);
@@ -1395,6 +1823,108 @@ namespace Slang
         AddOverloadCandidate(context, candidate, baseCost);
     }
 
+    bool SemanticsVisitor::OverloadResolveContext::matchArgumentsToParams(
+        SemanticsVisitor* semantics,
+        const List<QualType>& params,
+        bool computeTypes,
+        ShortList<MatchedArg>& outMatchedArgs)
+    {
+        // We allow params to end with one or more variadic packs.
+        // We will first find out how many type packs there are.
+        Index typePackCount = 0;
+        for (Index i = params.getCount() - 1; i >= 0; --i)
+        {
+            if (isTypePack(params[i].type))
+                typePackCount++;
+            else
+                break;
+        }
+        auto fixedParamCount = params.getCount() - typePackCount;
+
+        auto remainingArgCount = getArgCount() - fixedParamCount;
+
+        // If there are remaining arguments after matching all fixed parameters,
+        // we'd better have at least one type pack.
+        if (remainingArgCount > 0 && typePackCount == 0)
+            return false;
+
+        // Now we can match the arguments to the parameters.
+
+        // The fixed part comes first.
+        for (Index i = 0; i < Math::Min(getArgCount(), fixedParamCount); ++i)
+        {
+            MatchedArg arg;
+            arg.argExpr = getArg(i);
+            arg.argType = getArgType(i);
+            outMatchedArgs.add(arg);
+        }
+
+        // Try to match the variadic part.
+        // Is the corresponding argument a expand expr? If so it will map 1:1 to the type pack param.
+        auto astBuilder = semantics->getASTBuilder();
+
+        if (remainingArgCount <= 0)
+            return true;
+        if (typePackCount == 0)
+            return false;
+
+        // If the number of type packs can't evenly divide the remaining arguments,
+        // there isn't a match.
+        if (remainingArgCount % typePackCount != 0)
+            return false;
+
+        // The default case is to group the remaining arguments into evenly divided PackExprs.
+        Index typePackSize = remainingArgCount / typePackCount;
+        for (Index i = 0; i < typePackCount; ++i)
+        {
+            // If type pack size is 1, we may not need to wrap things in a PackExpr,
+            // if the argument is already a pack.
+            if (typePackSize == 1)
+            {
+                auto argType = getArgType(fixedParamCount + i);
+                if (auto typeType = as<TypeType>(argType))
+                {
+                    argType = typeType->getType();
+                }
+                if (isTypePack(argType))
+                {
+                    MatchedArg arg;
+                    arg.argExpr = getArg(fixedParamCount + i);
+                    arg.argType = getArgType(fixedParamCount + i);
+                    outMatchedArgs.add(arg);
+                    continue;
+                }
+            }
+            PackExpr* packExpr = nullptr;
+            if (mode == Mode::ForReal)
+            {
+                packExpr = astBuilder->create<PackExpr>();
+                packExpr->loc = loc;
+            }
+            ShortList<Type*> types;
+            for (Index j = 0; j < typePackSize; ++j)
+            {
+                if (packExpr)
+                {
+                    auto arg = getArg(fixedParamCount + i * typePackSize + j);
+                    packExpr->args.add(arg);
+                }
+                if (computeTypes)
+                    types.add(getArgTypeForInference(fixedParamCount + i * typePackSize + j, semantics));
+            }
+            MatchedArg matchedArg;
+            matchedArg.argExpr = packExpr;
+            if (computeTypes)
+            {
+                matchedArg.argType = astBuilder->getTypePack(types.getArrayView().arrayView);
+                if (packExpr)
+                    packExpr->type = matchedArg.argType;
+            }
+            outMatchedArgs.add(matchedArg);
+        }
+        return true;
+    }
+
     DeclRef<Decl> SemanticsVisitor::inferGenericArguments(
         DeclRef<GenericDecl>    genericDeclRef,
         OverloadResolveContext& context,
@@ -1453,25 +1983,23 @@ namespace Slang
                 innerParameterTypes = &paramTypes;
             }
 
-            Index valueArgCount = context.getArgCount();
-            Index valueParamCount = innerParameterTypes->getCount();
+            ShortList<OverloadResolveContext::MatchedArg> matchedArgs;
 
-            // If there are too many arguments, we cannot possibly have a match.
+            // We now try to match arguments to parameters.
             //
             // Note that if there are *too few* arguments, we might still have
             // a match, because the other arguments might have default values
             // that can be used.
             //
-            if (valueArgCount > valueParamCount)
+            if (!context.matchArgumentsToParams(this, *innerParameterTypes, true, matchedArgs))
             {
                 return DeclRef<Decl>();
             }
 
-            // If any of the arguments were specified explicitly (and are thus known),
-            // we do not want to take them into account during the unification and
-            // constraint generation step.
+            // Perform type unification between arguments and parameters, so
+            // we can populate the resolve system with inital constraints.
             //
-            for (Index aa = 0; aa < valueArgCount; ++aa)
+            for (Index aa = 0; aa < matchedArgs.getCount(); ++aa)
             {
                 // The question here is whether failure to "unify" an argument
                 // and parameter should lead to immediate failure.
@@ -1490,12 +2018,19 @@ namespace Slang
                 //
                 // So the question is then whether a mismatch during the
                 // unification step should be taken as an immediate failure...
-                auto argType = context.getArgTypeForInference(aa, this);
+                auto argType = matchedArgs[aa].argType;
                 auto paramType = (*innerParameterTypes)[aa];
-                TryUnifyTypes(
+                auto canUnify = TryUnifyTypes(
                     constraints,
+                    ValUnificationContext(),
                     QualType(argType, paramType.isLeftValue),
                     paramType);
+
+                // It is an error if we can't unify the argument with a type pack parameter.
+                if (!canUnify && isTypePack(paramType))
+                {
+                    return DeclRef<Decl>();
+                }
             }
         }
         else
@@ -1812,7 +2347,7 @@ namespace Slang
                 if (lastInner)
                 {
                     auto baseExpr = GetBaseExpr(funcDeclRefExpr);
-                    lastInner->baseFunction = ConstructLookupResultExpr(candidate.item, baseExpr, funcDeclRefExpr->loc, funcDeclRefExpr);
+                    lastInner->baseFunction = ConstructLookupResultExpr(candidate.item, baseExpr, funcDeclRefExpr->name, funcDeclRefExpr->loc, funcDeclRefExpr);
                 }
                 candidate.exprVal = expr;
                 expr->type.type = diffFuncType;
@@ -1877,7 +2412,6 @@ namespace Slang
 
         // Look at the base expression for the call, and figure out how to invoke it.
         auto funcExpr = expr->functionExpr;
-        auto funcExprType = funcExpr->type;
 
         // If we are trying to apply an erroneous expression, then just bail out now.
         if(IsErrorExpr(funcExpr))
@@ -1906,24 +2440,13 @@ namespace Slang
         for (auto& arg : expr->arguments)
         {
             arg = maybeOpenRef(arg);
-        }
-
-        auto funcType = as<FuncType>(funcExprType);
-        for (Index i = 0; i < expr->arguments.getCount(); i++)
-        {
-            auto& arg = expr->arguments[i];
-            if (funcType && i < funcType->getParamCount())
-            {
-                if (funcType->getParamDirection(i) == kParameterDirection_Out)
-                    continue;
-            }
             arg = maybeOpenExistential(arg);
         }
 
         context.originalExpr = expr;
         context.funcLoc = funcExpr->loc;
         context.argCount = expr->arguments.getCount();
-        context.args = expr->arguments.getBuffer();
+        context.args = &expr->arguments;
         context.loc = expr->loc;
         context.sourceScope = m_outerScope;
         context.baseExpr = GetBaseExpr(funcExpr);
@@ -2046,9 +2569,62 @@ namespace Slang
             // the user the most help we can.
             if (shouldAddToCache)
                 typeCheckingCache->resolvedOperatorOverloadCache[key] = *context.bestCandidate;
+
+            // Now that we have resolved the overload candidate, we need to undo an `openExistential`
+            // operation that was applied to `out` arguments.
+            //
+            auto funcType = context.bestCandidate->funcType;
+            ShortList<ParameterDirection> paramDirections;
+            if (funcType)
+            {
+                for (Index i = 0; i < funcType->getParamCount(); i++)
+                {
+                    paramDirections.add(funcType->getParamDirection(i));
+                }
+            }
+            else if (auto callableDeclRef = context.bestCandidate->item.declRef.as<CallableDecl>())
+            {
+                for (auto param : callableDeclRef.getDecl()->getParameters())
+                {
+                    paramDirections.add(getParameterDirection(param));
+                }
+            }
+            for (Index i = 0; i < expr->arguments.getCount(); i++)
+            {
+                auto& arg = expr->arguments[i];
+                if (i < paramDirections.getCount())
+                {
+                    switch (paramDirections[i])
+                    {
+                    case kParameterDirection_Out:
+                    case kParameterDirection_InOut:
+                    case kParameterDirection_Ref:
+                    case kParameterDirection_ConstRef:
+                        break;
+                    default:
+                        continue;
+                    }
+                }
+                if (auto extractExistentialExpr = as<ExtractExistentialValueExpr>(arg))
+                    arg = extractExistentialExpr->originalExpr;
+            }
             return CompleteOverloadCandidate(context, *context.bestCandidate);
         }
-        else if (auto typetype = as<TypeType>(funcExprType))
+
+        // If absolutely no viable candidates were extracted from the overloaded expression,
+        // we may be dealing with a composite type or an overloaded expression with composite types.
+        // 
+
+        auto typeExpr = funcExpr;
+        if (auto overloadedExpr = as<OverloadedExpr>(funcExpr))
+        {
+            if (overloadedExpr->lookupResult2.isValid() && overloadedExpr->lookupResult2.isOverloaded())
+            {
+                typeExpr = maybeResolveOverloadedExpr(overloadedExpr, LookupMask::type, nullptr);
+            }
+        }
+
+        if (auto typetype = as<TypeType>(typeExpr->type))
         {
             // We allow a special case when `funcExpr` represents a composite type,
             // in which case we will try to construct the type via memberwise assignment from the arguments.
@@ -2064,7 +2640,7 @@ namespace Slang
 
         // Nothing at all was found that we could even consider invoking.
         // In all other cases, this is an error.
-        getSink()->diagnose(expr->functionExpr, Diagnostics::expectedFunction, funcExprType);
+        getSink()->diagnose(expr->functionExpr, Diagnostics::expectedFunction, funcExpr->type);
         expr->type = QualType(m_astBuilder->getErrorType());
         return expr;
     }
@@ -2098,8 +2674,7 @@ namespace Slang
         else if (auto overloadedExpr = as<OverloadedExpr>(baseExpr))
         {
             // We are referring to a bunch of declarations, each of which might be generic
-            LookupResult result;
-            for (auto item : overloadedExpr->lookupResult2.items)
+            for (auto item : overloadedExpr->lookupResult2)
             {
                 AddGenericOverloadCandidate(item, context);
             }
@@ -2113,6 +2688,15 @@ namespace Slang
     Expr* SemanticsExprVisitor::visitGenericAppExpr(GenericAppExpr* genericAppExpr)
     {
         // Start by checking the base expression and arguments.
+
+        // Disable the short-circuiting logic expression when the experssion is in
+        // the generic parameter.
+        if (this->m_shouldShortCircuitLogicExpr)
+        {
+            auto subContext = disableShortCircuitLogicalExpr();
+            return dispatchExpr(genericAppExpr, subContext);
+        }
+
         auto& baseExpr = genericAppExpr->functionExpr;
         baseExpr = CheckTerm(baseExpr);
         auto& args = genericAppExpr->arguments;
@@ -2154,7 +2738,7 @@ namespace Slang
         context.originalExpr = genericAppExpr;
         context.funcLoc = baseExpr->loc;
         context.argCount = args.getCount();
-        context.args = args.getBuffer();
+        context.args = &args;
         context.loc = genericAppExpr->loc;
         context.sourceScope = m_outerScope;
         context.baseExpr = GetBaseExpr(baseExpr);

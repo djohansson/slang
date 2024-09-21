@@ -1,7 +1,7 @@
 #ifndef SLANG_CORE_LIST_H
 #define SLANG_CORE_LIST_H
 
-#include "../../slang.h"
+#include "../../include/slang.h"
 
 #include "slang-allocator.h"
 #include "slang-math.h"
@@ -570,7 +570,7 @@ namespace Slang
         }
 
         template<typename T2>
-        int binarySearch(const T2& obj)
+        Index binarySearch(const T2& obj)
         {
             return binarySearch(obj, 
                 [](T & curObj, const T2 & thatObj)->int

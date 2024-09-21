@@ -95,8 +95,11 @@ LegalVal LegalVal::wrappedBuffer(
 //
 
 IRTypeLegalizationContext::IRTypeLegalizationContext(
+    TargetProgram* target,
     IRModule* inModule)
 {
+    targetProgram = target;
+
     session = inModule->getSession();
     module = inModule;
 
@@ -209,7 +212,7 @@ struct LegalCallBuilder
     IRCall* m_call = nullptr;
 
         /// The legalized arguments for the call
-    List<IRInst*> m_args;
+    ShortList<IRInst*> m_args;
 
         /// Add a logical argument to the call (which may map to zero or mmore actual arguments)
     void addArg(
@@ -460,7 +463,7 @@ private:
             resultType,
             m_call->getCallee(),
             m_args.getCount(),
-            m_args.getBuffer());
+            m_args.getArrayView().getBuffer());
     }
 };
 
@@ -703,7 +706,7 @@ static LegalVal legalizeRetVal(
     return LegalVal();
 }
 
-static void _addVal(List<IRInst*>& rs, const LegalVal& legalVal)
+static void _addVal(ShortList<IRInst*>& rs, const LegalVal& legalVal)
 {
     switch (legalVal.flavor)
     {
@@ -730,7 +733,7 @@ static LegalVal legalizeUnconditionalBranch(
     ArrayView<LegalVal>        args,
     IRUnconditionalBranch*     branchInst)
 {
-    List<IRInst*> newArgs;
+    ShortList<IRInst*> newArgs;
     for (auto arg : args)
     {
         switch (arg.flavor)
@@ -754,7 +757,7 @@ static LegalVal legalizeUnconditionalBranch(
                 SLANG_UNIMPLEMENTED_X("Unknown legalized val flavor.");
         }
     }
-    context->builder->emitIntrinsicInst(nullptr, branchInst->getOp(), newArgs.getCount(), newArgs.getBuffer());
+    context->builder->emitIntrinsicInst(nullptr, branchInst->getOp(), newArgs.getCount(), newArgs.getArrayView().getBuffer());
     return LegalVal();
 }
 
@@ -811,6 +814,86 @@ static LegalVal legalizeLoad(
     default:
         SLANG_UNEXPECTED("unhandled case");
         break;
+    }
+}
+
+static LegalVal legalizeDebugVar(IRTypeLegalizationContext* context, LegalType type, IRDebugVar* originalInst)
+{
+    // For now we just discard any special part and keep the ordinary part.
+
+    switch (type.flavor)
+    {
+    case LegalType::Flavor::simple:
+    {
+        auto legalVal = context->builder->emitDebugVar(
+            type.getSimple(),
+            originalInst->getSource(),
+            originalInst->getLine(),
+            originalInst->getCol(),
+            originalInst->getArgIndex());
+        copyNameHintAndDebugDecorations(legalVal, originalInst);
+        return LegalVal::simple(legalVal);
+    }
+    case LegalType::Flavor::none:
+        return LegalVal();
+    case LegalType::Flavor::pair:
+        {
+            auto pairType = type.getPair();
+            auto ordinaryVal = legalizeDebugVar(context, pairType->ordinaryType, originalInst);
+            return ordinaryVal;
+        }
+    case LegalType::Flavor::tuple:
+        {
+            auto tupleType = type.getTuple();
+            for (auto ee : tupleType->elements)
+            {
+                auto innerResult = legalizeDebugVar(context, ee.type, originalInst);
+                if (innerResult.flavor != LegalVal::Flavor::none)
+                    return innerResult;
+            }
+            return LegalVal();
+        }
+    default:
+        return LegalVal();
+    }
+}
+
+static LegalVal legalizeDebugValue(IRTypeLegalizationContext* context, LegalVal debugVar, LegalVal debugValue, IRDebugValue* originalInst)
+{
+    // For now we just discard any special part and keep the ordinary part.
+    ShortList<IRInst*> accessChain;
+    for (UInt i = 0; i < originalInst->getAccessChainCount(); i++)
+    {
+        accessChain.add(originalInst->getAccessChain(i));
+    }
+    switch (debugValue.flavor)
+    {
+    case LegalType::Flavor::simple:
+        return LegalVal::simple(
+            context->builder->emitDebugValue(
+                debugVar.getSimple(),
+                debugValue.getSimple(),
+                accessChain.getArrayView().arrayView));
+    case LegalType::Flavor::none:
+        return LegalVal();
+    case LegalType::Flavor::pair:
+    {
+        auto ordinaryVal = legalizeDebugValue(context, debugVar, debugValue.getPair()->ordinaryVal, originalInst);
+        return ordinaryVal;
+    }
+    case LegalType::Flavor::tuple:
+    {
+        auto tupleVal = debugValue.getTuple();
+        for (auto ee : tupleVal->elements)
+        {
+            auto innerResult = legalizeDebugValue(context, debugVar, ee.val, originalInst);
+            if (innerResult.flavor != LegalVal::Flavor::none)
+                return innerResult;
+        }
+        return LegalVal();
+    }
+    default:
+        return LegalVal();
     }
 }
 
@@ -1187,7 +1270,6 @@ static LegalVal legalizeFieldAddress(
         default:
             return LegalVal::simple(
                 builder->emitFieldAddress(
-                    type.getSimple(),
                     legalPtrOperand.getSimple(),
                     fieldKey));
         }
@@ -1888,60 +1970,203 @@ static LegalVal legalizeDefaultConstruct(
     }
 }
 
+// If a legalized `val` has a different flavor than `type`, try to coerce it to `type`.
+//
+static LegalVal coerceToLegalType(
+    IRTypeLegalizationContext* context,
+    LegalType type,
+    LegalVal val)
+{
+    switch (type.flavor)
+    {
+    case LegalType::Flavor::none:
+        return LegalVal();
+    case LegalType::Flavor::simple:
+        {
+            if (val.flavor != LegalVal::Flavor::simple)
+                return val;
+            auto simpleVal = val.getSimple();
+            if (simpleVal->getDataType() == type.getSimple())
+                return val;
+            
+            auto resultType = type.getSimple();
+            auto structType = as<IRStructType>(resultType);
+            if (!structType)
+            {
+                auto resultValueType = tryGetPointedToType(context->builder, resultType);
+                if (!resultValueType)
+                    return val;
+                auto valValueType = tryGetPointedToType(context->builder, simpleVal->getDataType());
+                if (!valValueType)
+                    return val;
+                if (resultValueType == valValueType)
+                    return val;
+                auto loadedVal = context->builder->emitLoad(val.getSimple());
+                auto innerLegalVal = coerceToLegalType(context, LegalType::simple(resultValueType), LegalVal::simple(loadedVal));
+                return LegalVal::implicitDeref(innerLegalVal);
+            }
+            ShortList<IRInst*> fields;
+            for (auto field : structType->getFields())
+            {
+                if (as<IRVoidType>(field->getFieldType()))
+                    continue;
+                auto fieldVal = coerceToLegalType(
+                    context,
+                    LegalType::simple(field->getFieldType()),
+                    LegalVal::simple(context->builder->emitFieldExtract(simpleVal, field->getKey())));
+                fields.add(fieldVal.getSimple());
+            }
+            return LegalVal::simple(context->builder->emitMakeStruct(structType, (UInt)fields.getCount(), fields.getArrayView().getBuffer()));
+        }
+    case LegalType::Flavor::implicitDeref:
+        {
+            auto innerVal = val;
+            if (innerVal.flavor == LegalVal::Flavor::implicitDeref)
+                innerVal = innerVal.getImplicitDeref();
+            else if (innerVal.flavor == LegalVal::Flavor::simple)
+                innerVal = LegalVal::simple(context->builder->emitLoad(innerVal.getSimple()));
+            innerVal = coerceToLegalType(context, type.getImplicitDeref()->valueType, innerVal);
+            return LegalVal::implicitDeref(innerVal);
+        }
+    case LegalType::Flavor::pair:
+        {
+            if (val.flavor == LegalVal::Flavor::pair)
+                return val;
+            else if (val.flavor == LegalVal::Flavor::simple)
+            {
+                auto pairType = type.getPair();
+                auto pairInfo = pairType->pairInfo;
+                LegalVal ordinaryVal = coerceToLegalType(context, pairType->ordinaryType, val);
+                LegalVal specialVal = coerceToLegalType(context, pairType->specialType, val);
+                return LegalVal::pair(ordinaryVal, specialVal, pairInfo);
+            }
+            else if (val.flavor == LegalVal::Flavor::implicitDeref)
+            {
+                LegalVal innerVal = coerceToLegalType(context, type, val.getImplicitDeref());
+                return LegalVal::implicitDeref(innerVal);
+            }
+            else
+            {
+                SLANG_UNEXPECTED("unhandled legal type coercion");
+                UNREACHABLE_RETURN(LegalVal());
+            }
+        }
+    case LegalType::Flavor::tuple:
+        {
+            if (val.flavor == LegalVal::Flavor::tuple)
+                return val;
+            else if (val.flavor == LegalVal::Flavor::simple)
+            {
+                auto tupleType = type.getTuple();
+                RefPtr<TuplePseudoVal> tupleVal = new TuplePseudoVal();
+                auto simpleVal = val.getSimple();
+                for (auto elem : tupleType->elements)
+                {
+                    IRInst* elementVal = nullptr;
+                    if (as<IRPtrTypeBase>(simpleVal->getDataType()) || as<IRPointerLikeType>(simpleVal->getDataType()))
+                        elementVal = context->builder->emitFieldAddress(simpleVal, elem.key);
+                    else
+                        elementVal = context->builder->emitFieldExtract(simpleVal, elem.key);
+                    LegalVal legalElementVal = coerceToLegalType(context, elem.type, LegalVal::simple(elementVal));
+                    TuplePseudoVal::Element tupleElem;
+                    tupleElem.key = elem.key;
+                    tupleElem.val = legalElementVal;
+                    tupleVal->elements.add(tupleElem);
+                }
+                return LegalVal::tuple(tupleVal);
+            }
+            else if (val.flavor == LegalVal::Flavor::implicitDeref)
+            {
+                LegalVal innerVal = coerceToLegalType(context, type, val.getImplicitDeref());
+                return LegalVal::implicitDeref(innerVal);
+            }
+            else
+            {
+                SLANG_UNEXPECTED("unhandled legal type coercion");
+                UNREACHABLE_RETURN(LegalVal());
+            }
+        }
+    default:
+        return val;
+    }
+}
+
 static LegalVal legalizeInst(
     IRTypeLegalizationContext*    context,
     IRInst*                     inst,
     LegalType                   type,
     ArrayView<LegalVal>         args)
 {
+    LegalVal result = LegalVal();
     switch (inst->getOp())
     {
     case kIROp_Load:
-        return legalizeLoad(context, args[0]);
+        result = legalizeLoad(context, args[0]);
+        break;
 
     case kIROp_GetValueFromBoundInterface:
-        return args[0];
+        result = args[0];
+        break;
 
     case kIROp_FieldAddress:
-        return legalizeFieldAddress(context, type, args[0], args[1]);
+        result = legalizeFieldAddress(context, type, args[0], args[1]);
+        break;
 
     case kIROp_FieldExtract:
-        return legalizeFieldExtract(context, type, args[0], args[1]);
+        result = legalizeFieldExtract(context, type, args[0], args[1]);
+        break;
 
     case kIROp_GetElement:
-        return legalizeGetElement(context, type, args[0], args[1]);
+        result = legalizeGetElement(context, type, args[0], args[1]);
+        break;
 
     case kIROp_GetElementPtr:
-        return legalizeGetElementPtr(context, type, args[0], args[1]);
+        result = legalizeGetElementPtr(context, type, args[0], args[1]);
+        break;
 
     case kIROp_Store:
-        return legalizeStore(context, args[0], args[1]);
+        result = legalizeStore(context, args[0], args[1]);
+        break;
 
     case kIROp_Call:
-        return legalizeCall(context, (IRCall*)inst);
+        result = legalizeCall(context, (IRCall*)inst);
+        break;
     case kIROp_Return:
-        return legalizeRetVal(context, args[0], (IRReturn*)inst);
+        result = legalizeRetVal(context, args[0], (IRReturn*)inst);
+        break;
+
+    case kIROp_DebugVar:
+        result = legalizeDebugVar(context, type, (IRDebugVar*)inst);
+        break;
+    case kIROp_DebugValue:
+        result = legalizeDebugValue(context, args[0], args[1], (IRDebugValue*)inst);
+        break;
+
     case kIROp_MakeStruct:
-        return legalizeMakeStruct(
+        result = legalizeMakeStruct(
             context,
             type,
             args.getBuffer(),
             inst->getOperandCount());
+        break;
     case kIROp_MakeArray:
     case kIROp_MakeArrayFromElement:
-        return legalizeMakeArray(
+        result = legalizeMakeArray(
             context,
             type,
             args.getBuffer(),
             inst->getOperandCount(),
             inst->getOp());
+        break;
     case kIROp_DefaultConstruct:
-        return legalizeDefaultConstruct(
+        result = legalizeDefaultConstruct(
             context,
             type);
+        break;
     case kIROp_unconditionalBranch:
     case kIROp_loop:
-        return legalizeUnconditionalBranch(context, args, (IRUnconditionalBranch*)inst);
+        result = legalizeUnconditionalBranch(context, args, (IRUnconditionalBranch*)inst);
+        break;
     case kIROp_undefined:
         return LegalVal();
     case kIROp_GpuForeach:
@@ -1952,6 +2177,8 @@ static LegalVal legalizeInst(
         SLANG_UNEXPECTED("non-simple operand(s)!");
         break;
     }
+    result = coerceToLegalType(context, type, result);
+    return result;
 }
 
 static UnownedStringSlice findNameHint(IRInst* inst)
@@ -2022,8 +2249,8 @@ static LegalVal legalizeLocalVar(
         context->replacedInstructions.add(irLocalVar);
         return newVal;
     }
-    break;
     }
+    UNREACHABLE_RETURN(LegalVal());
 }
 
 static LegalVal legalizeParam(
@@ -2115,7 +2342,7 @@ static LegalVal legalizeInst(
     // value of each, and collect them in an array for subsequent use.
     //
     auto argCount = inst->getOperandCount();
-    List<LegalVal> legalArgs;
+    ShortList<LegalVal> legalArgs;
     //
     // Along the way we will also note whether there were any operands
     // with non-simple legalized values.
@@ -2187,7 +2414,7 @@ static LegalVal legalizeInst(
         context,
         inst,
         legalType,
-        legalArgs.getArrayView());
+        legalArgs.getArrayView().arrayView);
 
     if (legalVal.flavor == LegalVal::Flavor::simple)
     {
@@ -3449,6 +3676,7 @@ static LegalVal legalizeGlobalVar(
         }
         break;
     }
+    UNREACHABLE_RETURN(LegalVal());
 }
 
 static LegalVal legalizeGlobalParam(
@@ -3498,6 +3726,7 @@ static LegalVal legalizeGlobalParam(
         }
         break;
     }
+    UNREACHABLE_RETURN(LegalVal());
 }
 
 static constexpr int kHasBeenAddedOrProcessedScratchBitIndex = 0;
@@ -3781,8 +4010,8 @@ static void legalizeTypes(
 //
 struct IRResourceTypeLegalizationContext : IRTypeLegalizationContext
 {
-    IRResourceTypeLegalizationContext(IRModule* module)
-        : IRTypeLegalizationContext(module)
+    IRResourceTypeLegalizationContext(TargetProgram* target, IRModule* module)
+        : IRTypeLegalizationContext(target, module)
     {}
 
     bool isSpecialType(IRType* type) override
@@ -3816,8 +4045,8 @@ struct IRResourceTypeLegalizationContext : IRTypeLegalizationContext
 //
 struct IRExistentialTypeLegalizationContext : IRTypeLegalizationContext
 {
-    IRExistentialTypeLegalizationContext(IRModule* module)
-        : IRTypeLegalizationContext(module)
+    IRExistentialTypeLegalizationContext(TargetProgram* target, IRModule* module)
+        : IRTypeLegalizationContext(target, module)
     {}
 
     bool isSpecialType(IRType* inType) override
@@ -3857,8 +4086,8 @@ struct IRExistentialTypeLegalizationContext : IRTypeLegalizationContext
 // a public function signature.
 struct IREmptyTypeLegalizationContext : IRTypeLegalizationContext
 {
-    IREmptyTypeLegalizationContext(IRModule* module)
-        : IRTypeLegalizationContext(module)
+    IREmptyTypeLegalizationContext(TargetProgram* target, IRModule* module)
+        : IRTypeLegalizationContext(target, module)
     {}
 
     bool isSpecialType(IRType*) override
@@ -3898,6 +4127,7 @@ struct IREmptyTypeLegalizationContext : IRTypeLegalizationContext
 // specialized context type to use to get the job done.
 
 void legalizeResourceTypes(
+    TargetProgram* target,
     IRModule*       module,
     DiagnosticSink* sink)
 {
@@ -3905,11 +4135,12 @@ void legalizeResourceTypes(
 
     SLANG_UNUSED(sink);
 
-    IRResourceTypeLegalizationContext context(module);
+    IRResourceTypeLegalizationContext context(target, module);
     legalizeTypes(&context);
 }
 
 void legalizeExistentialTypeLayout(
+    TargetProgram* target,
     IRModule*       module,
     DiagnosticSink* sink)
 {
@@ -3918,15 +4149,15 @@ void legalizeExistentialTypeLayout(
     SLANG_UNUSED(module);
     SLANG_UNUSED(sink);
 
-    IRExistentialTypeLegalizationContext context(module);
+    IRExistentialTypeLegalizationContext context(target, module);
     legalizeTypes(&context);
 }
 
-void legalizeEmptyTypes(IRModule* module, DiagnosticSink* sink)
+void legalizeEmptyTypes(TargetProgram* target, IRModule* module, DiagnosticSink* sink)
 {
     SLANG_UNUSED(sink);
 
-    IREmptyTypeLegalizationContext context(module);
+    IREmptyTypeLegalizationContext context(target, module);
     legalizeTypes(&context);
 }
 

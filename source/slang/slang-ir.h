@@ -24,6 +24,7 @@
 namespace Slang {
 
 class   Decl;
+class   DiagnosticSink;
 class   GenericDecl;
 class   FuncType;
 class   Layout;
@@ -35,6 +36,8 @@ struct  IRFunc;
 struct  IRGlobalValueWithCode;
 struct  IRInst;
 struct  IRModule;
+struct  IRStructField;
+struct  IRStructKey;
 
 typedef unsigned int IROpFlags;
 enum : IROpFlags
@@ -88,6 +91,15 @@ enum IROpMeta
 enum IROpMask : std::underlying_type_t<IROp>
 {
     kIROpMask_OpMask = 0x3ff, ///< Mask for just opcode
+};
+
+enum IRMemoryOrder
+{
+    kIRMemoryOrder_Relaxed = 0,
+    kIRMemoryOrder_Acquire = 1,
+    kIRMemoryOrder_Release = 2,
+    kIRMemoryOrder_AcquireRelease = 3,
+    kIRMemoryOrder_SeqCst = 4,
 };
 
 inline int32_t operator&(const IROpMask m, const IROp o)
@@ -531,7 +543,7 @@ public:
         /// This searches up the parent chain starting with `getParent()` looking for a code-bearing
         /// value that things are being inserted into (could be a function, generic, etc.)
         ///
-    IRGlobalValueWithCode* getFunc() const;
+    IRInst* getFunc() const;
 
 private:
         /// Internal constructor
@@ -561,8 +573,11 @@ enum class IRTypeLayoutRuleName
     Scalar = Natural,
     Std430,
     Std140,
+    D3DConstantBuffer,
     _Count,
 };
+
+struct IRBlock;
 
 // Every value in the IR is an instruction (even things
 // like literal values).
@@ -826,6 +841,17 @@ struct IRInst
         /// If both `inPrev` and `inNext` are null, then `inParent` must have no (raw) children.
         ///
     void _insertAt(IRInst* inPrev, IRInst* inNext, IRInst* inParent);
+
+    /// Print the IR to stdout for debugging purposes
+    ///
+    void dump();
+
+    /// Insert a basic block at the end of this func/code containing inst.
+    void addBlock(IRBlock* block);
+
+    IRBlock* getFirstBlock() { return (IRBlock*)getFirstChild(); }
+    IRBlock* getLastBlock() { return (IRBlock*)getLastChild(); }
+
 };
 
 enum class IRDynamicCastBehavior
@@ -1036,6 +1062,9 @@ struct IntInfo
 
 IntInfo getIntTypeInfo(const IRType* intType);
 
+// left-inverse of getIntTypeInfo
+IROp getIntTypeOpFromInfo(const IntInfo info);
+
 struct FloatInfo
 {
     Int width;
@@ -1046,11 +1075,14 @@ FloatInfo getFloatingTypeInfo(const IRType* floatType);
 
 bool isIntegralScalarOrCompositeType(IRType* t);
 
+IRStructField* findStructField(IRInst* type, IRStructKey* key);
+
 void findAllInstsBreadthFirst(IRInst* inst, List<IRInst*>& outInsts);
 
 // Constant Instructions
 
 typedef int64_t IRIntegerValue;
+typedef uint64_t IRUnsignedIntegerValue;
 typedef double IRFloatingPointValue;
 
 struct IRConstant : IRInst
@@ -1142,6 +1174,11 @@ struct IRStringLit : IRConstant
 {
     
     IR_LEAF_ISA(StringLit);
+};
+
+struct IRBlobLit : IRConstant
+{
+    IR_LEAF_ISA(BlobLit);
 };
 
 struct IRPtrLit : IRConstant
@@ -1272,11 +1309,6 @@ struct IRBlock : IRInst
             getFirstOrdinaryInst(),
             getLastOrdinaryInst());
     }
-
-    // The parent of a basic block is assumed to be a
-    // value with code (e.g., a function, global variable
-    // with initializer, etc.).
-    IRGlobalValueWithCode* getParent() { return cast<IRGlobalValueWithCode>(IRInst::getParent()); }
 
     // The predecessor and successor lists of a block are needed
     // when we want to work with the control flow graph (CFG) of
@@ -1450,6 +1482,15 @@ struct IRGLSLImageType : IRTextureTypeBase
     IR_LEAF_ISA(GLSLImageType)
 };
 
+struct IRSubpassInputType : IRType
+{
+    IRType* getElementType() { return (IRType*)getOperand(0); }
+    IRInst* getIsMultisampleInst() { return getOperand(1); }
+    bool isMultisample() { return getIntVal(getIsMultisampleInst()) == 1; }
+
+    IR_LEAF_ISA(SubpassInputType)
+};
+
 struct IRSamplerStateTypeBase : IRType
 {
     IR_PARENT_ISA(SamplerStateTypeBase)
@@ -1466,7 +1507,14 @@ struct IRBuiltinGenericType : IRType
 };
 
 SIMPLE_IR_PARENT_TYPE(PointerLikeType, BuiltinGenericType);
-SIMPLE_IR_PARENT_TYPE(HLSLStructuredBufferTypeBase, BuiltinGenericType)
+
+struct IRHLSLStructuredBufferTypeBase : IRBuiltinGenericType
+{
+    IRType* getDataLayout() { return (IRType*)getOperand(1); }
+
+    IR_PARENT_ISA(HLSLStructuredBufferTypeBase)
+};
+
 SIMPLE_IR_TYPE(HLSLStructuredBufferType, HLSLStructuredBufferTypeBase)
 SIMPLE_IR_TYPE(HLSLRWStructuredBufferType, HLSLStructuredBufferTypeBase)
 SIMPLE_IR_TYPE(HLSLRasterizerOrderedStructuredBufferType, HLSLStructuredBufferTypeBase)
@@ -1511,6 +1559,17 @@ SIMPLE_IR_TYPE(VerticesType, MeshOutputType)
 SIMPLE_IR_TYPE(IndicesType, MeshOutputType)
 SIMPLE_IR_TYPE(PrimitivesType, MeshOutputType)
 
+struct IRMetalMeshType : IRType
+{
+    IRType* getVerticesType() { return (IRType*)getOperand(0); }
+    IRType* getPrimitivesType() { return (IRType*)getOperand(1); }
+    IRInst* getNumVertices() { return (IRInst*)getOperand(2); }
+    IRInst* getNumPrimitives() { return (IRInst*)getOperand(3); }
+    IRIntLit* getTopology() { return (IRIntLit*)getOperand(4); }
+};
+
+SIMPLE_IR_TYPE(MetalMeshGridPropertiesType, Type)
+
 SIMPLE_IR_TYPE(GLSLInputAttachmentType, Type)
 SIMPLE_IR_PARENT_TYPE(ParameterGroupType, PointerLikeType)
 SIMPLE_IR_PARENT_TYPE(UniformParameterGroupType, ParameterGroupType)
@@ -1519,8 +1578,15 @@ SIMPLE_IR_TYPE(ConstantBufferType, UniformParameterGroupType)
 SIMPLE_IR_TYPE(TextureBufferType, UniformParameterGroupType)
 SIMPLE_IR_TYPE(GLSLInputParameterGroupType, VaryingParameterGroupType)
 SIMPLE_IR_TYPE(GLSLOutputParameterGroupType, VaryingParameterGroupType)
-SIMPLE_IR_TYPE(GLSLShaderStorageBufferType, ParameterGroupType)
 SIMPLE_IR_TYPE(ParameterBlockType, UniformParameterGroupType)
+SIMPLE_IR_TYPE(DynamicResourceType, Type)
+
+struct IRGLSLShaderStorageBufferType : IRBuiltinGenericType
+{
+    IRType* getDataLayout() { return (IRType*)getOperand(1); }
+
+    IR_LEAF_ISA(GLSLShaderStorageBufferType)
+};
 
 struct IRArrayTypeBase : IRType
 {
@@ -1557,6 +1623,13 @@ struct IRArrayType: IRArrayTypeBase
 
 SIMPLE_IR_TYPE(UnsizedArrayType, ArrayTypeBase)
 
+struct IRAtomicType : IRType
+{
+    IR_LEAF_ISA(AtomicType)
+
+    IRType* getElementType() { return (IRType*)getOperand(0); }
+};
+
 SIMPLE_IR_PARENT_TYPE(Rate, Type)
 SIMPLE_IR_TYPE(ConstExprRate, Rate)
 SIMPLE_IR_TYPE(GroupSharedRate, Rate)
@@ -1577,6 +1650,7 @@ struct IRRateQualifiedType : IRType
 // same type.
 SIMPLE_IR_PARENT_TYPE(Kind, Type);
 SIMPLE_IR_TYPE(TypeKind, Kind);
+SIMPLE_IR_TYPE(TypeParameterPackKind, Kind);
 
 // The kind of any and all generics.
 //
@@ -1600,6 +1674,11 @@ struct IRDifferentialPairTypeBase : IRType
 struct IRDifferentialPairType : IRDifferentialPairTypeBase
 {
     IR_LEAF_ISA(DifferentialPairType)
+};
+
+struct IRDifferentialPtrPairType : IRDifferentialPairTypeBase
+{
+    IR_LEAF_ISA(DifferentialPtrPairType)
 };
 
 struct IRDifferentialPairUserCodeType : IRDifferentialPairTypeBase
@@ -1661,11 +1740,11 @@ struct IRPtrTypeBase : IRType
 {
     IRType* getValueType() { return (IRType*)getOperand(0); }
 
-    bool hasAddressSpace() { return getOperandCount() > 1; }
+    bool hasAddressSpace() { return getOperandCount() > 1 && getAddressSpace() != AddressSpace::Generic; }
 
-    IRIntegerValue getAddressSpace()
+    AddressSpace getAddressSpace()
     {
-        return getOperandCount() > 1 ? static_cast<IRIntLit*>(getOperand(1))->getValue() : -1;
+        return getOperandCount() > 1 ? (AddressSpace)static_cast<IRIntLit*>(getOperand(1))->getValue() : AddressSpace::Generic;
     }
 
     IR_PARENT_ISA(PtrTypeBase)
@@ -1800,6 +1879,10 @@ struct IRStructField : IRInst
         //
         return (IRType*) getOperand(1);
     }
+    void setFieldType(IRType* type)
+    {
+        setOperand(1, type);
+    }
 
     IR_LEAF_ISA(StructField)
 };
@@ -1861,6 +1944,8 @@ struct IRInterfaceRequirementEntry : IRInst
 struct IRInterfaceType : IRType
 {
     IR_LEAF_ISA(InterfaceType)
+
+    UInt getRequirementCount() { return getOperandCount(); }
 };
 
 struct IRConjunctionType : IRType
@@ -1879,17 +1964,49 @@ struct IRAttributedType : IRType
     IRInst* getAttr() { return getOperand(1); }
 };
 
+struct IRTupleTypeBase : IRType
+{
+    IR_PARENT_ISA(TupleTypeBase)
+};
+
 /// Represents a tuple. Tuples are created by `IRMakeTuple` and its elements
 /// are accessed via `GetTupleElement(tupleValue, IRIntLit)`.
-struct IRTupleType : IRType
+struct IRTupleType : IRTupleTypeBase
 {
     IR_LEAF_ISA(TupleType)
+};
+
+/// Represents a type pack. Type packs behave like tuples, but they have a
+/// "flattening" semantics, so that MakeTypePack(MakeTypePack(T1,T2), T3) is
+/// MakeTypePack(T1,T2,T3).
+struct IRTypePack : IRTupleTypeBase
+{
+    IR_LEAF_ISA(TypePack)
+};
+
+// A placeholder struct key for tuple type layouts that will be replaced with
+// the actual struct key when the tuple type is materialized into a struct type.
+struct IRIndexedFieldKey : IRInst
+{
+    IR_LEAF_ISA(IndexedFieldKey)
+    IRInst* getBaseType() { return getOperand(0); }
+    IRInst* getIndex() { return getOperand(1); }
 };
 
 /// Represents a tuple in target language. TargetTupleType will not be lowered to structs.
 struct IRTargetTupleType : IRType
 {
     IR_LEAF_ISA(TargetTupleType)
+};
+
+/// Represents a `expand T` type used in variadic generic decls in Slang. Expected to be substituted
+/// by actual types during specialization.
+struct IRExpandType : IRType
+{
+    IR_LEAF_ISA(ExpandTypeOrVal)
+    IRType* getPatternType() { return (IRType*)(getOperand(0)); }
+    UInt getCaptureCount() { return getOperandCount() - 1; }
+    IRType* getCaptureType(UInt index) { return (IRType*)(getOperand(index + 1)); }
 };
 
 /// Represents an `Result<T,E>`, used by functions that throws error codes.
@@ -1990,9 +2107,6 @@ struct IRGlobalValueWithCode : IRInst
     {
         return IRInstList<IRBlock>(getChildren());
     }
-
-    // Add a block to the end of this function.
-    void addBlock(IRBlock* block);
 
     IR_PARENT_ISA(GlobalValueWithCode)
 };
@@ -2369,6 +2483,7 @@ struct InstWorkList
         other.pool = nullptr;
         return *this;
     }
+    List<IRInst*>& getList() { return *workList; }
     IRInst* operator[](Index i) { return (*workList)[i]; }
     Index getCount() { return workList->getCount(); }
     IRInst** begin() { return workList->begin(); }
@@ -2414,7 +2529,7 @@ struct InstHashSet
         other.pool = nullptr;
         return *this;
     }
-
+    HashSet<IRInst*>& getHashSet() { return *set; }
     Index getCount() { return set->getCount(); }
     bool add(IRInst* inst) { return set->add(inst); }
     bool contains(IRInst* inst) { return set->contains(inst); }
@@ -2486,6 +2601,9 @@ bool isBuiltin(IRInst* inst);
 
     // Get the enclosuing function of an instruction.
 IRFunc* getParentFunc(IRInst* inst);
+
+    // Is child a descendent of inst
+bool hasDescendent(IRInst* inst, IRInst* child);
 
     // True if moving this inst will not change the semantics of the program
 bool isMovableInst(IRInst* inst);

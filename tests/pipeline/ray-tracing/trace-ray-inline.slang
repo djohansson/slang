@@ -1,7 +1,14 @@
 // trace-ray-inline.slang
 
 //TEST:CROSS_COMPILE:-target dxil-asm -stage compute -profile sm_6_5 -entry main -line-directive-mode none
-//TEST:CROSS_COMPILE:-target spirv-asm -stage compute -profile glsl_460+spirv_1_4 -entry main -line-directive-mode none
+//TEST:SIMPLE(filecheck=CHECK):-target spirv-asm -stage compute -profile glsl_460+GL_EXT_ray_query -entry main -line-directive-mode none
+
+// CHECK: OpCapability RayQueryKHR
+// CHECK: OpExtension "SPV_KHR_ray_query"
+// CHECK: OpRayQueryInitializeKHR
+// CHECK: OpRayQueryProceedKHR
+// CHECK: OpRayQueryGetIntersectionTypeKHR
+// CHECK: OpRayQueryConfirmIntersectionKHR
 
 // The goal of this shader is to use all the main pieces
 // of functionality in DXR 1.1's `TraceRayInline` feature,
@@ -50,6 +57,7 @@ void myTriangleClosestHit(inout MyRayPayload payload)
 //
 bool myTriangleAnyHit(inout MyRayPayload payload)
 {
+    unmodified(payload);
 	return true;
 }
 
@@ -68,6 +76,7 @@ void myProceduralClosestHit(inout MyRayPayload payload, MyProceduralHitAttrs att
 }
 bool myProceduralAnyHit(inout MyRayPayload payload)
 {
+    unmodified(payload);
 	return true;
 }
 
@@ -80,6 +89,8 @@ bool myProceduralAnyHit(inout MyRayPayload payload)
 //
 bool myProceduralIntersection(inout float tHit, inout MyProceduralHitAttrs hitAttrs)
 {
+    unmodified(tHit);
+    unmodified(hitAttrs);
 	return true;
 }
 

@@ -1,14 +1,21 @@
 // atomic-float-byte-address-buffer-cross.slang
 
-//TEST:CROSS_COMPILE: -profile cs_6_5 -entry computeMain -target spirv-assembly
+//TEST:SIMPLE(filecheck=CHECK_SPV): -profile cs_6_5 -entry computeMain -target spirv-assembly
+//TEST:SIMPLE(filecheck=CHECK_SPV): -profile cs_6_5 -entry computeMain -target spirv-assembly -emit-spirv-via-glsl
+//TEST:SIMPLE(filecheck=CHECK_GLSL): -profile cs_6_5 -entry computeMain -target glsl
 // We can't do this test, because it relies on nvAPI
 //DISABLE_TEST:CROSS_COMPILE: -profile cs_6_5 -entry computeMain -target dxil
 
-//TEST_INPUT:ubuffer(data=[0.1 0.2 0.3 0.4]):out,name=outputBuffer
 RWByteAddressBuffer outputBuffer;
 
-//TEST_INPUT:ubuffer(data=[0.7 0.5 0.2 0.6]):name=anotherBuffer
 RWStructuredBuffer<float> anotherBuffer;
+
+// CHECK_SPV: OpAtomicFAddEXT
+// CHECK_SPV: OpAtomicFAddEXT
+// CHECK_GLSL: atomicAdd
+// CHECK_GLSL: atomicAdd
+// CHECK_HLSL: NvInterlockedAddFp32
+// CHECK_HLSL: NvInterlockedAddFp32
 
 [numthreads(16, 1, 1)]
 void computeMain(uint3 dispatchThreadID : SV_DispatchThreadID)
@@ -17,7 +24,7 @@ void computeMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     int idx = int((tid & 3) ^ (tid >> 2)); 
 
     const float delta = anotherBuffer[idx & 3];
-    
+
     float previousValue = 0;
     outputBuffer.InterlockedAddF32((idx << 2), 1.0f, previousValue);
     

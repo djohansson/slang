@@ -1,4 +1,5 @@
 //TEST(compute):COMPARE_RENDER_COMPUTE: -shaderobj
+//TEST(compute):COMPARE_RENDER_COMPUTE: -mtl -shaderobj
 
 //TEST_INPUT: Texture2D(size=4, content = one):name t
 //TEST_INPUT: Sampler:name s

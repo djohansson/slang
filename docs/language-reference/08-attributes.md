@@ -1,3 +1,5 @@
+> Note: This document is a work in progress. It is both incomplete and, in many cases, inaccurate.
+
 Attributes
 ==========
 
@@ -7,7 +9,7 @@ Attributes
 
 ** SPIR-V only **
 
-This attribute is only available for Vulkan SPIR-V output via GLSLANG. In the future it could be supported via the `direct-spirv` option. The attribute will be ignored for any other target. This attribute requires the `GL_EXT_spirv_intrinsics` GLSL extension.
+This attribute is only available for Vulkan SPIR-V output.
 
 The attibute allows access to SPIR-V intrinsics, by supplying a function declaration with the appropriate signature for the SPIR-V op and no body. The intrinsic takes a single parameter which is the integer value for the SPIR-V op. 
 

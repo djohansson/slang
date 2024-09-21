@@ -9,7 +9,7 @@
 
 #include "slang-profile.h"
 #include "slang-type-system-shared.h"
-#include "../../slang.h"
+#include "../../include/slang.h"
 
 #include "../core/slang-semantic-version.h"
 
@@ -67,7 +67,7 @@ namespace Slang
     void printDiagnosticArg(StringBuilder& sb, DeclRefBase* declRefBase);
     void printDiagnosticArg(StringBuilder& sb, ASTNodeType nodeType);
     void printDiagnosticArg(StringBuilder& sb, const CapabilitySet& set);
-
+    void printDiagnosticArg(StringBuilder& sb, List<CapabilityAtom>& set);
 
     struct QualifiedDeclPath
     {
@@ -96,6 +96,7 @@ namespace Slang
 
         kConversionCost_GenericParamUpcast = 1,
         kConversionCost_UnconstraintGenericParam = 20,
+        kConversionCost_SizedArrayToUnsizedArray = 30,
 
         // Convert between matrices of different layout
         kConversionCost_MatrixLayout = 5,
@@ -109,6 +110,7 @@ namespace Slang
         kConversionCost_InRangeIntLitSignedToUnsignedConversion = 32,
         kConversionCost_InRangeIntLitUnsignedToSignedConversion = 81,
 
+        kConversionCost_MutablePtrToConstPtr = 20,
 
         // Conversions based on explicit sub-typing relationships are the cheapest
         //
@@ -139,6 +141,15 @@ namespace Slang
         // Cost of converting a pointer to bool
         kConversionCost_PtrToBool = 400,
 
+        // Cost of converting an integer to int16_t
+        kConversionCost_IntegerTruncate = 450,
+
+        // Cost of converting an integer to a half type
+        kConversionCost_IntegerToHalfConversion = 500,
+
+        // Cost of using a concrete argument pack
+        kConversionCost_ParameterPack = 500,
+
         // Default case (usable for user-defined conversions)
         kConversionCost_Default = 500,
 
@@ -155,7 +166,10 @@ namespace Slang
         // Additional conversion cost to add when promoting from a scalar to
         // a vector (this will be added to the cost, if any, of converting
         // the element type of the vector)
-        kConversionCost_ScalarToVector = 1,
+        kConversionCost_OneVectorToScalar = 1,
+        kConversionCost_ScalarToVector = 2,
+        kConversionCost_ScalarToMatrix = 10,
+        kConversionCost_ScalarIntegerToFloatMatrix = kConversionCost_IntegerToFloatConversion + kConversionCost_ScalarToMatrix,
 
         // Additional cost when casting an LValue.
         kConversionCost_LValueCast = 800,
@@ -456,6 +470,7 @@ namespace Slang
             /// functions, so it belongs in the last phase of checking.
             ///
         DefinitionChecked,
+        DefaultConstructorReadyForUse = DefinitionChecked,
 
             /// The capabilities required by the decl is infered and validated.
             ///
@@ -541,11 +556,11 @@ namespace Slang
         SLANG_VALUE_CLASS(QualType) 
 
         Type*	type = nullptr;
-        bool	        isLeftValue;
+        bool	        isLeftValue = false;
+        bool            hasReadOnlyOnTarget = false;
+        bool	        isWriteOnly = false;
 
-        QualType()
-            : isLeftValue(false)
-        {}
+        QualType() = default;
 
         QualType(Type* type);
 
@@ -665,6 +680,14 @@ namespace Slang
     struct SubstitutionSet
     {
         DeclRefBase* declRef = nullptr;
+
+        // The element index if the substitution is happening inside a pack expansion.
+        // For example, if we are substituting the pattern type of `expand each T`, where
+        // `T` is a type pack, then packExpansionIndex will have a value starting from 0
+        // to the count of the type pack during expansion of the `expand` type when we
+        // substitute `each T` with the element of `T` at index `packExpansionIndex`.
+        Index packExpansionIndex = -1;
+
         SubstitutionSet() = default;
         SubstitutionSet(DeclRefBase* declRefBase)
             :declRef(declRefBase)
@@ -1169,6 +1192,7 @@ namespace Slang
         /// "under-construction" and not being checked, then it's safe to
         /// consider all names we've inserted so far. This is used when
         /// checking to see if a keyword is shadowed.
+        IgnoreInheritance = 1 << 4, ///< Lookup only non inheritance children of a struct (including `extension`)
     };
     inline LookupOptions operator&(LookupOptions a, LookupOptions b)
     {
@@ -1412,6 +1436,9 @@ namespace Slang
         Scope*              scope       = nullptr;
         Scope*              endScope    = nullptr;
 
+        // A decl to exclude from the lookup, used to exclude the current decl being checked, such as in typedef Foo Foo;
+        // to avoid finding itself.
+        Decl* declToExclude = nullptr;
         LookupMask          mask        = LookupMask::Default;
         LookupOptions       options     = LookupOptions::None;
 
@@ -1483,14 +1510,6 @@ namespace Slang
 
         const RequirementDictionary& getRequirementDictionary()
         {
-            if (m_requirementDictionary.getCount() != m_requirements.getCount())
-            {
-                for (Index i = m_requirementDictionary.getCount(); i < m_requirements.getCount(); i++)
-                {
-                    auto& r = m_requirements[i];
-                    m_requirementDictionary.add(r.key, r.value);
-                }
-            }
             return m_requirementDictionary;
         }
 
@@ -1502,11 +1521,11 @@ namespace Slang
         // The type witnessesd by the witness table (a concrete type).
         Type* witnessedType;
 
-        // Satisfying values of each requirement.
-        List<KeyValuePair<Decl*, RequirementWitness>> m_requirements;
+        // Whether or not this witness table is an extern declaration.
+        bool isExtern = false;
 
         // Cached dictionary for looking up satisfying values.
-        SLANG_UNREFLECTED RequirementDictionary m_requirementDictionary;
+        RequirementDictionary m_requirementDictionary;
 
         RefPtr<WitnessTable> specialize(ASTBuilder* astBuilder, SubstitutionSet const& subst);
 
@@ -1584,10 +1603,27 @@ namespace Slang
     /// The kind of a builtin interface requirement that can be automatically synthesized.
     enum class BuiltinRequirementKind
     {
+        DefaultInitializableConstructor, ///< The `IDefaultInitializable.__init()` method
+
         DifferentialType, ///< The `IDifferentiable.Differential` associated type requirement 
+        DifferentialPtrType, ///< The `IDifferentiable.DifferentialPtr` associated type requirement
         DZeroFunc, ///< The `IDifferentiable.dzero` function requirement 
         DAddFunc, ///< The `IDifferentiable.dadd` function requirement 
         DMulFunc, ///< The `IDifferentiable.dmul` function requirement 
+
+        InitLogicalFromInt, ///< The `ILogical.__init` mtehod.
+        Equals, ///< The `ILogical.equals` mtehod.
+        LessThan, ///< The `ILogical.lessThan` mtehod.
+        LessThanOrEquals, ///< The `ILogical.lessThanOrEquals` mtehod.
+        Shl, ///< The `ILogical.shl` mtehod.
+        Shr, ///< The `ILogical.shr` mtehod.
+        BitAnd, ///< The `ILogical.bitAnd` mtehod.
+        BitOr, ///< The `ILogical.bitOr` mtehod.
+        BitXor, ///< The `ILogical.bitXor` mtehod.
+        BitNot, ///< The `ILogical.bitNot` mtehod.
+        And, ///< The `ILogical.and` mtehod.
+        Or, ///< The `ILogical.or` mtehod.
+        Not, ///< The `ILogical.not` mtehod.
     };
 
     enum class FunctionDifferentiableLevel

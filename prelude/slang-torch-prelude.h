@@ -107,6 +107,10 @@ TensorView make_tensor_view(torch::Tensor val, const char* name, torch::ScalarTy
         elementSize = 2;
         res.data = (uint8_t*)val.data_ptr<torch::BFloat16>();
         break;
+    case torch::kFloat16:
+        elementSize = 2;
+        res.data = (uint8_t*)val.data_ptr<at::Half>();
+        break;
     case torch::kInt16:
         elementSize = 2;
         res.data = (uint8_t*)val.data_ptr<int16_t>();
@@ -136,13 +140,21 @@ TensorView make_tensor_view(torch::Tensor val, const char* name, torch::ScalarTy
     if (val.dim() > kSlangTorchTensorMaxDim)
         throw std::runtime_error(std::string(name).append(": number of dimensions exceeds limit (").append(std::to_string(kSlangTorchTensorMaxDim)).append(")").c_str());
 
+    bool isEmpty = true;
     for (int i = 0; i < val.dim(); ++i)
     {
         res.strides[i] = val.stride(i) * elementSize;
+        if (res.strides[i] == 0)
+            throw std::runtime_error(std::string(name).append(": tensors with broadcasted dimensions are not supported (use tensor.contiguous() to make tensor whole)").c_str());
+
         res.sizes[i] = val.size(i);
+        if (res.sizes[i] > 0)
+            isEmpty = false;
     }
-    if (!res.data)
+
+    if (!res.data && !isEmpty)
         throw std::runtime_error(std::string(name).append(": data pointer is invalid.").c_str());
+
     return res;
 }
 

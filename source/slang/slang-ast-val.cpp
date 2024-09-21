@@ -7,6 +7,8 @@
 #include "slang-diagnostics.h"
 #include "slang-syntax.h"
 #include "slang-ast-val.h"
+#include "slang-mangle.h"
+#include "slang-check-impl.h"
 
 namespace Slang {
 
@@ -203,7 +205,7 @@ Val* maybeSubstituteGenericParam(Val* paramVal, Decl* paramDecl, SubstitutionSet
             (*ioDiff)++;
             return args[argIndex];
         }
-        else if (const auto typeParam = as<GenericTypeParamDecl>(m))
+        else if (const auto typeParam = as<GenericTypeParamDeclBase>(m))
         {
             argIndex++;
         }
@@ -226,6 +228,20 @@ Val* GenericParamIntVal::_substituteImplOverride(ASTBuilder* /* astBuilder */, S
     if (auto result = maybeSubstituteGenericParam(this, getDeclRef().getDecl(), subst, ioDiff))
         return result;
 
+    return this;
+}
+
+bool GenericParamIntVal::_isLinkTimeValOverride()
+{
+    return getDeclRef().getDecl()->hasModifier<ExternModifier>();
+}
+
+Val* GenericParamIntVal::_linkTimeResolveOverride(Dictionary<String, IntVal*>& map)
+{
+    auto name = getMangledName(getCurrentASTBuilder(), getDeclRef().declRefBase);
+    IntVal* v;
+    if (map.tryGetValue(name, v))
+        return v;
     return this;
 }
 
@@ -254,6 +270,163 @@ Val* TypeEqualityWitness::_substituteImplOverride(ASTBuilder* astBuilder, Substi
 void TypeEqualityWitness::_toTextOverride(StringBuilder& out)
 {
     out << toSlice("TypeEqualityWitness(") << getSub() << toSlice(")");
+}
+
+// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! TypePackSubtypeWitness !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+Val* TypePackSubtypeWitness::_substituteImplOverride(ASTBuilder* astBuilder, SubstitutionSet subst, int* ioDiff)
+{
+    int diff = 0;
+    ShortList<SubtypeWitness*> newWitnesses;
+    for (Index i = 0; i < getCount(); i++)
+    {
+        auto witness = getWitness(i);
+        auto newWitness = as<SubtypeWitness>(witness->substituteImpl(astBuilder, subst, &diff));
+        newWitnesses.add(newWitness);
+    }
+    auto newSub = as<Type>(getSub()->substituteImpl(astBuilder, subst, &diff));
+    auto newSup = as<Type>(getSup()->substituteImpl(astBuilder, subst, &diff));
+    if (!diff)
+        return this;
+    (*ioDiff)++;
+    return getCurrentASTBuilder()->getSubtypeWitnessPack(newSub, newSup, newWitnesses.getArrayView().arrayView);
+}
+
+Val* TypePackSubtypeWitness::_resolveImplOverride()
+{
+    int diff = 0;
+    ShortList<SubtypeWitness*> newWitnesses;
+    for (Index i = 0; i < getCount(); i++)
+    {
+        auto witness = getWitness(i);
+        auto newWitness = as<SubtypeWitness>(witness->resolve());
+        if (witness != newWitness)
+            diff++;
+        newWitnesses.add(newWitness);
+    }
+    auto newSub = as<Type>(getSub()->resolve());
+    if (newSub != getSub())
+        diff++;
+    auto newSup = as<Type>(getSup()->resolve());
+    if (newSup != getSup())
+        diff++;
+
+    if (!diff)
+        return this;
+    return getCurrentASTBuilder()->getSubtypeWitnessPack(newSub, newSup, newWitnesses.getArrayView().arrayView);
+}
+
+void TypePackSubtypeWitness::_toTextOverride(StringBuilder& out)
+{
+    out << toSlice("Pack(");
+    for (Index i = 0; i < getCount(); i++)
+    {
+        if (i != 0)
+            out << toSlice(", ");
+        getWitness(i)->toText(out);
+    }
+    out << toSlice(")");
+}
+
+// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! ExpandSubtypeWitness !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+Val* ExpandSubtypeWitness::_substituteImplOverride(ASTBuilder* astBuilder, SubstitutionSet subst, int* ioDiff)
+{
+    int diff = 0;
+    auto newSub = as<Type>(getSub()->substituteImpl(astBuilder, subst, &diff));
+    auto newSup = as<Type>(getSup()->substituteImpl(astBuilder, subst, &diff));
+    if (!diff)
+        return this;
+    if (auto subTypePack = as<ConcreteTypePack>(newSub))
+    {
+        // If sub is substituted into a concrete type pack, we should return a
+        // TypePackSubtypeWitness.
+        ShortList<SubtypeWitness*> newWitnesses;
+        for (Index i = 0; i < subTypePack->getTypeCount(); i++)
+        {
+            auto elementType = subTypePack->getElementType(i);
+            subst.packExpansionIndex = i;
+            auto elementWitness = as<SubtypeWitness>(getPatternTypeWitness()->substituteImpl(astBuilder, subst, &diff));
+            auto newWitness = getCurrentASTBuilder()->getExpandSubtypeWitness(elementType, newSup, elementWitness);
+            newWitnesses.add(as<SubtypeWitness>(newWitness));
+        }
+        (*ioDiff)++;
+        return getCurrentASTBuilder()->getSubtypeWitnessPack(newSub, newSup, newWitnesses.getArrayView().arrayView);
+    }
+
+    (*ioDiff)++;
+    auto newPatternWitness = as<SubtypeWitness>(getPatternTypeWitness()->substituteImpl(astBuilder, subst, &diff));
+    return getCurrentASTBuilder()->getExpandSubtypeWitness(newSub, newSup, newPatternWitness);
+}
+
+Val* ExpandSubtypeWitness::_resolveImplOverride()
+{
+    int diff = 0;
+    auto newPatternWitness = as<SubtypeWitness>(getPatternTypeWitness()->resolve());
+    if (newPatternWitness != getPatternTypeWitness())
+        diff++;
+    auto newSub = as<Type>(getSub()->resolve());
+    if (newSub != getSub())
+        diff++;
+    auto newSup = as<Type>(getSup()->resolve());
+    if (newSup != getSup())
+        diff++;
+    if (!diff)
+        return this;
+    return getCurrentASTBuilder()->getExpandSubtypeWitness(newSub, newSup, newPatternWitness);
+}
+
+void ExpandSubtypeWitness::_toTextOverride(StringBuilder& out)
+{
+    out << toSlice("ExpandWitness(");
+    getPatternTypeWitness()->toText(out);
+    out << toSlice(")");
+}
+
+// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! EachSubtypeWitness !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+Val* EachSubtypeWitness::_substituteImplOverride(ASTBuilder* astBuilder, SubstitutionSet subst, int* ioDiff)
+{
+    int diff = 0;
+    auto newPatternWitness = as<SubtypeWitness>(getPatternTypeWitness()->substituteImpl(astBuilder, subst, &diff));
+    if (auto witnessPack = as<TypePackSubtypeWitness>(newPatternWitness))
+    {
+        if (subst.packExpansionIndex >= 0 && subst.packExpansionIndex < witnessPack->getCount())
+        {
+            auto newWitness = witnessPack->getWitness(subst.packExpansionIndex);
+            (*ioDiff)++;
+            return newWitness;
+        }
+    }
+    auto newSub = as<Type>(getSub()->substituteImpl(astBuilder, subst, &diff));
+    auto newSup = as<Type>(getSup()->substituteImpl(astBuilder, subst, &diff));
+    if (!diff)
+        return this;
+    return getCurrentASTBuilder()->getEachSubtypeWitness(newSub, newSup, newPatternWitness);
+}
+
+Val* EachSubtypeWitness::_resolveImplOverride()
+{
+    int diff = 0;
+    auto newPatternWitness = as<SubtypeWitness>(getPatternTypeWitness()->resolve());
+    if (newPatternWitness != getPatternTypeWitness())
+        diff++;
+    auto newSub = as<Type>(getSub()->resolve());
+    if (newSub != getSub())
+        diff++;
+    auto newSup = as<Type>(getSup()->resolve());
+    if (newSup != getSup())
+        diff++;
+    if (!diff)
+        return this;
+    return getCurrentASTBuilder()->getEachSubtypeWitness(newSub, newSup, newPatternWitness);
+}
+
+void EachSubtypeWitness::_toTextOverride(StringBuilder& out)
+{
+    out << toSlice("EachWitness(");
+    getPatternTypeWitness()->toText(out);
+    out << toSlice(")");
 }
 
 // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! DeclaredSubtypeWitness !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -288,7 +461,7 @@ Val* DeclaredSubtypeWitness::_resolveImplOverride()
 
 ConversionCost DeclaredSubtypeWitness::_getOverloadResolutionCostOverride()
 {
-    return kConversionCost_GenericParamUpcast;
+    return kConversionCost_None;
 }
 
 Val* DeclaredSubtypeWitness::_substituteImplOverride(ASTBuilder* astBuilder, SubstitutionSet subst, int * ioDiff)
@@ -320,7 +493,7 @@ Val* DeclaredSubtypeWitness::_substituteImplOverride(ASTBuilder* astBuilder, Sub
         }
         if (found)
         {
-            auto ordinaryParamCount = genericDecl->getMembersOfType<GenericTypeParamDecl>().getCount() +
+            auto ordinaryParamCount = genericDecl->getMembersOfType<GenericTypeParamDeclBase>().getCount() +
                 genericDecl->getMembersOfType<GenericValueParamDecl>().getCount();
             if (index + ordinaryParamCount < args.getCount())
             {
@@ -438,7 +611,7 @@ Val* TransitiveSubtypeWitness::_substituteImplOverride(ASTBuilder* astBuilder, S
 
 ConversionCost TransitiveSubtypeWitness::_getOverloadResolutionCostOverride()
 {
-    return getSubToMid()->getOverloadResolutionCost() + getMidToSup()->getOverloadResolutionCost();
+    return getSubToMid()->getOverloadResolutionCost() + getMidToSup()->getOverloadResolutionCost() + kConversionCost_GenericParamUpcast;
 }
 
 void TransitiveSubtypeWitness::_toTextOverride(StringBuilder& out)
@@ -1039,48 +1212,67 @@ void TypeCastIntVal::_toTextOverride(StringBuilder& out)
 Val* TypeCastIntVal::tryFoldImpl(ASTBuilder* astBuilder, Type* resultType, Val* base, DiagnosticSink* sink)
 {
     SLANG_UNUSED(sink);
-
+    auto convertValue = [&](BasicExpressionType* baseType, IntegerLiteralValue& resultValue) -> bool
+        {
+            switch (baseType->getBaseType())
+            {
+                case BaseType::Int:
+                    resultValue = (int)resultValue;
+                    return true;
+                case BaseType::UInt:
+                    resultValue = (unsigned int)resultValue;
+                    return true;
+                case BaseType::Int64:
+                case BaseType::IntPtr:
+                    resultValue = (Int64)resultValue;
+                    return true;
+                case BaseType::UInt64:
+                case BaseType::UIntPtr:
+                    resultValue = (UInt64)resultValue;
+                    return true;
+                case BaseType::Int16:
+                    resultValue = (int16_t)resultValue;
+                    return true;
+                case BaseType::UInt16:
+                    resultValue = (uint16_t)resultValue;
+                    return true;
+                case BaseType::Int8:
+                    resultValue = (int8_t)resultValue;
+                    return true;
+                case BaseType::UInt8:
+                    resultValue = (uint8_t)resultValue;
+                    return true;
+                default:
+                    return false;
+            }
+        };
     if (auto c = as<ConstantIntVal>(base))
     {
         IntegerLiteralValue resultValue = c->getValue();
         auto baseType = as<BasicExpressionType>(resultType);
         if (baseType)
         {
-            switch (baseType->getBaseType())
-            {
-            case BaseType::Int:
-                resultValue = (int)resultValue;
-                break;
-            case BaseType::UInt:
-                resultValue = (unsigned int)resultValue;
-                break;
-            case BaseType::Int64:
-            case BaseType::IntPtr:
-                resultValue = (Int64)resultValue;
-                break;
-            case BaseType::UInt64:
-            case BaseType::UIntPtr:
-                resultValue = (UInt64)resultValue;
-                break;
-            case BaseType::Int16:
-                resultValue = (int16_t)resultValue;
-                break;
-            case BaseType::UInt16:
-                resultValue = (uint16_t)resultValue;
-                break;
-            case BaseType::Int8:
-                resultValue = (int8_t)resultValue;
-                break;
-            case BaseType::UInt8:
-                resultValue = (uint8_t)resultValue;
-                break;
-            default:
+            if (!convertValue(baseType, resultValue))
                 return nullptr;
-            }
+        }
+        else if (auto enumDecl = isEnumType(resultType))
+        {
+            baseType = as<BasicExpressionType>(enumDecl->tagType);
+            if (!baseType || !convertValue(baseType, resultValue))
+                return nullptr;
         }
         return astBuilder->getIntVal(resultType, resultValue);
     }
     return nullptr;
+}
+
+Val* TypeCastIntVal::_linkTimeResolveOverride(Dictionary<String, IntVal*>& map)
+{
+    auto intValBase = as<IntVal>(getBase());
+    if (!intValBase)
+        return this;
+    auto resolvedBase = intValBase->linkTimeResolve(map);
+    return tryFoldImpl(getCurrentASTBuilder(), getType(), resolvedBase, nullptr);
 }
 
 Val* TypeCastIntVal::_substituteImplOverride(ASTBuilder* astBuilder, SubstitutionSet subst, int* ioDiff)
@@ -1305,6 +1497,14 @@ Val* FuncCallIntVal::tryFoldImpl(ASTBuilder* astBuilder, Type* resultType, DeclR
     return nullptr;
 }
 
+Val* FuncCallIntVal::_linkTimeResolveOverride(Dictionary<String, IntVal*>& map)
+{
+    List<IntVal*> newArgs;
+    for (auto arg : getArgs())
+        newArgs.add(as<IntVal>(arg->linkTimeResolve(map)));
+    return tryFoldImpl(getCurrentASTBuilder(), getType(), getFuncDeclRef(), newArgs, nullptr);
+}
+
 Val* FuncCallIntVal::_substituteImplOverride(ASTBuilder* astBuilder, SubstitutionSet subst, int* ioDiff)
 {
     int diff = 0;
@@ -1332,6 +1532,81 @@ Val* FuncCallIntVal::_substituteImplOverride(ASTBuilder* astBuilder, Substitutio
     }
     // Nothing found: don't substitute.
     return this;
+}
+
+// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! CountOfIntVal !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+void CountOfIntVal::_toTextOverride(StringBuilder& out)
+{
+    out << "countof(";
+    getTypeArg()->toText(out);
+    out << ")";
+}
+
+Val* CountOfIntVal::tryFoldOrNull(ASTBuilder* astBuilder, Type* intType, Type* newType)
+{
+    if (auto typePack = as<ConcreteTypePack>(newType))
+    {
+        bool anyAbstract = false;
+        for (Index i = 0; i < typePack->getTypeCount(); i++)
+        {
+            if (isAbstractTypePack(typePack->getElementType(i)))
+            {
+                anyAbstract = true;
+                break;
+            }
+        }
+        if (!anyAbstract)
+        {
+            auto result = astBuilder->getIntVal(intType, typePack->getTypeCount());
+            return result;
+        }
+    }
+    else if (auto tupleType = as<TupleType>(newType))
+    {
+        bool anyAbstract = false;
+        for (Index i = 0; i < tupleType->getMemberCount(); i++)
+        {
+            if (isAbstractTypePack(tupleType->getMember(i)))
+            {
+                anyAbstract = true;
+                break;
+            }
+        }
+        if (!anyAbstract)
+        {
+            auto result = astBuilder->getIntVal(intType, tupleType->getMemberCount());
+            return result;
+        }
+    }
+    return nullptr;
+}
+
+Val* CountOfIntVal::tryFold(ASTBuilder* astBuilder, Type* intType, Type* newType)
+{
+    if (auto result = tryFoldOrNull(astBuilder, intType, newType))
+        return result;
+    auto result = astBuilder->getOrCreate<CountOfIntVal>(intType, newType);
+    return result;
+}
+
+Val* CountOfIntVal::_substituteImplOverride(ASTBuilder* astBuilder, SubstitutionSet subst, int* ioDiff)
+{
+    int diff = 0;
+    auto newType = as<Type>(getTypeArg()->substituteImpl(astBuilder, subst, &diff));
+    if (!diff)
+        return this;
+
+    (*ioDiff)++;
+    return tryFold(astBuilder, getType(), newType);
+}
+
+Val* CountOfIntVal::_resolveImplOverride()
+{
+    auto resolvedTypeArg = getTypeArg()->resolve();
+    if (resolvedTypeArg == getTypeArg())
+        return this;
+    return tryFold(getCurrentASTBuilder(), getType(), as<Type>(resolvedTypeArg));
 }
 
 // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! WitnessLookupIntVal !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -1494,6 +1769,16 @@ Val* PolynomialIntVal::_resolveImplOverride()
         return builder.getIntVal(getType());
 
     return this;
+}
+
+bool IntVal::isLinkTimeVal()
+{
+    SLANG_AST_NODE_VIRTUAL_CALL(IntVal, isLinkTimeVal, ());
+}
+
+Val* IntVal::linkTimeResolve(Dictionary<String, IntVal*>& mapMangledNameToVal)
+{
+    SLANG_AST_NODE_VIRTUAL_CALL(IntVal, linkTimeResolve, (mapMangledNameToVal));
 }
 
 } // namespace Slang

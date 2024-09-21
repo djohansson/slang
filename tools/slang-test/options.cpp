@@ -290,9 +290,9 @@ static bool _isSubCommand(const char* arg)
         {
             optionsOut->skipApiDetection = true;
         }
-        else if (strcmp(arg, "-emit-spirv-directly") == 0)
+        else if (strcmp(arg, "-emit-spirv-via-glsl") == 0)
         {
-            optionsOut->emitSPIRVDirectly = true;
+            optionsOut->emitSPIRVDirectly = false;
         }
         else if (strcmp(arg, "-expected-failure-list") == 0)
         {
@@ -330,7 +330,14 @@ static bool _isSubCommand(const char* arg)
 
 
     // first positional argument is source shader path
-    optionsOut->testPrefixes = std::move(positionalArgs);
+    optionsOut->testPrefixes.clear();
+    optionsOut->testPrefixes.reserve(positionalArgs.getCount());
+    for (auto testPrefix : positionalArgs)
+    {
+        Slang::StringBuilder sb;
+        Slang::Path::simplify(testPrefix, Slang::Path::SimplifyStyle::NoRoot, sb);
+        optionsOut->testPrefixes.add(sb);
+    }
 
     if (optionsOut->binDir.getLength() == 0)
     {

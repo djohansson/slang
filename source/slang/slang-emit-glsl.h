@@ -22,27 +22,31 @@ public:
 
 protected:
 
+    virtual void beforeComputeEmitActions(IRModule* module) SLANG_OVERRIDE;
     virtual void emitParameterGroupImpl(IRGlobalParam* varDecl, IRUniformParameterGroupType* type) SLANG_OVERRIDE;
     virtual void emitEntryPointAttributesImpl(IRFunc* irFunc, IREntryPointDecoration* entryPointDecor) SLANG_OVERRIDE;
     virtual void emitImageFormatModifierImpl(IRInst* varDecl, IRType* varType) SLANG_OVERRIDE;
     virtual void emitLayoutQualifiersImpl(IRVarLayout* layout) SLANG_OVERRIDE;
     
+    virtual void emitSubpassInputTypeImpl(IRSubpassInputType* type) SLANG_OVERRIDE { _emitGLSLSubpassInputType(type); }
     virtual void emitTextureOrTextureSamplerTypeImpl(IRTextureTypeBase*  type, char const* baseName) SLANG_OVERRIDE { _emitGLSLTextureOrTextureSamplerType(type, baseName); }
 
     virtual void emitFrontMatterImpl(TargetRequest* targetReq) SLANG_OVERRIDE;
 
-    virtual void emitRateQualifiersAndAddressSpaceImpl(IRRate* rate, IRIntegerValue addressSpace) SLANG_OVERRIDE;
+    virtual void emitRateQualifiersAndAddressSpaceImpl(IRRate* rate, AddressSpace addressSpace) SLANG_OVERRIDE;
     virtual void emitInterpolationModifiersImpl(IRInst* varInst, IRType* valueType, IRVarLayout* layout) SLANG_OVERRIDE;
     virtual void emitPackOffsetModifier(IRInst* varInst, IRType* valueType, IRPackOffsetDecoration* decoration) SLANG_OVERRIDE;
 
+    virtual void emitMemoryQualifiers(IRInst* varInst) SLANG_OVERRIDE;
     virtual void emitMeshShaderModifiersImpl(IRInst* varInst) SLANG_OVERRIDE;
     virtual void emitSimpleTypeImpl(IRType* type) SLANG_OVERRIDE;
     virtual void emitVectorTypeNameImpl(IRType* elementType, IRIntegerValue elementCount) SLANG_OVERRIDE;
     virtual void emitVarDecorationsImpl(IRInst* varDecl) SLANG_OVERRIDE;
-    virtual void emitMatrixLayoutModifiersImpl(IRVarLayout* layout) SLANG_OVERRIDE;
+    virtual void emitMatrixLayoutModifiersImpl(IRType* varType) SLANG_OVERRIDE;
     virtual void emitTypeImpl(IRType* type, const StringSliceLoc* nameAndLoc) SLANG_OVERRIDE;
     virtual void emitParamTypeImpl(IRType* type, String const& name) SLANG_OVERRIDE;
     virtual void emitFuncDecorationImpl(IRDecoration* decoration) SLANG_OVERRIDE;
+    virtual void emitGlobalParamDefaultVal(IRGlobalParam* decl) SLANG_OVERRIDE;
 
     virtual void handleRequiredCapabilitiesImpl(IRInst* inst) SLANG_OVERRIDE;
 
@@ -56,6 +60,8 @@ protected:
     virtual void emitSimpleValueImpl(IRInst* inst) SLANG_OVERRIDE;
     virtual void emitLoopControlDecorationImpl(IRLoopControlDecoration* decl) SLANG_OVERRIDE;
 
+    void _emitMemoryQualifierDecorations(IRInst* varDecl);
+    void _emitGLSLSubpassInputType(IRSubpassInputType* type);
     void _emitGLSLTextureOrTextureSamplerType(IRTextureTypeBase* type, char const* baseName);
     void _emitGLSLStructuredBuffer(IRGlobalParam* varDecl, IRHLSLStructuredBufferTypeBase* structuredBufferType);
 
@@ -121,9 +127,13 @@ protected:
 
     void _requireRayTracing();
 
+    void _requireRayQuery();
+
     void _requireFragmentShaderBarycentric();
 
     void _emitSpecialFloatImpl(IRType* type, const char* valueExpr);
+
+    Dictionary<IRInst*, HashSet<IRFunc*>> m_referencingEntryPoints;
 
     RefPtr<GLSLExtensionTracker> m_glslExtensionTracker;
 };

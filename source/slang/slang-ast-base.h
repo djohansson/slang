@@ -104,10 +104,10 @@ struct Scope : public NodeBase
     // but the opposite it allowed.
     ContainerDecl*          containerDecl = nullptr;
 
-    SLANG_UNREFLECTED
     // The parent of this scope (where lookup should go if nothing is found locally)
     Scope*                  parent = nullptr;
 
+    SLANG_UNREFLECTED
     // The next sibling of this scope (a peer for lookup)
     Scope*                  nextSibling = nullptr;
 };
@@ -743,7 +743,7 @@ public:
     bool isChildOf(Decl* other) const;
 
     // Track the decl reference that caused the requirement of a capability atom.
-    SLANG_UNREFLECTED Dictionary<CapabilityAtom, DeclReferenceWithLoc> capabilityRequirementProvenance;
+    SLANG_UNREFLECTED List<DeclReferenceWithLoc> capabilityRequirementProvenance;
 private:
     SLANG_UNREFLECTED DeclRefBase* m_defaultDeclRef = nullptr;
     SLANG_UNREFLECTED Index m_defaultDeclRefEpoch = -1;
@@ -756,6 +756,8 @@ class Expr : public SyntaxNode
     typedef IExprVisitor Visitor;
 
     QualType type;
+
+    bool checked = false;
 
     void accept(IExprVisitor* visitor, void* extra);
 };

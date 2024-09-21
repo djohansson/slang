@@ -44,9 +44,7 @@ static const TypeTextUtil::CompileTargetInfo s_compileTargetInfos[] =
     { SLANG_DXBC_ASM,       "dxbc-asm",                                         "dxbc-asm,dxbc-assembly",   "DirectX shader bytecode assembly" },
     { SLANG_DXIL,           "dxil",                                             "dxil",                     "DirectX Intermediate Language binary" },
     { SLANG_DXIL_ASM,       "dxil-asm",                                         "dxil-asm,dxil-assembly",   "DirectX Intermediate Language assembly"},
-    { SLANG_GLSL,           "glsl,vert,frag,geom,tesc,tese,comp",               "glsl",                     "GLSL source code" },
-    { SLANG_GLSL_VULKAN,    "",                                                 "glsl-vulkan",              "GLSL Vulkan source code" },
-    { SLANG_GLSL_VULKAN_ONE_DESC, "",                                           "glsl-vulkan-one-desc",     "GLSL Vulkan source code" },
+    { SLANG_GLSL,           "glsl,vert,frag,geom,tesc,tese,comp",               "glsl",                     "GLSL(Vulkan) source code" },
     { SLANG_SPIRV,          "spv",                                              "spirv",                    "SPIR-V binary"},
     { SLANG_SPIRV_ASM,      "spv-asm",                                          "spirv-asm,spirv-assembly", "SPIR-V assembly" },
     { SLANG_C_SOURCE,       "c",                                                "c",                        "C source code" },
@@ -54,13 +52,18 @@ static const TypeTextUtil::CompileTargetInfo s_compileTargetInfos[] =
     { SLANG_CPP_PYTORCH_BINDING, "cpp,c++,cxx",                                 "torch,torch-binding,torch-cpp,torch-cpp-binding", "C++ for pytorch binding" },
     { SLANG_HOST_CPP_SOURCE, "cpp,c++,cxx",                                     "host-cpp,host-c++,host-cxx", "C++ source for host execution"},
     { SLANG_HOST_EXECUTABLE,"exe",                                              "exe,executable",           "Executable binary" },
-    { SLANG_SHADER_SHARED_LIBRARY, "dll,so",                                    "sharedlib,sharedlibrary,dll", "Shared library/Dll" },
+    { SLANG_SHADER_SHARED_LIBRARY, "shader-dll,shader-so",                      "shader-sharedlib,shader-sharedlibrary,shader-dll", "Shared library/Dll for shader kernel" },
+    { SLANG_HOST_SHARED_LIBRARY, "dll,so",                                      "sharedlib,sharedlibrary,dll", "Shared library/Dll for host execution" },
     { SLANG_CUDA_SOURCE,    "cu",                                               "cuda,cu",                  "CUDA source code"  },
     { SLANG_PTX,            "ptx",                                              "ptx",                      "PTX assembly" },
     { SLANG_CUDA_OBJECT_CODE, "obj,o",                                          "cuobj,cubin",              "CUDA binary" },
     { SLANG_SHADER_HOST_CALLABLE,  "",                                          "host-callable,callable",   "Host callable" },
     { SLANG_OBJECT_CODE,    "obj,o",                                            "object-code",              "Object code" },
     { SLANG_HOST_HOST_CALLABLE, "",                                             "host-host-callable",       "Host callable for host execution" },
+    { SLANG_METAL,          "metal",                                            "metal",                    "Metal shader source" },
+    { SLANG_METAL_LIB,      "metallib",                                         "metallib",                 "Metal Library Bytecode" },
+    { SLANG_METAL_LIB_ASM,  "metallib-asm"                                      "metallib-asm",             "Metal Library Bytecode assembly" },
+    { SLANG_WGSL,           "wgsl",                                             "wgsl",                     "WebGPU shading language source" },
 };
 
 static const NamesDescriptionValue s_languageInfos[] =
@@ -87,6 +90,7 @@ static const NamesDescriptionValue s_compilerInfos[] =
     { SLANG_PASS_THROUGH_NVRTC,     "nvrtc",     "NVRTC CUDA compiler" },
     { SLANG_PASS_THROUGH_LLVM,      "llvm",     "LLVM/Clang `slang-llvm`" },
     { SLANG_PASS_THROUGH_SPIRV_OPT, "spirv-opt",  "spirv-tools SPIRV optimizer" },
+    { SLANG_PASS_THROUGH_METAL,     "metal",    "Metal shader compiler" },
 };
 
 static const NamesDescriptionValue s_archiveTypeInfos[] =
@@ -149,7 +153,7 @@ static const NamesDescriptionValue s_debugLevels[] =
 
 static const NamesDescriptionValue s_fileSystemTypes[] =
 {
-    { ValueInt(TypeTextUtil::FileSystemType::Default),     "default",      "Default fike system." },
+    { ValueInt(TypeTextUtil::FileSystemType::Default),     "default",      "Default file system." },
     { ValueInt(TypeTextUtil::FileSystemType::LoadFile),    "load-file",    "Just implements loadFile interface, so will be wrapped with CacheFileSystem internally." },
     { ValueInt(TypeTextUtil::FileSystemType::Os),          "os",           "Use the OS based file system directly (without file system caching)" },
 };

@@ -1,5 +1,6 @@
 ---
 layout: user-guide
+permalink: /user-guide/convenience-features
 ---
 
 # Basic Convenience Features
@@ -12,7 +13,7 @@ Slang supports automatic variable type inference:
 var a = 1; // OK, `a` is an `int`.
 var b = float3(0, 1, 2); // OK, `b` is a `float3`.
 ```
-Automatic type inference require an initialization expression to present. Without an initial value, the compiler is not able to infer the type of the variable. The following code will result a compiler error:
+Automatic type inference require an initialization expression to present. Without an initial value, the compiler is not able to infer the type of the variable. The following code will result in a compiler error:
 ```csharp
 var a; // Error, cannot infer the type of `a`.
 ```
@@ -24,7 +25,7 @@ var b : int; // OK.
 ```
 
 ## Immutable Values
-The `var` syntax and the traditional C-style variable definition introduces a _mutable_ variable whose value can be changed after its definition. If you wish to introduce an immutable or constant value, you may use the `let` keyword:
+The `var` syntax and the traditional C-style variable definition introduce a _mutable_ variable whose value can be changed after its definition. If you wish to introduce an immutable or constant value, you may use the `let` keyword:
 ```rust
 let a = 5; // OK, `a` is `int`.
 let b : int = 5; // OK.
@@ -67,7 +68,7 @@ namespace ns1
 }
 ```
 
-To access symbols defined in a namespace, you can use its qualified name with namespace prefixes:
+To access symbols defined in a namespace, you can use their qualified name with namespace prefixes:
 ```csharp
 void test()
 {
@@ -216,11 +217,13 @@ property uint highBits
 > ```
 
 ## Initializers
+
+### Constructors
 > #### Note ####
-> The syntax for defining initializers are subject to future change.
+> The syntax for defining constructors is subject to future change.
 
 
-Slang supports defining initializers in `struct` types. You can write:
+Slang supports defining constructors in `struct` types. You can write:
 ```csharp
 struct MyType
 {
@@ -232,17 +235,17 @@ struct MyType
 }
 ```
 
-You can use an initializer to construct a new instance by using the type name in a function call expression:
+You can use a constructor to construct a new instance by using the type name in a function call expression:
 ```csharp
 MyType instance = MyType(1,2);  // instance.myVal is 3.
 ```
 
-You may also use C++ style initializer list to invoke an initializer:
+You may also use C++ style initializer list to invoke a constructor:
 ```csharp
 MyType instance = {1, 2};
 ```
 
-If an initializer does not define any parameters, it will be recognized as *default* initializer that will be automatically called at the definition of a variable:
+If a constructor does not define any parameters, it will be recognized as *default* constructor that will be automatically called at the definition of a variable:
 
 ```csharp
 struct MyType
@@ -258,6 +261,50 @@ int test()
 {
     MyType test;
     return test.myVal; // returns 10.
+}
+```
+
+Slang will also implicitly call a *default* constructor of all parents of a derived struct (same as C++):
+```csharp
+struct MyType_Base
+{
+    int myVal1;
+    __init() {myVal1 = 22;}
+}
+
+struct MyType1 : MyType_Base
+{
+    int myVal2;
+    __init()
+    {
+        // implicitly calls `MyType_Base::__init()`
+        myVal2 = 15;
+    }
+}
+testMyType1()
+{
+    MyType1 a;
+    // a.myVal1 == 22
+    // a.myVal2 == 15
+}
+
+struct MyType2 : MyType_Base
+{
+}
+testMyType2()
+{
+    MyType2 b; // implicitly calls `MyType_Base::__init()`
+    // b.myVal1 == 22
+}
+```
+
+### Member Init Expressions
+
+Slang supports member init expressions:
+```csharp
+struct MyType
+{
+    int myVal = 5;
 }
 ```
 
@@ -284,6 +331,22 @@ int test()
 ```
 Slang currently supports overloading the following operators: `+`, `-`, `*`, `/`, `%`, `&`, `|`, `<`, `>`, `<=`, `>=`, `==`, `!=`, unary `-`, `~` and `!`. Please note that the `&&` and `||` operators are not supported.
 
+In addition, you can overload operator `()` as a member method:
+```csharp
+struct MyFunctor
+{
+    int operator()(float v)
+    {
+        // ...
+    }
+}
+void test()
+{
+    MyFunctor f;
+    int x = f(1.0f); // calls MyFunctor::operator().
+    int y = f.operator()(1.0f); // explicitly calling operator().
+}
+```
 
 ## Subscript Operator
 
@@ -306,6 +369,53 @@ int test()
     return rs[1, 0]; // returns 2.
 }
 ```
+
+## Tuple Types
+
+Tuple types can hold collection of values of different types.
+Tuples types are defined in Slang with the `Tuple<...>` syntax, and
+constructed with either a constructor or the `makeTuple` function:
+```csharp
+Tuple<int, float, bool> t0 = Tuple<int, float, bool>(5, 2.0f, false);
+Tuple<int, float, bool> t1 = makeTuple(3, 1.0f, true);
+```
+
+Tuple elements can be accessed with `_0`, `_1` member names:
+```csharp
+int i = t0._0; // 5
+bool b = t1._2; // true
+```
+
+You can use the swizzle syntax similar to vectors and matrices to form new
+tuples:
+
+```csharp
+t0._0_0_1 // evaluates to (5, 5, 2.0f)
+```
+
+You can concatenate two tuples:
+
+```csharp
+concat(t0, t1) // evaluates to (5, 2.0f, false, 3, 1.0f, true)
+```
+
+If all element types of a tuple conforms to `IComparable`, then the tuple itself
+will conform to `IComparable`, and you can use comparison operators on the tuples
+to compare them:
+
+```csharp
+let cmp = t0 < t1; // false
+```
+
+You can use `countof()` on a tuple type or a tuple value to obtain the number of
+elements in a tuple. This is considered a compile-time constant.
+```csharp
+int n = countof(Tuple<int, float>); // 2
+int n1 = countof(makeTuple(1,2,3)); // 3
+```
+
+All tuple types will be translated to `struct` types, and receive the same layout
+as `struct` types.
 
 ## `Optional<T>` type
 
@@ -336,6 +446,23 @@ int caller()
 }
 ```
 
+## `if_let` syntax
+Slang supports `if (let name = expr)` syntax to simplify the code when working with `Optional<T>` value. The syntax is similar to Rust's
+`if let` syntax, the value expression must be an `Optional<T>` type, for example:
+
+```csharp
+Optional<int> getOptInt() { ... }
+
+void test()
+{
+    if (let x = getOptInt())
+    {
+          // if we are here, `getOptInt` returns a value `int`.
+          // and `x` represents the `int` value.
+    }
+}
+```
+
 ## `reinterpret<T>` operation
 
 Sometimes it is useful to reinterpret the bits of one type as another type, for example:
@@ -359,6 +486,56 @@ float4 myPackedVector = reinterpret<float4>(myVal);
 ```
 
 `reinterpret` can pack any type into any other type as long as the target type is no smaller than the source type.
+
+## Pointers (limited)
+
+Slang supports pointers when generating code for SPIRV, C++ and CUDA targets. The syntax for pointers is similar to C, with the exception that operator `.` can also be used to dereference a member from a pointer. For example:
+```csharp
+struct MyType
+{
+    int a;
+};
+
+int test(MyType* pObj)
+{
+    MyType* pNext = pObj + 1;
+    MyType* pNext2 = &pNext[1];
+    return pNext.a + pNext->a + (*pNext2).a + pNext2[0].a;
+}
+
+cbuffer Constants
+{
+    MyType *ptr;
+};
+
+int validTest()
+{
+    return test(ptr);
+}
+
+int invalidTest()
+{
+    // cannot produce a pointer from a local variable 
+    MyType obj;
+    return test(&obj); // !! ERROR !!
+}
+```
+
+Pointer types can also be specified using the generic syntax: `Ptr<MyType>` is equivalent to `MyType*`.
+
+### Limitations
+
+- Slang supports pointers to global memory, but not shared or local memory. For example, it is invalid to define a pointer to a local variable.
+
+- Slang supports pointers that are defined as shader parameters (e.g. as a constant buffer field).
+
+- Slang can produce pointers using the & operator from data in global memory.
+
+- Slang doesn't support coherent load/stores.
+
+- Slang doesn't support custom alignment specification.
+
+- Slang currently does not support pointers to immutable values, i.e. `const T*`.
 
 ## `struct` inheritance (limited)
 
@@ -397,7 +574,7 @@ If a base type is marked as `[sealed]`, then inheritance from the type is not al
 
 ### Limitations
 
-Please note that the support for inheritance is currently very limited. Common features that comes with inheritance, such as `virtual` functions and multiple inheritance are not supported by the Slang compiler. Implicit down-casting to the base type and use the result as a `mutable` argument in a function call is also not supported.
+Please note that the support for inheritance is currently very limited. Common features that come with inheritance, such as `virtual` functions and multiple inheritance are not supported by the Slang compiler. Implicit down-casting to the base type and use the result as a `mutable` argument in a function call is also not supported.
 
 Extensions
 --------------------
@@ -432,7 +609,7 @@ void test()
 This feature is similar to extensions in Swift and partial classes in C#.
 
 > #### Note:
-> You can only extend a type with additional methods. Extending with additiional data fields is not allowed.
+> You can only extend a type with additional methods. Extending with additional data fields is not allowed.
 
 Multi-level break
 -------------------
@@ -516,3 +693,28 @@ __file_decl
     }
 }
 ```
+
+User Defined Attributes (Experimental)
+-------------------
+
+In addition to many system defined attributes, users can define their own custom attribute types to be used in the `[UserDefinedAttribute(args...)]` syntax. The following example shows how to define a custom attribute type.
+
+```csharp
+[__AttributeUsage(_AttributeTargets.Var)]
+struct MaxValueAttribute
+{
+    int value;
+    string description;
+};
+
+[MaxValue(12, "the scale factor")]
+uniform int scaleFactor;
+```
+
+In the above code, the `MaxValueAttribute` struct type is decorated with the `[__AttributeUsage]` attribute, which informs that `MaxValueAttribute` type should be interpreted as a definiton for a user-defined attribute, `[MaxValue]`, that can be used to decorate all variables or fields. The members of the struct defines the argument list for the attribute.
+
+The `scaleFactor` uniform parameter is declared with the user defined `[MaxValue]` attribute, providing two arguments for `value` and `description`.
+
+The `_AttributeTargets` enum is used to restrict the type of decls the attribute can apply. Possible values of `_AttributeTargets` can be `Function`, `Param`, `Struct` or `Var`.
+
+The usage of user-defined attributes can be queried via Slang's reflection API through `TypeReflection` or `VariableReflection`'s `getUserAttributeCount`, `getUserAttributeByIndex` and `findUserAttributeByName` methods. 

@@ -2,7 +2,7 @@
 #include "slang-visual-studio-compiler-util.h"
 
 #include "../core/slang-common.h"
-#include "../../slang-com-helper.h"
+#include "slang-com-helper.h"
 #include "../core/slang-string-util.h"
 #include "../core/slang-string-slice-pool.h"
 
@@ -189,6 +189,7 @@ static void _addFile(const String& path, const ArtifactDesc& desc, IOSFileArtifa
     switch (options.targetType)
     {
         case SLANG_SHADER_SHARED_LIBRARY:
+        case SLANG_HOST_SHARED_LIBRARY:
         {
             // Create dynamic link library
             if (options.debugInfoType == DebugInfoType::None)

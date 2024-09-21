@@ -1,10 +1,13 @@
 // slang-api.cpp
 
 #include "slang-compiler.h"
-
 #include "slang-repro.h"
-
+#include "slang-capability.h"
+#include "../core/slang-rtti-info.h"
+#include "../core/slang-performance-profiler.h"
 #include "../core/slang-shared-library.h"
+#include "../slang-record-replay/record/slang-global-session.h"
+#include "../slang-record-replay/util/record-utility.h"
 
 // implementation of C interface
 
@@ -116,7 +119,18 @@ SLANG_API SlangResult slang_createGlobalSession(
         }
     }
 
-    *outGlobalSession = globalSession.detach();
+    // Check if the SLANG_CAPTURE_ENABLE_ENV is enabled
+    if (SlangRecord::isRecordLayerEnabled())
+    {
+        SlangRecord::GlobalSessionRecorder* globalSessionRecorder =
+            new SlangRecord::GlobalSessionRecorder(globalSession.detach());
+        Slang::ComPtr<SlangRecord::GlobalSessionRecorder> result(globalSessionRecorder);
+        *outGlobalSession = result.detach();
+    }
+    else
+    {
+        *outGlobalSession = globalSession.detach();
+    }
 
 #ifdef SLANG_ENABLE_IR_BREAK_ALLOC
     // Reset inst debug alloc counter to 0 so IRInsts for user code always starts from 0.
@@ -124,6 +138,14 @@ SLANG_API SlangResult slang_createGlobalSession(
 #endif
 
     return SLANG_OK;
+}
+
+SLANG_API void slang_shutdown()
+{
+    Slang::PerformanceProfiler::getProfiler()->dispose();
+    Slang::SPIRVCoreGrammarInfo::freeEmbeddedGrammerInfo();
+    Slang::RttiInfo::deallocateAll();
+    Slang::freeCapabilityDefs();
 }
 
 SLANG_API SlangResult slang_createGlobalSessionWithoutStdLib(
@@ -289,6 +311,18 @@ SLANG_API void spSetTargetForceGLSLScalarBufferLayout(
 {
     SLANG_ASSERT(request);
     request->setTargetForceGLSLScalarBufferLayout(targetIndex, forceScalarLayout);
+}
+
+SLANG_API void spSetTargetUseMinimumSlangOptimization(slang::ICompileRequest* request, int targetIndex, bool val)
+{
+    SLANG_ASSERT(request);
+    request->setTargetUseMinimumSlangOptimization(targetIndex, val);
+}
+
+SLANG_API void spSetIgnoreCapabilityCheck(slang::ICompileRequest* request, bool ignore)
+{
+    SLANG_ASSERT(request);
+    request->setIgnoreCapabilityCheck(ignore);
 }
 
 SLANG_API void spSetTargetLineDirectiveMode(
@@ -495,11 +529,12 @@ SLANG_API void spSetDefaultModuleName(
 
 SLANG_API SlangResult spAddLibraryReference(
     slang::ICompileRequest*    request,
+    const char* basePath,
     const void* libData,
     size_t libDataSize)
 {
     SLANG_ASSERT(request);
-    return request->addLibraryReference(libData, libDataSize);
+    return request->addLibraryReference(basePath, libData, libDataSize);
 }
 
 SLANG_API void spTranslationUnit_addPreprocessorDefine(
@@ -770,6 +805,16 @@ SLANG_API SlangResult spCompileRequest_getEntryPoint(
 {
     SLANG_ASSERT(request);
     return request->getEntryPoint(entryPointIndex, outEntryPoint);
+}
+
+/*! @see slang::ICompileRequest::getCompileTimeProfile */
+SLANG_API SlangResult spGetCompileTimeProfile(
+    slang::ICompileRequest* request,
+    ISlangProfiler** compileTimeProfile,
+    bool shouldClear)
+{
+    SLANG_ASSERT(request);
+    return request->getCompileTimeProfile(compileTimeProfile, shouldClear);
 }
 
 // Get the output code associated with a specific translation unit

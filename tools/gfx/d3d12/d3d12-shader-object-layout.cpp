@@ -50,10 +50,11 @@ bool ShaderObjectLayoutImpl::isBindingRangeRootParameter(
 
 Result ShaderObjectLayoutImpl::createForElementType(
     RendererBase* renderer,
+    slang::ISession* session,
     slang::TypeLayoutReflection* elementType,
     ShaderObjectLayoutImpl** outLayout)
 {
-    Builder builder(renderer);
+    Builder builder(renderer, session);
     builder.setElementTypeLayout(elementType);
     return builder.build(outLayout);
 }
@@ -62,7 +63,7 @@ Result ShaderObjectLayoutImpl::init(Builder* builder)
 {
     auto renderer = builder->m_renderer;
 
-    initBase(renderer, builder->m_elementTypeLayout);
+    initBase(renderer, builder->m_session,  builder->m_elementTypeLayout);
 
     m_containerType = builder->m_containerType;
 
@@ -115,6 +116,7 @@ Result ShaderObjectLayoutImpl::Builder::setElementTypeLayout(
         uint32_t count = (uint32_t)typeLayout->getBindingRangeBindingCount(r);
         slang::TypeLayoutReflection* slangLeafTypeLayout =
             typeLayout->getBindingRangeLeafTypeLayout(r);
+        
         BindingRangeInfo bindingRangeInfo = {};
         bindingRangeInfo.bindingType = slangBindingType;
         bindingRangeInfo.resourceShape = slangLeafTypeLayout->getResourceShape();
@@ -125,6 +127,21 @@ Result ShaderObjectLayoutImpl::Builder::setElementTypeLayout(
             typeLayout,
             r);
         bindingRangeInfo.isSpecializable = typeLayout->isBindingRangeSpecializable(r);
+        switch (slangBindingType)
+        {
+        case slang::BindingType::RawBuffer:
+        case slang::BindingType::TypedBuffer:
+        case slang::BindingType::MutableRawBuffer:
+        case slang::BindingType::MutableTypedBuffer:
+            {
+                auto bufferElementType = slangLeafTypeLayout->getElementTypeLayout();
+                if (bufferElementType)
+                {
+                    bindingRangeInfo.bufferElementStride = (uint32_t)bufferElementType->getStride();
+                }
+            }
+            break;
+        }
         if (bindingRangeInfo.isRootParameter)
         {
             RootParameterInfo rootInfo = {};
@@ -223,13 +240,14 @@ Result ShaderObjectLayoutImpl::Builder::setElementTypeLayout(
         {
             if (auto pendingTypeLayout = slangLeafTypeLayout->getPendingDataTypeLayout())
             {
-                createForElementType(m_renderer, pendingTypeLayout, subObjectLayout.writeRef());
+                createForElementType(m_renderer, m_session, pendingTypeLayout, subObjectLayout.writeRef());
             }
         }
         else
         {
             createForElementType(
                 m_renderer,
+                m_session,
                 slangLeafTypeLayout->getElementTypeLayout(),
                 subObjectLayout.writeRef());
         }
@@ -673,8 +691,8 @@ void RootShaderObjectLayoutImpl::RootSignatureDescBuilder::addAsValue(
 void RootShaderObjectLayoutImpl::RootSignatureDescBuilder::addAsConstantBuffer(
     slang::TypeLayoutReflection* typeLayout,
     Index physicalDescriptorSetIndex,
-    BindingRegisterOffsetPair const& offsetForChildrenThatNeedNewSpace,
-    BindingRegisterOffsetPair const& offsetForOrdinaryChildren)
+    BindingRegisterOffsetPair offsetForChildrenThatNeedNewSpace,
+    BindingRegisterOffsetPair offsetForOrdinaryChildren)
 {
     if (typeLayout->getSize(SLANG_PARAMETER_CATEGORY_UNIFORM) != 0)
     {
@@ -687,6 +705,7 @@ void RootShaderObjectLayoutImpl::RootSignatureDescBuilder::addAsConstantBuffer(
             offsetForOrdinaryChildren.primary.spaceOffset,
             1,
             false);
+        offsetForRangeType++;
     }
 
     addAsValue(typeLayout, physicalDescriptorSetIndex, offsetForChildrenThatNeedNewSpace, offsetForOrdinaryChildren);
@@ -695,8 +714,8 @@ void RootShaderObjectLayoutImpl::RootSignatureDescBuilder::addAsConstantBuffer(
 void RootShaderObjectLayoutImpl::RootSignatureDescBuilder::addAsValue(
     slang::TypeLayoutReflection* typeLayout,
     Index physicalDescriptorSetIndex,
-    BindingRegisterOffsetPair const& containerOffset,
-    BindingRegisterOffsetPair const& elementOffset)
+    BindingRegisterOffsetPair containerOffset,
+    BindingRegisterOffsetPair elementOffset)
 {
     // Our first task is to add the binding ranges for stuff that is
     // directly contained in `typeLayout` rather than via sub-objects.
@@ -982,7 +1001,7 @@ Result RootShaderObjectLayoutImpl::create(
         auto slangEntryPoint = programLayout->getEntryPointByIndex(e);
         RefPtr<ShaderObjectLayoutImpl> entryPointLayout;
         SLANG_RETURN_ON_FAIL(ShaderObjectLayoutImpl::createForElementType(
-            device, slangEntryPoint->getTypeLayout(), entryPointLayout.writeRef()));
+            device, program->getSession(), slangEntryPoint->getTypeLayout(), entryPointLayout.writeRef()));
         builder.addEntryPoint(slangEntryPoint->getStage(), entryPointLayout);
     }
 

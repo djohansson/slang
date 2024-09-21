@@ -3,7 +3,7 @@
 #define SLANG_ARTIFACT_H
 
 #include "../core/slang-basic.h"
-#include "../../slang-com-helper.h"
+#include "slang-com-helper.h"
 
 #include <type_traits>
 
@@ -143,6 +143,7 @@ enum class ArtifactPayload : uint8_t
     CUDA,           ///< CUDA source
     Metal,          ///< Metal source
     Slang,          ///< Slang source
+    WGSL,           ///< WGSL source
 
     KernelLike,     ///< GPU Kernel like
 

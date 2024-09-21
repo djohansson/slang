@@ -13,12 +13,14 @@ using namespace Slang;
 Result SLANG_MCALL createD3D11Device(const IDevice::Desc* desc, IDevice** outDevice);
 Result SLANG_MCALL createD3D12Device(const IDevice::Desc* desc, IDevice** outDevice);
 Result SLANG_MCALL createVKDevice(const IDevice::Desc* desc, IDevice** outDevice);
+Result SLANG_MCALL createMetalDevice(const IDevice::Desc* desc, IDevice** outDevice);
 Result SLANG_MCALL createCUDADevice(const IDevice::Desc* desc, IDevice** outDevice);
 Result SLANG_MCALL createCPUDevice(const IDevice::Desc* desc, IDevice** outDevice);
 
 Result SLANG_MCALL getD3D11Adapters(List<AdapterInfo>& outAdapters);
 Result SLANG_MCALL getD3D12Adapters(List<AdapterInfo>& outAdapters);
 Result SLANG_MCALL getVKAdapters(List<AdapterInfo>& outAdapters);
+Result SLANG_MCALL getMetalAdapters(List<AdapterInfo>& outAdapters);
 Result SLANG_MCALL getCUDAAdapters(List<AdapterInfo>& outAdapters);
 
 Result SLANG_MCALL reportD3DLiveObjects();
@@ -86,6 +88,8 @@ struct FormatInfoMap
         set(Format::R16G16_FLOAT, SLANG_SCALAR_TYPE_FLOAT16, 2);
         set(Format::R16_FLOAT, SLANG_SCALAR_TYPE_FLOAT16, 1);
 
+        set(Format::R64_UINT, SLANG_SCALAR_TYPE_UINT64, 1);
+
         set(Format::R32G32B32A32_UINT, SLANG_SCALAR_TYPE_UINT32, 4);
         set(Format::R32G32B32_UINT, SLANG_SCALAR_TYPE_UINT32, 3);
         set(Format::R32G32_UINT, SLANG_SCALAR_TYPE_UINT32, 2);
@@ -98,6 +102,8 @@ struct FormatInfoMap
         set(Format::R8G8B8A8_UINT, SLANG_SCALAR_TYPE_UINT8, 4);
         set(Format::R8G8_UINT, SLANG_SCALAR_TYPE_UINT8, 2);
         set(Format::R8_UINT, SLANG_SCALAR_TYPE_UINT8, 1);
+
+        set(Format::R64_SINT, SLANG_SCALAR_TYPE_INT64, 1);
 
         set(Format::R32G32B32A32_SINT, SLANG_SCALAR_TYPE_INT32, 4);
         set(Format::R32G32B32_SINT, SLANG_SCALAR_TYPE_INT32, 3);
@@ -270,6 +276,14 @@ extern "C"
             SLANG_RETURN_ON_FAIL(getCUDAAdapters(adapters));
             break;
 #endif
+#if SLANG_APPLE_FAMILY
+        case DeviceType::Vulkan:
+            SLANG_RETURN_ON_FAIL(getVKAdapters(adapters));
+            break;
+        case DeviceType::Metal:
+            SLANG_RETURN_ON_FAIL(getMetalAdapters(adapters));
+            break;
+#endif
         case DeviceType::CPU:
             return SLANG_E_NOT_IMPLEMENTED;
         default:
@@ -324,11 +338,38 @@ extern "C"
                 return SLANG_FAIL;
             }
             break;
-#elif (SLANG_LINUX_FAMILY || SLANG_APPLE_FAMILY) && !defined(__CYGWIN__)
-        case DeviceType::Default:
+#elif SLANG_APPLE_FAMILY
         case DeviceType::Vulkan:
         {
             return createVKDevice(desc, outDevice);
+        }
+        case DeviceType::Metal:
+        {
+            return createMetalDevice(desc, outDevice);
+        }
+        case DeviceType::Default:
+        {
+            IDevice::Desc newDesc = *desc;
+            newDesc.deviceType = DeviceType::Metal;
+            if (_createDevice(&newDesc, outDevice) == SLANG_OK)
+                return SLANG_OK;
+            newDesc.deviceType = DeviceType::Vulkan;
+            if (_createDevice(&newDesc, outDevice) == SLANG_OK)
+                return SLANG_OK;
+            return SLANG_FAIL;
+        }
+#elif SLANG_LINUX_FAMILY && !defined(__CYGWIN__)
+        case DeviceType::Vulkan:
+        {
+            return createVKDevice(desc, outDevice);
+        }
+        case DeviceType::Default:
+        {
+            IDevice::Desc newDesc = *desc;
+            newDesc.deviceType = DeviceType::Vulkan;
+            if (_createDevice(&newDesc, outDevice) == SLANG_OK)
+                return SLANG_OK;
+            return SLANG_FAIL;
         }
 #endif
         case DeviceType::CUDA:
@@ -400,6 +441,8 @@ extern "C"
             return "OpenGL";
         case gfx::DeviceType::Vulkan:
             return "Vulkan";
+        case gfx::DeviceType::Metal:
+            return "Metal";
         case gfx::DeviceType::CPU:
             return "CPU";
         case gfx::DeviceType::CUDA:

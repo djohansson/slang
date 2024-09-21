@@ -1,3 +1,5 @@
+> Note: This document is a work in progress. It is both incomplete and, in many cases, inaccurate.
+
 Lexical Structure
 =================
 
@@ -5,12 +7,12 @@ Source Units
 ------------
 
 A _source unit_ comprises a sequence of zero or more _characters_ which for purposes of this document are defined as Unicode scalars (code points).
-Implementations *may* accept source units stored as files on disk, buffers in memory, or any appropriate implementation-specified means.
 
 Encoding
 --------
 
-When encoding is required, source units *should* be encoded using UTF-8.
+Implementations *may* accept source units stored as files on disk, buffers in memory, or any appropriate implementation-specified means.
+When source units are stored as byte sequences, they *should* be encoded using UTF-8.
 Implementations *may* support additional implemented-specified encodings.
 
 Whitespace
@@ -54,7 +56,7 @@ Compilation of a source unit proceeds _as if_ the following steps are executed i
 
 2. Escaped line breaks are eliminated. No new characters are inserted to replace them. Any new escaped line breaks introduced by this step are not eliminated.
 
-3. All comments are replaced with a single space (U+0020)
+3. Each comments is replaced with a single space (U+0020)
 
 4. The source unit is _lexed_ into a sequence of tokens according the lexical grammar in this chapter
 

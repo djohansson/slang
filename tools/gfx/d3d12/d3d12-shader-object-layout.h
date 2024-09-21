@@ -66,6 +66,9 @@ public:
         /// as a sub-object.
         uint32_t subObjectIndex;
 
+        /// The stride of a structured buffer.
+        uint32_t bufferElementStride;
+
         bool isRootParameter;
 
         /// Is this binding range represent a specialization point, such as an existential value, or a `ParameterBlock<IFoo>`.
@@ -124,11 +127,12 @@ public:
     struct Builder
     {
     public:
-        Builder(RendererBase* renderer)
-            : m_renderer(renderer)
+        Builder(RendererBase* renderer, slang::ISession* session)
+            : m_renderer(renderer), m_session(session)
         {}
 
         RendererBase* m_renderer;
+        slang::ISession* m_session;
         slang::TypeLayoutReflection* m_elementTypeLayout;
         List<BindingRangeInfo> m_bindingRanges;
         List<SubObjectRangeInfo> m_subObjectRanges;
@@ -165,6 +169,7 @@ public:
 
     static Result createForElementType(
         RendererBase* renderer,
+        slang::ISession* session,
         slang::TypeLayoutReflection* elementType,
         ShaderObjectLayoutImpl** outLayout);
 
@@ -238,7 +243,7 @@ public:
             RendererBase* renderer,
             slang::IComponentType* program,
             slang::ProgramLayout* programLayout)
-            : Super::Builder(renderer)
+            : Super::Builder(renderer, program->getSession())
             , m_program(program)
             , m_programLayout(programLayout)
         {}
@@ -445,14 +450,14 @@ public:
         void addAsConstantBuffer(
             slang::TypeLayoutReflection* typeLayout,
             Index physicalDescriptorSetIndex,
-            BindingRegisterOffsetPair const& containerOffset,
-            BindingRegisterOffsetPair const& elementOffset);
+            BindingRegisterOffsetPair containerOffset,
+            BindingRegisterOffsetPair elementOffset);
 
         void addAsValue(
             slang::TypeLayoutReflection* typeLayout,
             Index physicalDescriptorSetIndex,
-            BindingRegisterOffsetPair const& containerOffset,
-            BindingRegisterOffsetPair const& elementOffset);
+            BindingRegisterOffsetPair containerOffset,
+            BindingRegisterOffsetPair elementOffset);
 
         D3D12_ROOT_SIGNATURE_DESC1& build();
     };

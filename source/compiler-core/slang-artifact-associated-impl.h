@@ -2,8 +2,8 @@
 #ifndef SLANG_ARTIFACT_ASSOCIATED_IMPL_H
 #define SLANG_ARTIFACT_ASSOCIATED_IMPL_H
 
-#include "../../slang-com-helper.h"
-#include "../../slang-com-ptr.h"
+#include "slang-com-helper.h"
+#include "slang-com-ptr.h"
 
 #include "../core/slang-com-object.h"
 #include "../core/slang-memory-arena.h"
@@ -155,13 +155,15 @@ public:
     
     // IArtifactPostEmitMetadata
     SLANG_NO_THROW virtual Slice<ShaderBindingRange> SLANG_MCALL getUsedBindingRanges() SLANG_OVERRIDE;
-    
+    SLANG_NO_THROW virtual Slice<String> SLANG_MCALL getExportedFunctionMangledNames() SLANG_OVERRIDE;
+
     void* getInterface(const Guid& uuid);
     void* getObject(const Guid& uuid);
 
     static ComPtr<IArtifactPostEmitMetadata> create() { return ComPtr<IArtifactPostEmitMetadata>(new ThisType); }
 
     List<ShaderBindingRange> m_usedBindings;
+    List<String> m_exportedFunctionMangledNames;
 };
 
 } // namespace Slang

@@ -6,7 +6,6 @@
 //
 #include "slang-ir.h"
 #include "slang-ir-insts.h"
-
 namespace Slang
 {
 struct GenericChildrenMigrationContextImpl;
@@ -75,6 +74,17 @@ Dictionary<IRInst*, IRInst*> buildInterfaceRequirementDict(IRInterfaceType* inte
 
 bool isComInterfaceType(IRType* type);
 
+// If `type` is a vector, returns its element type. Otherwise, return `type`.
+IRType* getVectorElementType(IRType* type);
+
+// If `type` is a matrix, returns its element type. Otherwise, return `type`.
+IRType* getMatrixElementType(IRType* type);
+
+// True if type is a resource backing memory
+bool isResourceType(IRType* type);
+
+// True if type is a pointer to a resource
+bool isPointerToResourceType(IRType* type);
 
 IROp getTypeStyle(IROp op);
 IROp getTypeStyle(BaseType op);
@@ -86,6 +96,12 @@ inline bool isScalarIntegerType(IRType* type)
 
 // No side effect can take place through a value of a "Value" type.
 bool isValueType(IRInst* type);
+
+bool isSimpleDataType(IRType* type);
+
+bool isSimpleHLSLDataType(IRInst* inst);
+
+SourceLoc findFirstUseLoc(IRInst* inst);
 
 inline bool isChildInstOf(IRInst* inst, IRInst* parent)
 {
@@ -167,8 +183,10 @@ inline IRInst* unwrapAttributedType(IRInst* type)
 IRType* dropNormAttributes(IRType* const t);
 
 void getTypeNameHint(StringBuilder& sb, IRInst* type);
-void copyNameHintDecoration(IRInst* dest, IRInst* src);
+void copyNameHintAndDebugDecorations(IRInst* dest, IRInst* src);
 IRInst* getRootAddr(IRInst* addrInst);
+IRInst* getRootAddr(IRInst* addrInst, List<IRInst*>& outAccessChain, List<IRInst*>* outTypes = nullptr);
+
 bool canAddressesPotentiallyAlias(IRGlobalValueWithCode* func, IRInst* addr1, IRInst* addr2);
 
 String dumpIRToString(
@@ -220,6 +238,8 @@ IRInst* getVulkanPayloadLocation(IRInst* payloadGlobalVar);
 IRInst* getInstInBlock(IRInst* inst);
 
 void removePhiArgs(IRInst* phiParam);
+
+ShortList<IRInst*> getPhiArgs(IRInst* phiParam);
 
 int getParamIndexInBlock(IRParam* paramInst);
 
@@ -310,7 +330,28 @@ inline bool isCompositeType(IRType* type)
     }
 }
 
+IRType* getSPIRVSampledElementType(IRInst* sampledType);
+
+IRType* replaceVectorElementType(IRType* originalVectorType, IRType* t);
+
 IRParam* getParamAt(IRBlock* block, UIndex ii);
+
+void verifyComputeDerivativeGroupModifiers(
+    DiagnosticSink* sink,
+    SourceLoc errorLoc,
+    bool quadAttr,
+    bool linearAttr,
+    IRNumThreadsDecoration* numThreadsDecor);
+
+
+inline bool isSPIRV(CodeGenTarget codeGenTarget)
+{
+    return codeGenTarget == CodeGenTarget::SPIRV
+            || codeGenTarget == CodeGenTarget::SPIRVAssembly;
+}
+
+int getIRVectorElementSize(IRType* type);
+IRType* getIRVectorBaseType(IRType* type);
 
 }
 

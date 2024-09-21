@@ -2,7 +2,7 @@
 
 // This tests that writing to individual components of the output struct works
 
-//TEST:CROSS_COMPILE:-target spirv -profile glsl_450+spirv_1_4 -entry main -stage mesh
+//TEST:CROSS_COMPILE:-target spirv -profile glsl_450+GL_EXT_mesh_shader -entry main -stage mesh
 
 const static float2 positions[3] = {
   float2(0.0, -0.5),
@@ -29,8 +29,8 @@ const static uint MAX_PRIMS = 1;
 [numthreads(3, 1, 1)]
 void main(
     in uint tig : SV_GroupIndex,
-    out Vertices<Vertex, MAX_VERTS> verts,
-    out Indices<uint3, MAX_PRIMS> triangles
+    OutputVertices<Vertex, MAX_VERTS> verts,
+    OutputIndices<uint3, MAX_PRIMS> triangles
     )
 {
     const uint numVertices = 3;

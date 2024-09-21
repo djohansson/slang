@@ -7,15 +7,19 @@
 // The goal is to demonstrate how to use the Slang API to cross compile
 // shader code.
 //
-#include <slang.h>
-#include <slang-com-ptr.h>
+#include "slang.h"
+#include "slang-com-ptr.h"
 
 #include "vulkan-api.h"
 #include "examples/example-base/example-base.h"
+#include "examples/example-base/test-base.h"
+#include "source/core/slang-string-util.h"
 
 using Slang::ComPtr;
 
-struct HelloWorldExample
+static const ExampleResources resourceBase("hello-world");
+
+struct HelloWorldExample : public TestBase
 {
     // The Vulkan functions pointers result from loading the vulkan library.
     VulkanAPI vkAPI;
@@ -64,10 +68,11 @@ struct HelloWorldExample
 
 };
 
-int main()
+int main(int argc, char* argv[])
 {
     initDebugCallback();
     HelloWorldExample example;
+    example.parseOption(argc, argv);
     return example.run();
 }
 
@@ -114,7 +119,7 @@ int HelloWorldExample::createComputePipelineFromShader()
     slang::SessionDesc sessionDesc = {};
     slang::TargetDesc targetDesc = {};
     targetDesc.format = SLANG_SPIRV;
-    targetDesc.profile = slangGlobalSession->findProfile("glsl440");
+    targetDesc.profile = slangGlobalSession->findProfile("spirv_1_5");
     targetDesc.flags = SLANG_TARGET_FLAG_GENERATE_SPIRV_DIRECTLY;
 
     sessionDesc.targets = &targetDesc;
@@ -137,7 +142,8 @@ int HelloWorldExample::createComputePipelineFromShader()
     slang::IModule* slangModule = nullptr;
     {
         ComPtr<slang::IBlob> diagnosticBlob;
-        slangModule = session->loadModule("hello-world", diagnosticBlob.writeRef());
+        Slang::String path = resourceBase.resolveResource("hello-world.slang");
+        slangModule = session->loadModule(path.getBuffer(), diagnosticBlob.writeRef());
         diagnoseIfNeeded(diagnosticBlob);
         if (!slangModule)
             return -1;
@@ -201,6 +207,11 @@ int HelloWorldExample::createComputePipelineFromShader()
             0, 0, spirvCode.writeRef(), diagnosticsBlob.writeRef());
         diagnoseIfNeeded(diagnosticsBlob);
         RETURN_ON_FAIL(result);
+
+        if (isTestMode())
+        {
+            printEntrypointHashes(1, 1, composedProgram);
+        }
     }
 
     // The following steps are all Vulkan API calls to create a pipeline.

@@ -2,6 +2,7 @@
 #include "slang-legalize-types.h"
 
 #include "slang-ir-insts.h"
+#include "slang-ir-util.h"
 #include "slang-mangle.h"
 
 namespace Slang
@@ -188,6 +189,10 @@ bool isResourceType(IRType* type)
     {
         return true;
     }
+    else if (const auto subpassInputType = as<IRSubpassInputType>(type))
+    {
+        return true;
+    }
     else if(const auto untypedBufferType = as<IRUntypedBufferResourceType>(type))
     {
         return true;
@@ -196,6 +201,21 @@ bool isResourceType(IRType* type)
     // TODO: need more comprehensive coverage here
 
     return false;
+}
+
+// Helper wrapper function around isResourceType that checks if the given
+// type is a pointer to a resource type or a physical storage buffer.
+bool isPointerToResourceType(IRType* type)
+{
+    while (auto ptrType = as<IRPtrTypeBase>(type))
+    {
+        if (ptrType->getAddressSpace() == AddressSpace::StorageBuffer ||
+            ptrType->getAddressSpace() == AddressSpace::UserPointer)
+            return true;
+        type = ptrType->getValueType();
+    }
+
+    return isResourceType(type);
 }
 
 ModuleDecl* findModuleForDecl(
@@ -267,6 +287,11 @@ struct TupleTypeBuilder
                 {
                     specialType = legalFieldType;
                 }
+
+                // `void` is currently legalized to simple, but we don't want to add a
+                // `void` field to the struct.
+                if (legalLeafType.getSimple()->getOp() == kIROp_VoidType)
+                    return;
             }
             break;
 
@@ -399,7 +424,6 @@ struct TupleTypeBuilder
 
         bool isSpecialField = context->isSpecialType(fieldType);
         auto legalFieldType = legalizeType(context, fieldType);
-
         addField(
             field->getKey(),
             legalFieldType,
@@ -447,25 +471,13 @@ struct TupleTypeBuilder
             IRBuilder* builder = context->getBuilder();
             IRStructType* ordinaryStructType = builder->createStructType();
             ordinaryStructType->sourceLoc = originalStructType->sourceLoc;
-
-            if(auto nameHintDecoration = originalStructType->findDecoration<IRNameHintDecoration>())
-            {
-                builder->addNameHintDecoration(ordinaryStructType, nameHintDecoration->getNameOperand());
-            }
+            originalStructType->transferDecorationsTo(ordinaryStructType);
+            copyNameHintAndDebugDecorations(originalStructType, ordinaryStructType);
 
             // The new struct type will appear right after the original in the IR,
             // so that we can be sure any instruction that could reference the
             // original can also reference the new one.
             ordinaryStructType->insertAfter(originalStructType);
-
-            // Mark the original type for removal once all the other legalization
-            // activity is completed. This is necessary because both the original
-            // and replacement type have the same mangled name, so they would
-            // collide.
-            //
-            // (Also, the original type wasn't legal - that was the whole point...)
-            originalStructType->removeFromParent();
-            context->replacedInstructions.add(originalStructType);
 
             for(auto ee : ordinaryElements)
             {
@@ -1140,23 +1152,34 @@ LegalType legalizeTypeImpl(
         auto originalElementType = uniformBufferType->getElementType();
 
         // Legalize the element type to see what we are working with.
-        auto legalElementType = legalizeType(context,
-            originalElementType);
-
-        // As a bit of a corner case, if the user requested something
-        // like `ConstantBuffer<Texture2D>` the element type would
-        // legalize to a "simple" type, and that would be interpreted
-        // as an *ordinary* type, but we really need to notice the
-        // case when the element type is simple, but *special*.
-        //
-        if( context->isSpecialType(originalElementType) )
+        LegalType legalElementType;
+        
+        if (isMetalTarget(context->targetProgram->getTargetReq()) &&
+            as<IRParameterBlockType>(uniformBufferType))
         {
-            // Anything that has a special element type needs to
-            // be handled by the pass-specific logic in the context.
+            // On Metal, we do not need to legalize the element type of
+            // a parameter block because we can translate it directly into
+            // an argument buffer.
+            legalElementType = LegalType::simple(originalElementType);
+        }
+        else
+        {
+            legalElementType = legalizeType(context, originalElementType);
+            // As a bit of a corner case, if the user requested something
+            // like `ConstantBuffer<Texture2D>` the element type would
+            // legalize to a "simple" type, and that would be interpreted
+            // as an *ordinary* type, but we really need to notice the
+            // case when the element type is simple, but *special*.
             //
-            return context->createLegalUniformBufferType(
-                uniformBufferType->getOp(),
-                legalElementType);
+            if( context->isSpecialType(originalElementType) )
+            {
+                // Anything that has a special element type needs to
+                // be handled by the pass-specific logic in the context.
+                //
+                return context->createLegalUniformBufferType(
+                    uniformBufferType->getOp(),
+                    legalElementType);
+            }
         }
 
         // Note that even when legalElementType.flavor == Simple
@@ -1169,6 +1192,32 @@ LegalType legalizeTypeImpl(
                 uniformBufferType,
                 legalElementType);
 
+    }
+    else if (auto bufferType = as<IRHLSLStructuredBufferTypeBase>(type))
+    {
+        auto legalElementType = legalizeType(context, bufferType->getElementType());
+        IRInst* newElementType = nullptr;
+        switch (legalElementType.flavor)
+        {
+        case LegalType::Flavor::simple:
+            if (legalElementType.getSimple() == bufferType->getElementType())
+                return LegalType::simple(bufferType);
+            newElementType = legalElementType.getSimple();
+            break;
+        case LegalType::Flavor::none:
+            newElementType = context->getBuilder()->getIntType();
+            break;
+        default:
+            return LegalType::simple(bufferType);
+        }
+        ShortList<IRInst*> operands;
+        for (UInt i = 0; i < bufferType->getOperandCount(); i++)
+            operands.add(bufferType->getOperand(i));
+        operands[0] = newElementType;
+        return LegalType::simple(context->getBuilder()->getType(
+            bufferType->getOp(),
+            bufferType->getOperandCount(),
+            operands.getArrayView().getBuffer()));
     }
     else if (isResourceType(type))
     {
@@ -1340,10 +1389,15 @@ LegalType legalizeTypeImpl(
             context,
             arrayType->getElementType());
 
-        // If element type hasn't change, return original type.
-        if (legalElementType.flavor == LegalType::Flavor::simple &&
-            legalElementType.getSimple() == arrayType->getElementType())
-            return LegalType::simple(arrayType);
+        if (legalElementType.flavor == LegalType::Flavor::simple)
+        {
+            if (legalElementType.getSimple()->getOp() == kIROp_VoidType)
+                return LegalType();
+
+            // If element type hasn't change, return original type.
+            if (legalElementType.getSimple() == arrayType->getElementType())
+                return LegalType::simple(arrayType);
+        }
 
         ArrayLegalTypeWrapper wrapper;
         wrapper.arrayType = arrayType;

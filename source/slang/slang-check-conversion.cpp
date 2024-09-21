@@ -498,6 +498,27 @@ namespace Slang
             toInitializerListExpr->type = QualType(toType);
             toInitializerListExpr->args = coercedArgs;
 
+            // Wrap initalizer list args if we're creating a non-differentiable struct within a 
+            // differentiable function.
+            // 
+            if (auto func = getParentFuncOfVisitor())
+            {
+                if (func->findModifier<DifferentiableAttribute>() && 
+                    !isTypeDifferentiable(toType))
+                {
+                    for (auto &arg : toInitializerListExpr->args)
+                    {
+                        if (isTypeDifferentiable(arg->type.type))
+                        {
+                            auto detachedArg = m_astBuilder->create<DetachExpr>();
+                            detachedArg->inner = arg;
+                            detachedArg->type = arg->type;
+                            arg = detachedArg;
+                        }
+                    }
+                }
+            }
+
             *outToExpr = toInitializerListExpr;
         }
 
@@ -645,7 +666,7 @@ namespace Slang
         }
     }
 
-    static int getTypeBitSize(Type* t)
+    int getTypeBitSize(Type* t)
     {
         auto basicType = as<BasicExpressionType>(t);
         if (!basicType) return 0;
@@ -750,6 +771,31 @@ namespace Slang
             return true;
         }
 
+        // Allow implicit conversion from sized array to unsized array when
+        // calling a function.
+        // Note: we implement the logic here instead of an implicit_conversion
+        // intrinsic in the stdlib because we only want to allow this conversion
+        // when calling a function.
+        //
+        if (site == CoercionSite::Argument)
+        {
+            if (auto fromArrayType = as<ArrayExpressionType>(fromType))
+            {
+                if (auto toArrayType = as<ArrayExpressionType>(toType))
+                {
+                    if (fromArrayType->getElementType()->equals(toArrayType->getElementType())
+                        && toArrayType->isUnsized())
+                    {
+                        if (outToExpr)
+                            *outToExpr = fromExpr;
+                        if (outCost)
+                            *outCost = kConversionCost_SizedArrayToUnsizedArray;
+                        return true;
+                    }
+                }
+            }
+        }
+
         // Another important case is when either the "to" or "from" type
         // represents an error. In such a case we must have already
         // reporeted the error, so it is better to allow the conversion
@@ -842,29 +888,32 @@ namespace Slang
         // Coercion from an initializer list is allowed for many types,
         // so we will farm that out to its own subroutine.
         //
-        if( auto fromInitializerListExpr = as<InitializerListExpr>(fromExpr))
+        if (fromExpr && as<InitializerListType>(fromExpr->type.type))
         {
-            if( !_coerceInitializerList(
-                toType,
-                outToExpr,
-                fromInitializerListExpr) )
+            if (auto fromInitializerListExpr = as<InitializerListExpr>(fromExpr))
             {
-                return false;
-            }
+                if (!_coerceInitializerList(
+                    toType,
+                    outToExpr,
+                    fromInitializerListExpr))
+                {
+                    return false;
+                }
 
-            // For now, we treat coercion from an initializer list
-            // as having  no cost, so that all conversions from initializer
-            // lists are equally valid. This is fine given where initializer
-            // lists are allowed to appear now, but might need to be made
-            // more strict if we allow for initializer lists in more
-            // places in the language (e.g., as function arguments).
-            //
-            if(outCost)
-            {
-                *outCost = kConversionCost_None;
-            }
+                // For now, we treat coercion from an initializer list
+                // as having  no cost, so that all conversions from initializer
+                // lists are equally valid. This is fine given where initializer
+                // lists are allowed to appear now, but might need to be made
+                // more strict if we allow for initializer lists in more
+                // places in the language (e.g., as function arguments).
+                //
+                if (outCost)
+                {
+                    *outCost = kConversionCost_None;
+                }
 
-            return true;
+                return true;
+            }
         }
 
         // nullptr_t can be cast into any pointer type.
@@ -875,7 +924,11 @@ namespace Slang
                 *outCost = kConversionCost_NullPtrToPtr;
             }
             if (outToExpr)
-                *outToExpr = fromExpr;
+            {
+                auto* defaultExpr = getASTBuilder()->create<DefaultConstructExpr>();
+                defaultExpr->type = QualType(toType);
+                *outToExpr = defaultExpr;
+            }
             return true;
         }
         // none_t can be cast into any Optional<T> type.
@@ -894,6 +947,25 @@ namespace Slang
             }
             return true;
         }
+
+        // A enum type can be converted into its underlying tag type.
+        if (auto enumDecl = isEnumType(fromType))
+        {
+            Type* tagType = enumDecl->tagType;
+            if (tagType == toType)
+            {
+                if (outCost)
+                {
+                    *outCost = kConversionCost_RankPromotion;
+                }
+                if (outToExpr)
+                {
+                    *outToExpr = fromExpr;
+                }
+                return true;
+            }
+        }
+
         // matrix type with different layouts are convertible
         if (auto fromMatrixType = as<MatrixExpressionType>(fromType))
         {
@@ -932,16 +1004,36 @@ namespace Slang
                 // to pass a value of a derived `struct` type into methods that
                 // expect a value of its base type.
                 //
-                // TODO: vet this logic for correctness.
-                //
                 if (fromExpr && fromExpr->type.isLeftValue)
                 {
-                    (*outToExpr)->type.isLeftValue = true;
+                    // If the original type is a concrete type and toType is an interface type,
+                    // we need to wrap the original expression into a MakeExistential, and the
+                    // result of MakeExistential is not an l-value.
+                    bool toTypeIsInterface = isInterfaceType(toType);
+                    bool fromTypeIsInterface = isInterfaceType(fromType);
+                    if (!toTypeIsInterface || toTypeIsInterface == fromTypeIsInterface)
+                        (*outToExpr)->type.isLeftValue = true;
                 }
             }
             if (outCost)
                 *outCost = kConversionCost_CastToInterface;
             return true;
+        }
+        else if (auto fromIsToWitness = tryGetSubtypeWitness(toType, fromType))
+        {
+            // Is toType and fromType the same via some type equality witness?
+            // If so there is no need to do any conversion.
+            //
+            if (isTypeEqualityWitness(fromIsToWitness))
+            {
+                if (outToExpr)
+                {
+                    *outToExpr = createCastToSuperTypeExpr(toType, fromExpr, fromIsToWitness);
+                }
+                if (outCost)
+                    *outCost = 0;
+                return true;
+            }
         }
 
         // Disallow converting to a ParameterGroupType.
@@ -998,7 +1090,6 @@ namespace Slang
                 return false;
             if (as<RefType>(toType) && !fromExpr->type.isLeftValue)
                 return false;
-            
             ConversionCost subCost = kConversionCost_GetRef;
 
             MakeRefExpr* refExpr = nullptr;
@@ -1061,8 +1152,10 @@ namespace Slang
         OverloadResolveContext overloadContext;
         overloadContext.disallowNestedConversions = true;
         overloadContext.argCount = 1;
+        List<Expr*> args;
+        args.add(fromExpr);
         overloadContext.argTypes = &fromType.type;
-        overloadContext.args = &fromExpr;
+        overloadContext.args = &args;
         overloadContext.sourceScope = m_outerScope;
         overloadContext.originalExpr = nullptr;
         if(fromExpr)
@@ -1074,7 +1167,40 @@ namespace Slang
         overloadContext.baseExpr = nullptr;
         overloadContext.mode = OverloadResolveContext::Mode::JustTrying;
 
-        AddTypeOverloadCandidates(toType, overloadContext);
+        // Since the lookup and resolution of all possible implicit conversions
+        // can be very costly, we use a cache to store the checking results.
+        ImplicitCastMethodKey implicitCastKey = ImplicitCastMethodKey(fromType, toType, fromExpr);
+        ImplicitCastMethod* cachedMethod = getShared()->tryGetImplicitCastMethod(implicitCastKey);
+
+        if (cachedMethod)
+        {
+            if (cachedMethod->conversionFuncOverloadCandidate.status != OverloadCandidate::Status::Applicable)
+            {
+                return _failedCoercion(toType, outToExpr, fromExpr);
+            }
+            overloadContext.bestCandidateStorage = cachedMethod->conversionFuncOverloadCandidate;
+            overloadContext.bestCandidate = &overloadContext.bestCandidateStorage;
+            if (!outToExpr)
+            {
+                // If we are not requesting to create an expression, we can return early.
+                if (outCost)
+                    *outCost = cachedMethod->cost;
+                return true;
+            }
+            else
+            {
+                if (cachedMethod->isAmbiguous)
+                {
+                    overloadContext.bestCandidate = nullptr;
+                    overloadContext.bestCandidates.add(cachedMethod->conversionFuncOverloadCandidate);
+                }
+            }
+        }
+
+        if (!overloadContext.bestCandidate)
+        {
+            AddTypeOverloadCandidates(toType, overloadContext);
+        }
 
         // After all of the overload candidates have been added
         // to the context and processed, we need to see whether
@@ -1088,8 +1214,14 @@ namespace Slang
             // even applicable, because if not, then we shouldn't
             // consider the conversion as possible.
             //
-            if(overloadContext.bestCandidates[0].status != OverloadCandidate::Status::Applicable)
+            if (overloadContext.bestCandidates[0].status != OverloadCandidate::Status::Applicable)
+            {
+                if (!cachedMethod)
+                {
+                    getShared()->cacheImplicitCastMethod(implicitCastKey, ImplicitCastMethod{});
+                }
                 return _failedCoercion(toType, outToExpr, fromExpr);
+            }
 
             // If all of the candidates in `bestCandidates` are applicable,
             // then we have an ambiguity.
@@ -1098,13 +1230,16 @@ namespace Slang
             // all the conversions available.
             //
             ConversionCost bestCost = kConversionCost_Explicit;
+            ImplicitCastMethod method;
             for(auto candidate : overloadContext.bestCandidates)
             {
                 ConversionCost candidateCost = getImplicitConversionCostWithKnownArg(
                     candidate.item.declRef.getDecl(), toType, fromExpr);
-
-                if(candidateCost < bestCost)
+                if (candidateCost < bestCost)
+                {
+                    method.conversionFuncOverloadCandidate = candidate;
                     bestCost = candidateCost;
+                }
             }
 
             // Conceptually, we want to treat the conversion as
@@ -1118,9 +1253,15 @@ namespace Slang
                 *outToExpr = CreateErrorExpr(fromExpr);
             }
 
+            if (!cachedMethod)
+            {
+                method.isAmbiguous = true;
+                method.cost = bestCost;
+                getShared()->cacheImplicitCastMethod(implicitCastKey, method);
+            }
+
             if(outCost)
                 *outCost = bestCost;
-
             return true;
         }
         else if(overloadContext.bestCandidate)
@@ -1132,8 +1273,14 @@ namespace Slang
             // but it wasn't actually usable, so we will check for
             // that case first.
             //
-            if(overloadContext.bestCandidate->status != OverloadCandidate::Status::Applicable)
+            if (overloadContext.bestCandidate->status != OverloadCandidate::Status::Applicable)
+            {
+                if (!cachedMethod)
+                {
+                    getShared()->cacheImplicitCastMethod(implicitCastKey, ImplicitCastMethod{});
+                }
                 return _failedCoercion(toType, outToExpr, fromExpr);
+            }
 
             // Next, we need to look at the implicit conversion
             // cost associated with the initializer we are invoking.
@@ -1163,7 +1310,7 @@ namespace Slang
                     bool shouldEmitGeneralWarning = true;
                     if (isScalarIntegerType(toType))
                     {
-                        if (auto intVal = tryFoldIntegerConstantExpression(fromExpr, nullptr))
+                        if (auto intVal = tryFoldIntegerConstantExpression(fromExpr, ConstantFoldingKind::CompileTime, nullptr))
                         {
                             if (auto val = as<ConstantIntVal>(intVal))
                             {
@@ -1242,10 +1389,14 @@ namespace Slang
                 castExpr->arguments.clear();
                 castExpr->arguments.add(fromExpr);
             }
-
+            if (!cachedMethod)
+                getShared()->cacheImplicitCastMethod(implicitCastKey, ImplicitCastMethod{ *overloadContext.bestCandidate, cost });
             return true;
         }
-
+        if (!cachedMethod)
+        {
+            getShared()->cacheImplicitCastMethod(implicitCastKey, ImplicitCastMethod{});
+        }
         return _failedCoercion(toType, outToExpr, fromExpr);
     }
 
@@ -1385,13 +1536,22 @@ namespace Slang
     }
 
     bool SemanticsVisitor::canConvertImplicitly(
+        ConversionCost conversionCost)
+    {
+        // Is the conversion cheap enough to be done implicitly?
+        if (conversionCost >= kConversionCost_GeneralConversion)
+            return false;
+        return true;
+    }
+
+    bool SemanticsVisitor::canConvertImplicitly(
         Type* toType,
         QualType fromType)
     {
         auto conversionCost = getConversionCost(toType, fromType);
 
         // Is the conversion cheap enough to be done implicitly?
-        if (conversionCost >= kConversionCost_GeneralConversion)
+        if (canConvertImplicitly(conversionCost))
             return false;
 
         return true;

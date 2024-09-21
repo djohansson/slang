@@ -3,7 +3,7 @@
 
 #include "../../source/core/slang-string.h"
 
-#include "../../slang-com-helper.h"
+#include "slang-com-helper.h"
 
 namespace Slang
 {
@@ -11,10 +11,10 @@ namespace Slang
 enum class RenderApiType
 {
     Unknown = -1,
-    OpenGl = 0,
-    Vulkan,
+    Vulkan = 0,
     D3D12,
     D3D11,
+    Metal,
     CPU,
     CUDA,
     CountOf,
@@ -25,10 +25,10 @@ struct RenderApiFlag
 {
     enum Enum
     {
-        OpenGl = 1 << int(RenderApiType::OpenGl),
         Vulkan = 1 << int(RenderApiType::Vulkan),
         D3D12 = 1 << int(RenderApiType::D3D12),
         D3D11 = 1 << int(RenderApiType::D3D11),
+        Metal = 1 << int(RenderApiType::Metal),
         CPU   = 1 << int(RenderApiType::CPU),
         CUDA  = 1 << int(RenderApiType::CUDA),
         AllOf = (1 << int(RenderApiType::CountOf)) - 1                   ///< All bits set

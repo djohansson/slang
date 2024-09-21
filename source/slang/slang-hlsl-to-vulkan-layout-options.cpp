@@ -1,6 +1,7 @@
 // slang-hlsl-to-vulkan-layout-options.cpp
 
 #include "slang-hlsl-to-vulkan-layout-options.h"
+#include "slang-compiler-options.h"
 
 namespace Slang {
 
@@ -25,6 +26,36 @@ static NamesDescriptionValue s_vulkanShiftKinds[] =
 /* static */ConstArrayView<NamesDescriptionValue> HLSLToVulkanLayoutOptions::getKindInfos()
 {
     return makeConstArrayView(s_vulkanShiftKinds);
+}
+
+void HLSLToVulkanLayoutOptions::loadFromOptionSet(CompilerOptionSet& optionSet)
+{
+    auto allShift = optionSet.getArray(CompilerOptionName::VulkanBindShiftAll);
+    for (auto v : allShift)
+    {
+        setAllShift((Kind)v.intValue, v.intValue2);
+    }
+    auto shifts = optionSet.getArray(CompilerOptionName::VulkanBindShift);
+    for (auto v : shifts)
+    {
+        uint8_t kind;
+        int set;
+        int shift;
+        v.unpackInt3(kind, set, shift);
+        setShift((Kind)kind, set, shift);
+    }
+    m_emitSPIRVReflectionInfo = optionSet.getBoolOption(CompilerOptionName::VulkanEmitReflection);
+    if (auto bindGlobals = optionSet.options.tryGetValue(CompilerOptionName::VulkanBindGlobals))
+    {
+        if (bindGlobals->getCount())
+        {
+            m_globalsBinding.index = (*bindGlobals)[0].intValue;
+            m_globalsBinding.set = (*bindGlobals)[0].intValue2;
+        }
+    }
+    m_useGLLayout = optionSet.getBoolOption(CompilerOptionName::VulkanUseGLLayout);
+    m_useOriginalEntryPointName = optionSet.getBoolOption(CompilerOptionName::VulkanUseEntryPointName);
+
 }
 
 HLSLToVulkanLayoutOptions::HLSLToVulkanLayoutOptions()
@@ -91,7 +122,7 @@ Index HLSLToVulkanLayoutOptions::getShift(Kind kind, Index set) const
 
 bool HLSLToVulkanLayoutOptions::hasState() const
 {
-    return canInferBindings() || hasGlobalsBinding() || shouldInvertY() || getUseOriginalEntryPointName()
+    return canInferBindings() || hasGlobalsBinding() || getUseOriginalEntryPointName()
         || shouldUseGLLayout() || shouldEmitSPIRVReflectionInfo();
 }
 

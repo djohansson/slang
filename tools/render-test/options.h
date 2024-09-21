@@ -7,18 +7,18 @@
 #define SLANG_HANDLE_RESULT_FAIL(x) assert(!"failure")
 #endif
 
-#include "../../slang-com-helper.h"
+#include "slang-com-helper.h"
 #include "../../source/core/slang-writer.h"
 
 #include "../../source/core/slang-process-util.h"
 
 #include "../../source/compiler-core/slang-command-line-args.h"
 
-#include "../../slang-gfx.h"
+#include <slang-rhi.h>
 
 namespace renderer_test {
 
-using namespace gfx;
+using namespace rhi;
 
 struct Options
 {
@@ -53,9 +53,9 @@ struct Options
 	ShaderProgramType shaderType = ShaderProgramType::Graphics;
 
         /// The renderer type inferred from the target language type. Used if a rendererType is not explicitly set.
-    DeviceType targetLanguageDeviceType = DeviceType::Unknown;
+    DeviceType targetLanguageDeviceType = DeviceType::Default;
         /// The set render type
-    DeviceType deviceType = DeviceType::Unknown;
+    DeviceType deviceType = DeviceType::Default;
     InputLanguageID inputLanguageID = InputLanguageID::Slang;
     SlangSourceLanguage sourceLanguage = SLANG_SOURCE_LANGUAGE_UNKNOWN;
 
@@ -71,6 +71,8 @@ struct Options
 
     bool dontAddDefaultEntryPoints = false;
 
+    bool disableDebugInfo = false;
+
     bool allowGLSL = false;
 
     Slang::String entryPointName;
@@ -83,11 +85,7 @@ struct Options
 
     Slang::DownstreamArgs downstreamArgs;                    ///< Args to downstream tools. Here it's just slang
 
-#if defined(SLANG_CONFIG_DEFAULT_SPIRV_DIRECT)
     bool generateSPIRVDirectly = true;
-#else
-    bool generateSPIRVDirectly = false;
-#endif
 
     Options() { downstreamArgs.addName("slang"); }
 

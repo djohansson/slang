@@ -1,16 +1,14 @@
 // slang-support.h
 #pragma once
 
-#include "slang-gfx.h"
+#include <slang-rhi.h>
 
-#include <slang.h>
+#include "slang.h"
 
 #include "shader-input-layout.h"
 #include "options.h"
 
 namespace renderer_test {
-
-gfx::StageType translateStage(SlangStage slangStage);
 
 struct ShaderCompileRequest
 {
@@ -71,7 +69,7 @@ struct ShaderCompilerUtil
         }
 
         ComPtr<slang::IComponentType> slangProgram;
-        IShaderProgram::Desc desc = {};
+        ShaderProgramDesc desc = {};
 
             /// Compile request that owns the lifetime of compiled kernel code.
         ComPtr<SlangCompileRequest> m_requestForKernels = nullptr;
@@ -93,12 +91,12 @@ struct ShaderCompilerUtil
         Slang::String sourcePath;
     };
 
-    static SlangResult compileWithLayout(slang::ISession* session, const Options& options, const ShaderCompilerUtil::Input& input, OutputAndLayout& output);
+    static SlangResult compileWithLayout(slang::IGlobalSession* globalSession, const Options& options, const ShaderCompilerUtil::Input& input, OutputAndLayout& output);
 
     static SlangResult readSource(const Slang::String& inSourcePath, Slang::List<char>& outSourceText);
 
-    static SlangResult _compileProgramImpl(slang::ISession* session, const Options& options, const Input& input, const ShaderCompileRequest& request, Output& out);
-    static SlangResult compileProgram(slang::ISession* session, const Options& options, const Input& input, const ShaderCompileRequest& request, Output& out);
+    static SlangResult _compileProgramImpl(slang::IGlobalSession* globalSession, const Options& options, const Input& input, const ShaderCompileRequest& request, Output& out);
+    static SlangResult compileProgram(slang::IGlobalSession* globalSession, const Options& options, const Input& input, const ShaderCompileRequest& request, Output& out);
 };
 
 

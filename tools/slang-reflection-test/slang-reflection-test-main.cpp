@@ -5,8 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <slang.h>
-#include <slang-com-helper.h>
+#include "slang.h"
+#include "slang-com-helper.h"
 
 #include "../../source/core/slang-string-escape-util.h"
 #include "../../source/core/slang-char-util.h"
@@ -293,7 +293,7 @@ static void emitReflectionVarBindingInfoJSON(
     CASE(REGISTER_SPACE, registerSpace);
     CASE(SUB_ELEMENT_REGISTER_SPACE, subElementRegisterSpace);
     CASE(GENERIC, generic);
-
+    CASE(METAL_ARGUMENT_BUFFER_ELEMENT, metalArgumentBufferElement);
     #undef CASE
 
         default:
@@ -431,6 +431,8 @@ static void emitReflectionNameInfoJSON(
     writer.writeEscapedString(UnownedStringSlice(name));
 }
 
+static void emitUserAttributes(PrettyWriter& writer, slang::VariableReflection* var);
+
 static void emitReflectionModifierInfoJSON(
     PrettyWriter&               writer,
     slang::VariableReflection*  var)
@@ -440,6 +442,8 @@ static void emitReflectionModifierInfoJSON(
         writer.maybeComma();
         writer << "\"shared\": true";
     }
+
+    emitUserAttributes(writer, var);
 }
 
 static void emitUserAttributeJSON(PrettyWriter& writer, slang::UserAttribute* userAttribute)
@@ -822,6 +826,10 @@ static void emitReflectionTypeInfoJSON(
         writer << "\"kind\": \"Feedback\"";
         writer.maybeComma();
         emitReflectionNameInfoJSON(writer, type->getName());
+        break;
+    case slang::TypeReflection::Kind::DynamicResource:
+        writer.maybeComma();
+        writer << "\"kind\": \"DynamicResource\"";
         break;
     default:
         assert(!"unhandled case");
@@ -1442,6 +1450,6 @@ int main(
     
     SlangResult res = innerMain(stdWriters, session, argc, argv);
     spDestroySession(session);
-
+    slang::shutdown();
     return SLANG_FAILED(res) ? 1 : 0;
 }

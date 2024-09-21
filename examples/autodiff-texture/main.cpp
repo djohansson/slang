@@ -5,10 +5,12 @@
 #include "source/core/slang-basic.h"
 #include "tools/platform/vector-math.h"
 #include "tools/platform/window.h"
-#include <slang.h>
+#include "slang.h"
 
 using namespace gfx;
 using namespace Slang;
+
+static const ExampleResources resourceBase("autodiff-texture");
 
 struct Vertex
 {
@@ -45,7 +47,8 @@ struct AutoDiffTexture : public WindowedAppBase
         slangSession = device->getSlangSession();
 
         ComPtr<slang::IBlob> diagnosticsBlob;
-        slang::IModule* module = slangSession->loadModule(fileName, diagnosticsBlob.writeRef());
+        Slang::String path = resourceBase.resolveResource(fileName);
+        slang::IModule* module = slangSession->loadModule(path.getBuffer(), diagnosticsBlob.writeRef());
         diagnoseIfNeeded(diagnosticsBlob);
         if (!module)
             return SLANG_FAIL;
@@ -75,6 +78,11 @@ struct AutoDiffTexture : public WindowedAppBase
         diagnoseIfNeeded(diagnosticsBlob);
         SLANG_RETURN_ON_FAIL(result);
 
+        if (isTestMode())
+        {
+            printEntrypointHashes(componentTypes.getCount() - 1, 1, linkedProgram);
+        }
+
         gfx::IShaderProgram::Desc programDesc = {};
         programDesc.slangGlobalScope = linkedProgram;
         SLANG_RETURN_ON_FAIL(device->createProgram(programDesc, outProgram));
@@ -89,7 +97,8 @@ struct AutoDiffTexture : public WindowedAppBase
         slangSession = device->getSlangSession();
 
         ComPtr<slang::IBlob> diagnosticsBlob;
-        slang::IModule* module = slangSession->loadModule(fileName, diagnosticsBlob.writeRef());
+        Slang::String path = resourceBase.resolveResource(fileName);
+        slang::IModule* module = slangSession->loadModule(path.getBuffer(), diagnosticsBlob.writeRef());
         diagnoseIfNeeded(diagnosticsBlob);
         if (!module)
             return SLANG_FAIL;
@@ -109,6 +118,11 @@ struct AutoDiffTexture : public WindowedAppBase
             diagnosticsBlob.writeRef());
         diagnoseIfNeeded(diagnosticsBlob);
         SLANG_RETURN_ON_FAIL(result);
+
+        if (isTestMode())
+        {
+            printEntrypointHashes(componentTypes.getCount() - 1, 1, linkedProgram);
+        }
 
         gfx::IShaderProgram::Desc programDesc = {};
         programDesc.slangGlobalScope = linkedProgram;
@@ -246,7 +260,6 @@ struct AutoDiffTexture : public WindowedAppBase
     {
         IResourceView::Desc desc = {};
         desc.type = IResourceView::Type::UnorderedAccess;
-        desc.bufferElementSize = 0;
         return gDevice->createBufferView(buffer, nullptr, desc);
     }
     ComPtr<gfx::IResourceView> createUAV(ITextureResource* texture, int level)
@@ -263,18 +276,31 @@ struct AutoDiffTexture : public WindowedAppBase
         initializeBase("autodiff-texture", 1024, 768);
         srand(20421);
 
-        gWindow->events.keyPress = [this](platform::KeyEventArgs& e)
+        if (!isTestMode())
         {
-            if (e.keyChar == 'R' || e.keyChar == 'r')
-                resetLearntTexture = true;
-        };
+            gWindow->events.keyPress = [this](platform::KeyEventArgs& e)
+            {
+                if (e.keyChar == 'R' || e.keyChar == 'r')
+                    resetLearntTexture = true;
+            };
+        }
 
         kClearValue.color.floatValues[0] = 0.3f;
         kClearValue.color.floatValues[1] = 0.5f;
         kClearValue.color.floatValues[2] = 0.7f;
         kClearValue.color.floatValues[3] = 1.0f;
 
-        auto clientRect = gWindow->getClientRect();
+        platform::Rect clientRect{};
+        if (isTestMode())
+        {
+            clientRect.width = 1024;
+            clientRect.height = 768;
+        }
+        else
+        {
+            clientRect = getWindow()->getClientRect();
+        }
+
         windowWidth = clientRect.width;
         windowHeight = clientRect.height;
 
@@ -295,44 +321,45 @@ struct AutoDiffTexture : public WindowedAppBase
         {
             ComPtr<IShaderProgram> shaderProgram;
             SLANG_RETURN_ON_FAIL(
-                loadRenderProgram(gDevice, "train", "fragmentMain", shaderProgram.writeRef()));
+                loadRenderProgram(gDevice, "train.slang", "fragmentMain", shaderProgram.writeRef()));
             gRefPipelineState = createRenderPipelineState(inputLayout, shaderProgram);
         }
         {
             ComPtr<IShaderProgram> shaderProgram;
             SLANG_RETURN_ON_FAIL(
-                loadRenderProgram(gDevice, "train", "diffFragmentMain", shaderProgram.writeRef()));
+                loadRenderProgram(gDevice, "train.slang", "diffFragmentMain", shaderProgram.writeRef()));
             gIterPipelineState = createRenderPipelineState(inputLayout, shaderProgram);
         }
         {
             ComPtr<IShaderProgram> shaderProgram;
             SLANG_RETURN_ON_FAIL(
-                loadRenderProgram(gDevice, "draw-quad", "fragmentMain", shaderProgram.writeRef()));
+                loadRenderProgram(gDevice, "draw-quad.slang", "fragmentMain", shaderProgram.writeRef()));
             gDrawQuadPipelineState = createRenderPipelineState(inputLayout, shaderProgram);
         }
         {
             ComPtr<IShaderProgram> shaderProgram;
             SLANG_RETURN_ON_FAIL(
-                loadComputeProgram(gDevice, "reconstruct", shaderProgram.writeRef()));
+                loadComputeProgram(gDevice, "reconstruct.slang", shaderProgram.writeRef()));
             gReconstructPipelineState = createComputePipelineState(shaderProgram);
         }
         {
             ComPtr<IShaderProgram> shaderProgram;
-            SLANG_RETURN_ON_FAIL(loadComputeProgram(gDevice, "convert", shaderProgram.writeRef()));
+            SLANG_RETURN_ON_FAIL(loadComputeProgram(gDevice, "convert.slang", shaderProgram.writeRef()));
             gConvertPipelineState = createComputePipelineState(shaderProgram);
         }
         {
             ComPtr<IShaderProgram> shaderProgram;
-            SLANG_RETURN_ON_FAIL(loadComputeProgram(gDevice, "buildmip", shaderProgram.writeRef()));
+            SLANG_RETURN_ON_FAIL(loadComputeProgram(gDevice, "buildmip.slang", shaderProgram.writeRef()));
             gBuildMipPipelineState = createComputePipelineState(shaderProgram);
         }
         {
             ComPtr<IShaderProgram> shaderProgram;
-            SLANG_RETURN_ON_FAIL(loadComputeProgram(gDevice, "learnmip", shaderProgram.writeRef()));
+            SLANG_RETURN_ON_FAIL(loadComputeProgram(gDevice, "learnmip.slang", shaderProgram.writeRef()));
             gLearnMipPipelineState = createComputePipelineState(shaderProgram);
         }
 
-        gTexView = createTextureFromFile("checkerboard.jpg", textureWidth, textureHeight);
+        Slang::String imagePath = resourceBase.resolveResource("checkerboard.jpg");
+        gTexView = createTextureFromFile(imagePath.getBuffer(), textureWidth, textureHeight);
         initMipOffsets(textureWidth, textureHeight);
 
         gfx::IBufferResource::Desc bufferDesc = {};
@@ -615,7 +642,7 @@ struct AutoDiffTexture : public WindowedAppBase
             commandBuffer->close();
             gQueue->executeCommandBuffer(commandBuffer);
         }
-        
+
         // Draw currently learnt texture.
         {
             ComPtr<ICommandBuffer> commandBuffer =
@@ -631,7 +658,10 @@ struct AutoDiffTexture : public WindowedAppBase
             gQueue->executeCommandBuffer(commandBuffer);
         }
 
-        gSwapchain->present();
+        if (!isTestMode())
+        {
+            gSwapchain->present();
+        }
     }
 
     void drawTexturedQuad(IRenderCommandEncoder* renderEncoder, int x, int y, int w, int h, IResourceView* srv)

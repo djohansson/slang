@@ -2,7 +2,7 @@
 
 // Test that we can ingest hlsl mesh output syntax
 
-//TEST:CROSS_COMPILE:-target spirv -profile glsl_450+spirv_1_4 -entry main -stage mesh
+//TEST:CROSS_COMPILE:-target spirv -profile sm_6_5 -entry main -stage mesh
 
 const static float2 positions[3] = {
   float2(0.0, -0.5),
@@ -26,7 +26,7 @@ const static uint MAX_VERTS = 3;
 const static uint MAX_PRIMS = 1;
 
 // Test that we can convert the HLSL Syntax to the typed syntax
-void foo(uint tig, out Vertices<Vertex, MAX_VERTS> verts)
+void foo(uint tig, OutputVertices<Vertex, MAX_VERTS> verts)
 {
     if(tig < 3) {
         verts[tig] = {float4(positions[tig], 0, 1), colors[tig]};

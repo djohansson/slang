@@ -132,7 +132,8 @@ namespace Slang
 
     void emitQualifiedName(
         ManglingContext*    context,
-        DeclRef<Decl>       declRef);
+        DeclRef<Decl>       declRef,
+        bool includeModuleName);
 
     void emitSimpleIntVal(
         ManglingContext*    context,
@@ -211,7 +212,7 @@ namespace Slang
         }
         else if( auto declRefType = dynamicCast<DeclRefType>(type) )
         {
-            emitQualifiedName(context, declRefType->getDeclRef());
+            emitQualifiedName(context, declRefType->getDeclRef(), true);
         }
         else if (auto arrType = dynamicCast<ArrayExpressionType>(type))
         {
@@ -222,7 +223,7 @@ namespace Slang
         else if( auto thisType = dynamicCast<ThisType>(type) )
         {
             emitRaw(context, "t");
-            emitQualifiedName(context, thisType->getInterfaceDeclRef());
+            emitQualifiedName(context, thisType->getInterfaceDeclRef(), true);
         }
         else if (const auto errorType = dynamicCast<ErrorType>(type))
         {
@@ -258,6 +259,29 @@ namespace Slang
             emit(context, n);
             for (Index i = 0; i < n; ++i)
                 emitVal(context, modifiedType->getModifier(i));
+        }
+        else if (auto andType = as<AndType>(type))
+        {
+            emitRaw(context, "Ta");
+            emitType(context, andType->getLeft());
+            emitType(context, andType->getRight());
+        }
+        else if (auto expandType = as<ExpandType>(type))
+        {
+            emitRaw(context, "Tx");
+            emitType(context, expandType->getPatternType());
+        }
+        else if (auto eachType = as<EachType>(type))
+        {
+            emitRaw(context, "Te");
+            emitType(context, eachType->getElementType());
+        }
+        else if (auto typePack = as<ConcreteTypePack>(type))
+        {
+            emitRaw(context, "Tp");
+            emit(context, typePack->getTypeCount());
+            for (Index i = 0; i < typePack->getTypeCount(); i++)
+                emitType(context, typePack->getElementType(i));
         }
         else
         {
@@ -356,8 +380,32 @@ namespace Slang
 
     void emitQualifiedName(
         ManglingContext*    context,
-        DeclRef<Decl>       declRef)
+        DeclRef<Decl>       declRef,
+        bool includeModuleName)
     {
+        if (!includeModuleName)
+        {
+            if (as<ModuleDecl>(declRef))
+                return;
+        }
+        else
+        {
+            for (auto modifier : declRef.getDecl()->modifiers)
+            {
+                if (as<ExternModifier>(modifier) || as<HLSLExportModifier>(modifier))
+                {
+                    includeModuleName = false;
+                    break;
+                }
+            }
+        }
+
+        if (declRef.getDecl()->hasModifier<ExternCppModifier>())
+        {
+            emit(context, declRef.getDecl()->getName()->text);
+            return;
+        }
+
         auto parentDeclRef = declRef.getParent();
         if (as<FileDecl>(parentDeclRef))
             parentDeclRef = parentDeclRef.getParent();
@@ -365,7 +413,7 @@ namespace Slang
         auto parentGenericDeclRef = parentDeclRef.as<GenericDecl>();
         if( parentDeclRef )
         {
-            emitQualifiedName(context, parentDeclRef);
+            emitQualifiedName(context, parentDeclRef, includeModuleName);
         }
 
         // A generic declaration is kind of a pseudo-declaration
@@ -461,6 +509,10 @@ namespace Slang
                     {
                         genericParameterCount++;
                     }
+                    else if (mm.is<GenericTypePackParamDecl>())
+                    {
+                        genericParameterCount++;
+                    }
                     else
                     {
                     }
@@ -468,12 +520,16 @@ namespace Slang
 
                 emit(context, genericParameterCount);
 
-                OrderedDictionary<GenericTypeParamDecl*, List<Type*>> genericConstraints;
+                OrderedDictionary<GenericTypeParamDeclBase*, List<Type*>> genericConstraints;
                 for (auto mm : getMembers(context->astBuilder, parentGenericDeclRef))
                 {
                     if (auto genericTypeParamDecl = mm.as<GenericTypeParamDecl>())
                     {
                         emitRaw(context, "T");
+                    }
+                    if (auto genericTypePackParamDecl = mm.as<GenericTypePackParamDecl>())
+                    {
+                        emitRaw(context, "TP");
                     }
                     else if (auto genericValueParamDecl = mm.as<GenericValueParamDecl>())
                     {
@@ -490,7 +546,7 @@ namespace Slang
                     for (auto type : constraint.value)
                     {
                         emitRaw(context, "C");
-                        emitQualifiedName(context, makeDeclRef(constraint.key));
+                        emitQualifiedName(context, makeDeclRef(constraint.key), true);
                             emitType(context, type);
                     }
                 }
@@ -516,6 +572,33 @@ namespace Slang
 
             for(auto paramDeclRef : parameters)
             {
+                // parameter modifier makes big difference in the spirv code generation, for example
+                // "out"/"inout" parameter will be passed by pointer. Therefore, we need to
+                // distinguish them in the mangled name to avoid name collision.
+                ParameterDirection paramDirection = getParameterDirection(paramDeclRef.getDecl());
+                switch (paramDirection)
+                {
+                case kParameterDirection_Ref:
+                    emitRaw(context, "r_");
+                    break;
+                case kParameterDirection_ConstRef:
+                    emitRaw(context, "c_");
+                    break;
+                case kParameterDirection_Out:
+                    emitRaw(context, "o_");
+                    break;
+                case kParameterDirection_InOut:
+                    emitRaw(context, "io_");
+                    break;
+                case kParameterDirection_In:
+                    emitRaw(context, "i_");
+                    break;
+                default:
+                    StringBuilder errMsg;
+                    errMsg << "Unknown parameter direction: " << paramDirection;
+                    SLANG_ABORT_COMPILATION(errMsg.toString().begin());
+                    break;
+                }
                 emitType(context, getType(context->astBuilder, paramDeclRef));
             }
 
@@ -525,6 +608,48 @@ namespace Slang
             {
                 emitType(context, getResultType(context->astBuilder, callableDeclRef));
             }
+
+            // Include key modifiers in the mangled name so we never deduplicate
+            // things like a nonmutating method and a mutating method.
+            bool isMutating = false;
+            bool isRefThis = false;
+            bool isFwdDiff = false;
+            bool isBwdDiff = false;
+            bool isNoDiffThis = false;
+            for (auto modifier : callableDeclRef.getDecl()->modifiers)
+            {
+                if (as<MutatingAttribute>(modifier))
+                {
+                    isMutating = true;
+                }
+                else if (as<RefAttribute>(modifier))
+                {
+                    isRefThis = true;
+                }
+                else if (as<ForwardDifferentiableAttribute>(modifier))
+                {
+                    isFwdDiff = true;
+                }
+                else if (as<BackwardDifferentiableAttribute>(modifier))
+                {
+                    isBwdDiff = true;
+                }
+                else if (as<NoDiffThisAttribute>(modifier))
+                {
+                    isNoDiffThis = true;
+                }
+            }
+
+            if (isMutating)
+                emitRaw(context, "m");
+            if (isRefThis)
+                emitRaw(context, "r");
+            if (isFwdDiff)
+                emitRaw(context, "f");
+            if (isBwdDiff)
+                emitRaw(context, "b");
+            if (isNoDiffThis)
+                emitRaw(context, "n");
         }
     }
 
@@ -579,20 +704,29 @@ namespace Slang
 
             auto innerDecl = getInner(genericDecl);
 
-            emitQualifiedName(context, makeDeclRef(innerDecl));
+            emitQualifiedName(context, makeDeclRef(innerDecl), true);
             return;
         }
-        else if (as<ForwardDerivativeRequirementDecl>(decl))
+        else if (auto fwdReq = as<ForwardDerivativeRequirementDecl>(decl))
+        {
             emitRaw(context, "FwdReq_");
-        else if (as<BackwardDerivativeRequirementDecl>(decl))
+            emitQualifiedName(context, fwdReq->originalRequirementDecl, true);
+            return;
+        }
+        else if (auto bwdReq = as<BackwardDerivativeRequirementDecl>(decl))
+        {
             emitRaw(context, "BwdReq_");
+            emitQualifiedName(context, bwdReq->originalRequirementDecl, true);
+            return;
+        }
         else
         {
             // TODO: handle other cases
         }
 
         // Now we encode the qualified name of the decl.
-        emitQualifiedName(context, declRef);
+        
+        emitQualifiedName(context, declRef, true);
     }
 
     static String getMangledName(ASTBuilder* astBuilder, DeclRef<Decl> const& declRef)
@@ -625,8 +759,8 @@ namespace Slang
         SLANG_AST_BUILDER_RAII(astBuilder);
         ManglingContext context(astBuilder);
         emitRaw(&context, "_SW");
-        emitQualifiedName(&context, sub);
-        emitQualifiedName(&context, sup);
+        emitQualifiedName(&context, sub, true);
+        emitQualifiedName(&context, sup, true);
         return context.sb.produceString();
     }
 
@@ -643,7 +777,7 @@ namespace Slang
         //
         ManglingContext context(astBuilder);
         emitRaw(&context, "_SW");
-        emitQualifiedName(&context, sub);
+        emitQualifiedName(&context, sub, true);
         emitType(&context, sup);
         return context.sb.produceString();
     }

@@ -2,9 +2,34 @@
 #include "slang-ir-legalize-varying-params.h"
 
 #include "slang-ir-insts.h"
+#include "slang-ir-util.h"
+#include "slang-ir-clone.h"
+#include "slang-parameter-binding.h"
 
 namespace Slang
 {
+    // Convert semantic name (ignores case) into equivlent `SystemValueSemanticName`
+    SystemValueSemanticName convertSystemValueSemanticNameToEnum(String rawSemanticName)
+    {
+        auto semanticName = rawSemanticName.toLower();
+
+        SystemValueSemanticName systemValueSemanticName = SystemValueSemanticName::None;
+
+#define CASE(ID, NAME)                                          \
+            if(semanticName == String(#NAME).toLower())                 \
+            {                                                           \
+                systemValueSemanticName = SystemValueSemanticName::ID;  \
+            }                                                           \
+            else
+
+        SYSTEM_VALUE_SEMANTIC_NAMES(CASE)
+#undef CASE
+        {
+            systemValueSemanticName = SystemValueSemanticName::Unknown;
+            // no match
+        }
+        return systemValueSemanticName;
+    }
 
 // This pass implements logic to "legalize" the varying parameter
 // signature of an entry point.
@@ -50,36 +75,6 @@ namespace Slang
 //
 // * Slang allows for `inout` varying parameters, which need to desugar into
 //   distinct `in` and `out` parameters for targets like GLSL.
-
-
-#define SYSTEM_VALUE_SEMANTIC_NAMES(M)              \
-    M(DispatchThreadID,     SV_DispatchThreadID)    \
-    M(GroupID,              SV_GroupID)             \
-    M(GroupThreadID,        SV_GroupThreadID)       \
-    M(GroupThreadIndex,     SV_GroupIndex)          \
-    /* end */
-
-    /// A known system-value semantic name that can be applied to a parameter
-    ///
-enum class SystemValueSemanticName
-{
-    None = 0,
-
-    // TODO: Should this enumeration be responsible for differentiating
-    // cases where the same semantic name string is allowed in multiple stages,
-    // or as both input/output in a single stage, and those different uses
-    // might result in different meanings? The alternative is to always
-    // pass around the semantic name, stage, and direction together so
-    // that code can tell those special cases apart.
-
-#define CASE(ID, NAME) ID,
-SYSTEM_VALUE_SEMANTIC_NAMES(CASE)
-#undef CASE
-
-    // TODO: There are many more system-value semantic names that we
-    // can/should handle here, but for now I've restricted this list
-    // to those that are necessary for translating compute shaders.
-};
 
     /// A placeholder that represents the value of a legalized varying
     /// parameter, for the purposes of substituting it into IR code.
@@ -175,6 +170,118 @@ void assign(IRBuilder& builder, LegalizedVaryingVal const& dest, LegalizedVaryin
 void assign(IRBuilder& builder, LegalizedVaryingVal const& dest, IRInst* src)
 {
     assign(builder, dest, LegalizedVaryingVal::makeValue(src));
+}
+
+
+// Several of the derived calcluations rely on having
+// access to the "group extents" of a compute shader.
+// That information is expected to be present on
+// the entry point as a `[numthreads(...)]` attribute,
+// and we define a convenience routine for accessing
+// that information.
+
+IRInst* emitCalcGroupExtents(
+    IRBuilder& builder,
+    IRFunc* entryPoint,
+    IRVectorType* type)
+{
+    if (auto numThreadsDecor = entryPoint->findDecoration<IRNumThreadsDecoration>())
+    {
+        static const int kAxisCount = 3;
+        IRInst* groupExtentAlongAxis[kAxisCount] = {};
+
+        for (int axis = 0; axis < kAxisCount; axis++)
+        {
+            auto litValue = as<IRIntLit>(numThreadsDecor->getExtentAlongAxis(axis));
+            if (!litValue)
+                return nullptr;
+
+            groupExtentAlongAxis[axis] = builder.getIntValue(type->getElementType(), litValue->getValue());
+        }
+
+        return builder.emitMakeVector(type, kAxisCount, groupExtentAlongAxis);
+    }
+
+    // TODO: We may want to implement a backup option here,
+    // in case we ever want to support compute shaders with
+    // dynamic/flexible group size on targets that allow it.
+    //
+    SLANG_UNEXPECTED("Expected '[numthreads(...)]' attribute on compute entry point.");
+    UNREACHABLE_RETURN(nullptr);
+}
+
+// There are some cases of system-value inputs that can be derived
+// from other inputs; notably compute shaders support `SV_DispatchThreadID`
+// and `SV_GroupIndex` which can both be derived from the more primitive
+// `SV_GroupID` and `SV_GroupThreadID`, together with the extents
+// of the thread group (which are specified with `[numthreads(...)]`).
+//
+// As a utilty to target-specific subtypes, we define helpers for
+// calculating the value of these derived system values from the
+// more primitive ones.
+
+    /// Emit code to calculate `SV_DispatchThreadID`
+IRInst* emitCalcDispatchThreadID(
+    IRBuilder& builder,
+    IRType* type,
+    IRInst* groupID,
+    IRInst* groupThreadID,
+    IRInst* groupExtents)
+{
+    // The dispatch thread ID can be computed as:
+    //
+    //      dispatchThreadID = groupID*groupExtents + groupThreadID
+    //
+    // where `groupExtents` is the X,Y,Z extents of
+    // each thread group in threads (as given by
+    // `[numthreads(X,Y,Z)]`).
+
+    return builder.emitAdd(type,
+        builder.emitMul(type,
+            groupID,
+            groupExtents),
+        groupThreadID);
+}
+
+/// Emit code to calculate `SV_GroupIndex`
+IRInst* emitCalcGroupIndex(
+    IRBuilder& builder,
+    IRInst* groupThreadID,
+    IRInst* groupExtents)
+{
+    auto intType = builder.getIntType();
+    auto uintType = builder.getBasicType(BaseType::UInt);
+
+    // The group thread index can be computed as:
+    //
+    //      groupThreadIndex = groupThreadID.x
+    //                       + groupThreadID.y*groupExtents.x
+    //                       + groupThreadID.z*groupExtents.x*groupExtents.z;
+    //
+    // or equivalently (with one less multiply):
+    //
+    //      groupThreadIndex = (groupThreadID.z  * groupExtents.y
+    //                        + groupThreadID.y) * groupExtents.x
+    //                        + groupThreadID.x;
+    //
+
+    // `offset = groupThreadID.z`
+    auto zAxis = builder.getIntValue(intType, 2);
+    IRInst* offset = builder.emitElementExtract(uintType, groupThreadID, zAxis);
+
+    // `offset *= groupExtents.y`
+    // `offset += groupExtents.y`
+    auto yAxis = builder.getIntValue(intType, 1);
+    offset = builder.emitMul(uintType, offset, builder.emitElementExtract(uintType, groupExtents, yAxis));
+    offset = builder.emitAdd(uintType, offset, builder.emitElementExtract(uintType, groupThreadID, yAxis));
+
+    // `offset *= groupExtents.x`
+    // `offset += groupExtents.x`
+    auto xAxis = builder.getIntValue(intType, 0);
+    offset = builder.emitMul(uintType, offset, builder.emitElementExtract(uintType, groupExtents, xAxis));
+    offset = builder.emitAdd(uintType, offset, builder.emitElementExtract(uintType, groupThreadID, xAxis));
+
+    return offset;
 }
 
     /// Context for the IR pass that legalizing entry-point
@@ -823,23 +930,7 @@ protected:
             // avoid all the `String`s we crete and thren throw
             // away here.
             //
-            String semanticNameSpelling = semanticInst->getName();
-            auto semanticName = semanticNameSpelling.toLower();
-
-            SystemValueSemanticName systemValueSemanticName = SystemValueSemanticName::None;
-
-        #define CASE(ID, NAME)                                          \
-            if(semanticName == String(#NAME).toLower())                 \
-            {                                                           \
-                systemValueSemanticName = SystemValueSemanticName::ID;  \
-            }                                                           \
-            else
-
-            SYSTEM_VALUE_SEMANTIC_NAMES(CASE)
-        #undef CASE
-            {
-                // no match
-            }
+            auto systemValueSemanticName = convertSystemValueSemanticNameToEnum(String(semanticInst->getName()));
 
             if( systemValueSemanticName != SystemValueSemanticName::None )
             {
@@ -914,116 +1005,6 @@ protected:
         m_sink->diagnose(m_param, Diagnostics::unimplemented, "this target doesn't support this user-defined varying parameter");
 
         return LegalizedVaryingVal();
-    }
-
-    // There are some cases of system-value inputs that can be derived
-    // from other inputs; notably compute shaders support `SV_DispatchThreadID`
-    // and `SV_GroupIndex` which can both be derived from the more primitive
-    // `SV_GroupID` and `SV_GroupThreadID`, together with the extents
-    // of the thread group (which are specified with `[numthreads(...)]`).
-    //
-    // As a utilty to target-specific subtypes, we define helpers for
-    // calculating the value of these derived system values from the
-    // more primitive ones.
-
-        /// Emit code to calculate `SV_DispatchThreadID`
-    IRInst* emitCalcDispatchThreadID(
-        IRBuilder&  builder,
-        IRType*     type,
-        IRInst*     groupID,
-        IRInst*     groupThreadID,
-        IRInst*     groupExtents)
-    {
-        // The dispatch thread ID can be computed as:
-        //
-        //      dispatchThreadID = groupID*groupExtents + groupThreadID
-        //
-        // where `groupExtents` is the X,Y,Z extents of
-        // each thread group in threads (as given by
-        // `[numthreads(X,Y,Z)]`).
-
-        return builder.emitAdd(type,
-            builder.emitMul(type,
-                groupID,
-                groupExtents),
-            groupThreadID);
-    }
-
-        /// Emit code to calculate `SV_GroupIndex`
-    IRInst* emitCalcGroupThreadIndex(
-        IRBuilder&  builder,
-        IRInst*     groupThreadID,
-        IRInst*     groupExtents)
-    {
-        auto intType = builder.getIntType();
-        auto uintType = builder.getBasicType(BaseType::UInt);
-
-        // The group thread index can be computed as:
-        //
-        //      groupThreadIndex = groupThreadID.x
-        //                       + groupThreadID.y*groupExtents.x
-        //                       + groupThreadID.z*groupExtents.x*groupExtents.z;
-        //
-        // or equivalently (with one less multiply):
-        //
-        //      groupThreadIndex = (groupThreadID.z  * groupExtents.y
-        //                        + groupThreadID.y) * groupExtents.x
-        //                        + groupThreadID.x;
-        //
-
-        // `offset = groupThreadID.z`
-        auto zAxis = builder.getIntValue(intType, 2);
-        IRInst* offset = builder.emitElementExtract(uintType, groupThreadID, zAxis);
-
-        // `offset *= groupExtents.y`
-        // `offset += groupExtents.y`
-        auto yAxis = builder.getIntValue(intType, 1);
-        offset = builder.emitMul(uintType, offset, builder.emitElementExtract(uintType, groupExtents, yAxis));
-        offset = builder.emitAdd(uintType, offset, builder.emitElementExtract(uintType, groupThreadID, yAxis));
-
-        // `offset *= groupExtents.x`
-        // `offset += groupExtents.x`
-        auto xAxis = builder.getIntValue(intType, 0);
-        offset = builder.emitMul(uintType, offset, builder.emitElementExtract(uintType, groupExtents, xAxis));
-        offset = builder.emitAdd(uintType, offset, builder.emitElementExtract(uintType, groupThreadID, xAxis));
-
-        return offset;
-    }
-
-    // Several of the derived calcluations rely on having
-    // access to the "group extents" of a compute shader.
-    // That information is expected to be present on
-    // the entry point as a `[numthreads(...)]` attribute,
-    // and we define a convenience routine for accessing
-    // that information.
-
-    IRInst* emitCalcGroupExtents(
-        IRBuilder&      builder,
-        IRVectorType*   type)
-    {
-        if(auto numThreadsDecor = m_entryPointFunc->findDecoration<IRNumThreadsDecoration>())
-        {
-            static const int kAxisCount = 3;
-            IRInst* groupExtentAlongAxis[kAxisCount] = {};
-
-            for( int axis = 0; axis < kAxisCount; axis++ )
-            {
-                auto litValue = as<IRIntLit>(numThreadsDecor->getExtentAlongAxis(axis));
-                if(!litValue)
-                    return nullptr;
-
-                groupExtentAlongAxis[axis] = builder.getIntValue(type->getElementType(), litValue->getValue());
-            }
-
-            return builder.emitMakeVector(type, kAxisCount, groupExtentAlongAxis);
-        }
-
-        // TODO: We may want to implement a backup option here,
-        // in case we ever want to support compute shaders with
-        // dynamic/flexible group size on targets that allow it.
-        //
-        SLANG_UNEXPECTED("Expected '[numthreads(...)]' attribute on compute entry point.");
-        UNREACHABLE_RETURN(nullptr);
     }
 };
 
@@ -1221,7 +1202,7 @@ struct CUDAEntryPointVaryingParamLegalizeContext : EntryPointVaryingParamLegaliz
             threadIdxGlobalParam,
             blockDimGlobalParam);
 
-        groupThreadIndex = emitCalcGroupThreadIndex(
+        groupThreadIndex = emitCalcGroupIndex(
             builder,
             threadIdxGlobalParam,
             blockDimGlobalParam);
@@ -1252,7 +1233,7 @@ struct CUDAEntryPointVaryingParamLegalizeContext : EntryPointVaryingParamLegaliz
         {
         case SystemValueSemanticName::GroupID:          return LegalizedVaryingVal::makeValue(blockIdxGlobalParam);
         case SystemValueSemanticName::GroupThreadID:    return LegalizedVaryingVal::makeValue(threadIdxGlobalParam);
-        case SystemValueSemanticName::GroupThreadIndex: return LegalizedVaryingVal::makeValue(groupThreadIndex);
+        case SystemValueSemanticName::GroupIndex: return LegalizedVaryingVal::makeValue(groupThreadIndex);
         case SystemValueSemanticName::DispatchThreadID: return LegalizedVaryingVal::makeValue(dispatchThreadID);
         default:
             return diagnoseUnsupportedSystemVal(info);
@@ -1391,11 +1372,11 @@ struct CPUEntryPointVaryingParamLegalizeContext : EntryPointVaryingParamLegalize
         // CPU target, we'd need to change it so that the thread-group size can
         // be passed in as part of `ComputeVaryingThreadInput`.
         //
-        groupExtents = emitCalcGroupExtents(builder, uint3Type);
+        groupExtents = emitCalcGroupExtents(builder, m_entryPointFunc, uint3Type);
 
         dispatchThreadID = emitCalcDispatchThreadID(builder, uint3Type, groupID, groupThreadID, groupExtents);
 
-        groupThreadIndex = emitCalcGroupThreadIndex(builder, groupThreadID, groupExtents);
+        groupThreadIndex = emitCalcGroupIndex(builder, groupThreadID, groupExtents);
     }
 
     LegalizedVaryingVal createLegalSystemVaryingValImpl(VaryingParamInfo const& info) SLANG_OVERRIDE
@@ -1412,7 +1393,7 @@ struct CPUEntryPointVaryingParamLegalizeContext : EntryPointVaryingParamLegalize
         {
         case SystemValueSemanticName::GroupID:          return LegalizedVaryingVal::makeValue(groupID);
         case SystemValueSemanticName::GroupThreadID:    return LegalizedVaryingVal::makeValue(groupThreadID);
-        case SystemValueSemanticName::GroupThreadIndex: return LegalizedVaryingVal::makeValue(groupThreadIndex);
+        case SystemValueSemanticName::GroupIndex: return LegalizedVaryingVal::makeValue(groupThreadIndex);
         case SystemValueSemanticName::DispatchThreadID: return LegalizedVaryingVal::makeValue(dispatchThreadID);
 
         default:

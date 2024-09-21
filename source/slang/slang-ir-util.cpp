@@ -16,6 +16,20 @@ bool isPointerOfType(IRInst* type, IROp opCode)
     return false;
 }
 
+IRType* getVectorElementType(IRType* type)
+{
+    if (auto vectorType = as<IRVectorType>(type))
+        return vectorType->getElementType();
+    return type;
+}
+
+IRType* getMatrixElementType(IRType* type)
+{
+    if (auto matrixType = as<IRMatrixType>(type))
+        return matrixType->getElementType();
+    return type;
+}
+
 Dictionary<IRInst*, IRInst*> buildInterfaceRequirementDict(IRInterfaceType* interfaceType)
 {
     Dictionary<IRInst*, IRInst*> result;
@@ -181,6 +195,7 @@ bool isValueType(IRInst* dataType)
     case kIROp_ArrayType:
     case kIROp_FuncType:
     case kIROp_RaytracingAccelerationStructureType:
+    case kIROp_GLSLAtomicUintType:
         return true;
     default:
         // Read-only resource handles are considered as Value type.
@@ -194,6 +209,59 @@ bool isValueType(IRInst* dataType)
             return true;
         return false;
     }
+}
+
+bool isSimpleDataType(IRType* type)
+{
+    type = (IRType*)unwrapAttributedType(type);
+    if (as<IRBasicType>(type))
+        return true;
+    switch (type->getOp())
+    {
+    case kIROp_StructType:
+    {
+        auto structType = as<IRStructType>(type);
+        for (auto field : structType->getFields())
+        {
+            if (!isSimpleDataType(field->getFieldType()))
+                return false;
+        }
+        return true;
+        break;
+    }
+    case kIROp_Param:
+    case kIROp_VectorType:
+    case kIROp_MatrixType:
+    case kIROp_InterfaceType:
+    case kIROp_AnyValueType:
+    case kIROp_PtrType:
+        return true;
+    case kIROp_ArrayType:
+    case kIROp_UnsizedArrayType:
+        return isSimpleDataType((IRType*)type->getOperand(0));
+    default:
+        return false;
+    }
+}
+
+bool isSimpleHLSLDataType(IRInst* inst)
+{
+    // TODO: Add criteria
+    // https://github.com/shader-slang/slang/issues/4792
+    SLANG_UNUSED(inst);
+    return true;
+}
+
+SourceLoc findFirstUseLoc(IRInst* inst)
+{
+    for (auto use = inst->firstUse; use; use = use->nextUse)
+    {
+        if (use->getUser()->sourceLoc.isValid())
+        {
+            return use->getUser()->sourceLoc;
+        }
+    }
+    return inst->sourceLoc;
 }
 
 IRInst* hoistValueFromGeneric(IRBuilder& inBuilder, IRInst* value, IRInst*& outSpecializedVal, bool replaceExistingValue)
@@ -266,12 +334,38 @@ String dumpIRToString(IRInst* root, IRDumpOptions options)
     return sb.toString();
 }
 
-void copyNameHintDecoration(IRInst* dest, IRInst* src)
+void copyNameHintAndDebugDecorations(IRInst* dest, IRInst* src)
 {
-    auto decor = src->findDecoration<IRNameHintDecoration>();
-    if (decor)
+    IRDecoration* nameHintDecoration = nullptr;
+    IRDecoration* linkageDecoration = nullptr;
+    IRDecoration* debugLocationDecoration = nullptr;
+    for (auto decor = src->getFirstDecoration(); decor; decor = decor->getNextDecoration())
     {
-        cloneDecoration(decor, dest);
+        switch (decor->getOp())
+        {
+        case kIROp_NameHintDecoration:
+            nameHintDecoration = decor;
+            break;
+        case kIROp_ImportDecoration:
+        case kIROp_ExportDecoration:
+            linkageDecoration = decor;
+            break;
+        case kIROp_DebugLocationDecoration:
+            debugLocationDecoration = decor;
+            break;
+        }
+    }
+    if (nameHintDecoration)
+    {
+        cloneDecoration(nameHintDecoration, dest);
+    }
+    if (linkageDecoration)
+    {
+        cloneDecoration(linkageDecoration, dest);
+    }
+    if (debugLocationDecoration)
+    {
+        cloneDecoration(debugLocationDecoration, dest);
     }
 }
 
@@ -339,6 +433,14 @@ void getTypeNameHint(StringBuilder& sb, IRInst* type)
         getTypeNameHint(sb, type->getOperand(0));
         sb << ">";
         break;
+    case kIROp_SubpassInputType:
+        {
+            auto textureType = as<IRSubpassInputType>(type);
+            sb <<"SubpassInput";
+            if(textureType->isMultisample())
+                sb << "MS";
+            break;
+        }
     case kIROp_TextureType:
     case kIROp_GLSLImageType:
         {
@@ -448,6 +550,9 @@ void getTypeNameHint(StringBuilder& sb, IRInst* type)
     case kIROp_HLSLRasterizerOrderedByteAddressBufferType:
         sb << "RasterizerOrderedByteAddressBuffer";
         break;
+    case kIROp_GLSLAtomicUintType:
+        sb << "AtomicCounter";
+        break;
     case kIROp_RaytracingAccelerationStructureType:
         sb << "RayTracingAccelerationStructure";
         break;
@@ -520,14 +625,20 @@ void getTypeNameHint(StringBuilder& sb, IRInst* type)
         getTypeNameHint(sb, as<IRRateQualifiedType>(type)->getValueType());
         break;
     case kIROp_VectorType:
+        sb << "vector<";
         getTypeNameHint(sb, type->getOperand(0));
+        sb << ",";
         getTypeNameHint(sb, as<IRVectorType>(type)->getElementCount());
+        sb << ">";
         break;
     case kIROp_MatrixType:
+        sb << "matrix<";
         getTypeNameHint(sb, type->getOperand(0));
+        sb << ",";
         getTypeNameHint(sb, as<IRMatrixType>(type)->getRowCount());
-        sb << "x";
+        sb << ",";
         getTypeNameHint(sb, as<IRMatrixType>(type)->getColumnCount());
+        sb << ">";
         break;
     case kIROp_IntLit:
         sb << as<IRIntLit>(type)->getValue();
@@ -554,6 +665,30 @@ IRInst* getRootAddr(IRInst* addr)
         }
         break;
     }
+    return addr;
+}
+
+IRInst* getRootAddr(IRInst* addr, List<IRInst*>& outAccessChain, List<IRInst*>* outTypes)
+{
+    for (;;)
+    {
+        switch (addr->getOp())
+        {
+        case kIROp_GetElementPtr:
+        case kIROp_FieldAddress:
+            outAccessChain.add(addr->getOperand(1));
+            if (outTypes)
+                outTypes->add(addr->getFullType());
+            addr = addr->getOperand(0);
+            continue;
+        default:
+            break;
+        }
+        break;
+    }
+    outAccessChain.reverse();
+    if (outTypes)
+        outTypes->reverse();
     return addr;
 }
 
@@ -607,6 +742,7 @@ bool isPtrLikeOrHandleType(IRInst* type)
     case kIROp_PtrType:
     case kIROp_RefType:
     case kIROp_ConstRefType:
+    case kIROp_GLSLShaderStorageBufferType:
         return true;
     }
     return false;
@@ -756,18 +892,21 @@ IRInst* emitLoopBlocks(IRBuilder* builder, IRInst* initVal, IRInst* finalVal, IR
     IRBuilder loopBuilder = *builder;
     auto loopHeadBlock = loopBuilder.emitBlock();
     loopBodyBlock = loopBuilder.emitBlock();
+    auto ifBreakBlock = loopBuilder.emitBlock();
     loopBreakBlock = loopBuilder.emitBlock();
     auto loopContinueBlock = loopBuilder.emitBlock();
     builder->emitLoop(loopHeadBlock, loopBreakBlock, loopHeadBlock, 1, &initVal);
     loopBuilder.setInsertInto(loopHeadBlock);
     auto loopParam = loopBuilder.emitParam(initVal->getFullType());
     auto cmpResult = loopBuilder.emitLess(loopParam, finalVal);
-    loopBuilder.emitIfElse(cmpResult, loopBodyBlock, loopBreakBlock, loopBreakBlock);
+    loopBuilder.emitIfElse(cmpResult, loopBodyBlock, ifBreakBlock, ifBreakBlock);
     loopBuilder.setInsertInto(loopBodyBlock);
     loopBuilder.emitBranch(loopContinueBlock);
     loopBuilder.setInsertInto(loopContinueBlock);
     auto newParam = loopBuilder.emitAdd(loopParam->getFullType(), loopParam, loopBuilder.getIntValue(loopBuilder.getIntType(), 1));
     loopBuilder.emitBranch(loopHeadBlock, 1, &newParam);
+    loopBuilder.setInsertInto(ifBreakBlock);
+    loopBuilder.emitBranch(loopBreakBlock);
     return loopParam;
 }
 
@@ -953,11 +1092,6 @@ bool isPureFunctionalCall(IRCall* call, SideEffectAnalysisOptions options)
 
 bool isSideEffectFreeFunctionalCall(IRCall* call, SideEffectAnalysisOptions options)
 {
-    // If the call has been marked as no-side-effect, we
-    // will treat it so, by-passing all other checks.
-    if (call->findDecoration<IRNoSideEffectDecoration>())
-        return false;
-
     if (!doesCalleeHaveSideEffect(call->getCallee()))
     {
         return areCallArgumentsSideEffectFree(call, options);
@@ -1010,7 +1144,9 @@ IRInst* getVulkanPayloadLocation(IRInst* payloadGlobalVar)
         switch (decor->getOp())
         {
         case kIROp_VulkanRayPayloadDecoration:
+        case kIROp_VulkanRayPayloadInDecoration:
         case kIROp_VulkanCallablePayloadDecoration:
+        case kIROp_VulkanCallablePayloadInDecoration:
         case kIROp_VulkanHitObjectAttributesDecoration:
             return decor->getOperand(0);
         default:
@@ -1028,6 +1164,26 @@ IRInst* getInstInBlock(IRInst* inst)
         return inst;
 
     return getInstInBlock(inst->getParent());
+}
+
+ShortList<IRInst*> getPhiArgs(IRInst* phiParam)
+{
+    ShortList<IRInst*> result;
+    auto block = cast<IRBlock>(phiParam->getParent());
+    UInt paramIndex = 0;
+    for (auto p = block->getFirstParam(); p; p = p->getNextParam())
+    {
+        if (p == phiParam)
+            break;
+        paramIndex++;
+    }
+    for (auto predBlock : block->getPredecessors())
+    {
+        auto termInst = as<IRUnconditionalBranch>(predBlock->getTerminator());
+        SLANG_ASSERT(paramIndex < termInst->getArgCount());
+        result.add(termInst->getArg(paramIndex));
+    }
+    return result;
 }
 
 void removePhiArgs(IRInst* phiParam)
@@ -1073,6 +1229,11 @@ bool isGlobalOrUnknownMutableAddress(IRGlobalValueWithCode* parentFunc, IRInst* 
 
     if (root)
     {
+        if (as<IRGLSLShaderStorageBufferType>(root->getDataType()))
+        {
+            // A storage buffer is mutable, so we need to treat it as a mutable address.
+            return true;
+        }
         // If this is a global readonly resource, it is not a mutable address.
         if (as<IRParameterGroupType>(root->getDataType()))
         {
@@ -1269,11 +1430,15 @@ HashSet<IRBlock*> getParentBreakBlockSet(IRDominatorTree* dom, IRBlock* block)
         currBlock = dom->getImmediateDominator(currBlock))
     {
         if (auto loopInst = as<IRLoop>(currBlock->getTerminator()))
+        {
             if (!dom->dominates(loopInst->getBreakBlock(), block))
                 parentBreakBlocksSet.add(loopInst->getBreakBlock());
+        }
         else if (auto switchInst = as<IRSwitch>(currBlock->getTerminator()))
+        {
             if (!dom->dominates(switchInst->getBreakLabel(), block))
                 parentBreakBlocksSet.add(switchInst->getBreakLabel());
+        }
     }
 
     return parentBreakBlocksSet;
@@ -1401,6 +1566,41 @@ void hoistInstOutOfASMBlocks(IRBlock* block)
     }
 }
 
+IRType* getSPIRVSampledElementType(IRInst* sampledType)
+{
+    auto sampledElementType = getVectorElementType((IRType*)sampledType);
+    
+    IRBuilder builder(sampledType);
+    switch (sampledElementType->getOp())
+    {
+    case kIROp_HalfType:
+        sampledElementType = builder.getBasicType(BaseType::Float);
+        break;
+    case kIROp_UInt16Type:
+    case kIROp_UInt8Type:
+    case kIROp_CharType:
+        sampledElementType = builder.getBasicType(BaseType::UInt);
+        break;
+    case kIROp_Int8Type:
+    case kIROp_Int16Type:
+        sampledElementType = builder.getBasicType(BaseType::Int);
+        break;
+    default:
+        break;
+    }
+    return sampledElementType;
+}
+
+IRType* replaceVectorElementType(IRType* originalVectorType, IRType* t)
+{
+    if (auto orignalVectorType = as<IRVectorType>(originalVectorType))
+    {
+        IRBuilder builder(originalVectorType);
+        return builder.getVectorType(t, orignalVectorType->getElementCount());
+    }
+    return t;
+}
+
 IRParam* getParamAt(IRBlock* block, UIndex ii)
 {
     UIndex index = 0;
@@ -1507,6 +1707,7 @@ struct GenericChildrenMigrationContextImpl
                 case kIROp_ClassType:
                 case kIROp_Func:
                 case kIROp_Generic:
+                case kIROp_Expand:
                     return false;
                 default:
                     break;
@@ -1579,5 +1780,54 @@ IRType* dropNormAttributes(IRType* const t)
     return t;
 }
 
+void verifyComputeDerivativeGroupModifiers(
+    DiagnosticSink* sink,
+    SourceLoc errorLoc,
+    bool quadAttr,
+    bool linearAttr,
+    IRNumThreadsDecoration* numThreadsDecor)
+{
+    if (!numThreadsDecor)
+        return;
+
+    if (quadAttr && linearAttr)
+    {
+        sink->diagnose(errorLoc, Diagnostics::onlyOneOfDerivativeGroupLinearOrQuadCanBeSet);
+    }
+
+    IRIntegerValue x = 1;
+    IRIntegerValue y = 1;
+    IRIntegerValue z = 1;
+    if (numThreadsDecor->getX())
+        x = numThreadsDecor->getX()->getValue();
+    if (numThreadsDecor->getY())
+        y = numThreadsDecor->getY()->getValue();
+    if (numThreadsDecor->getZ())
+        z = numThreadsDecor->getZ()->getValue();
+
+    if (quadAttr)
+    {
+        if (x % 2 != 0 || y % 2 != 0)
+            sink->diagnose(errorLoc, Diagnostics::derivativeGroupQuadMustBeMultiple2ForXYThreads);
+    }
+    else if (linearAttr)
+    {
+        if ((x * y * z) % 4 != 0)
+            sink->diagnose(errorLoc, Diagnostics::derivativeGroupLinearMustBeMultiple4ForTotalThreadCount);
+    }
+}
+
+int getIRVectorElementSize(IRType* type)
+{
+    if (type->getOp() != kIROp_VectorType)
+        return 1;
+    return (int)(as<IRIntLit>(as<IRVectorType>(type)->getElementCount())->value.intVal);
+}
+IRType* getIRVectorBaseType(IRType* type)
+{
+    if (type->getOp() != kIROp_VectorType)
+        return type;
+    return as<IRVectorType>(type)->getElementType();
+}
 
 }

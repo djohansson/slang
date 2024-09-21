@@ -2,16 +2,18 @@
 
 // Test that a simple mesh shader compiles
 
-//TEST:CROSS_COMPILE(filecheck=SPIRV):-target spirv-assembly -entry main -stage mesh -profile glsl_450+spirv_1_4
-//TEST:CROSS_COMPILE(filecheck=DXIL):-target dxil-assembly  -entry main -stage mesh -profile sm_6_6
+//TEST:SIMPLE(filecheck=SPIRV):-target spirv-assembly -entry main -stage mesh -profile glsl_450+spirv_1_4
+//TEST:SIMPLE(filecheck=DXIL):-target dxil-assembly  -entry main -stage mesh -profile sm_6_6
 
 // DXIL: call void @dx.op.setMeshOutputCounts
 // DXIL: call void @dx.op.storeVertexOutput.f32
 // DXIL: call void @dx.op.emitIndices
 // SPIRV: OpEntryPoint MeshEXT %main
-// SPIRV: OpExecutionMode %main OutputVertices 3
-// SPIRV: OpExecutionMode %main OutputPrimitivesNV 1
-// SPIRV: OpExecutionMode %main OutputTrianglesNV
+
+// SPIRV-DAG: OpExecutionMode %main OutputVertices 3
+// SPIRV-DAG: OpExecutionMode %main OutputPrimitives{{NV|EXT}} 1
+// SPIRV-DAG: OpExecutionMode %main OutputTriangles{{NV|EXT}}
+
 // SPIRV: OpSetMeshOutputsEXT
 
 const static float2 positions[3] = {
@@ -39,8 +41,8 @@ const static uint MAX_PRIMS = 1;
 [numthreads(3, 1, 1)]
 void main(
     in uint tig : SV_GroupIndex,
-    out Vertices<Vertex, MAX_VERTS> verts,
-    out Indices<uint3, MAX_PRIMS> triangles
+    OutputVertices<Vertex, MAX_VERTS> verts,
+    OutputIndices<uint3, MAX_PRIMS> triangles
     )
 {
     const uint numVertices = 3;
