@@ -595,6 +595,7 @@ if(SLANG_ENABLE_TESTS)
         EXCLUDE_FROM_ALL
         LINK_WITH_PRIVATE compiler-core
         INCLUDE_FROM_PRIVATE slang
+        INCLUDE_DIRECTORIES_PRIVATE include
         FOLDER test
     )
 
