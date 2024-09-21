@@ -613,6 +613,8 @@ if(SLANG_ENABLE_TESTS)
             slang
             ${CMAKE_DL_LIBS}
             Threads::Threads
+        INCLUDE_FROM_PRIVATE slang
+        INCLUDE_DIRECTORIES_PRIVATE include
         REQUIRES
             # Shared libraries dlopened by slang-test
             slang-reflection-test
