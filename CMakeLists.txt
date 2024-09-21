@@ -214,7 +214,7 @@ slang_add_target(
     STATIC
     EXCLUDE_FROM_ALL
     USE_EXTRA_WARNINGS
-    LINK_WITH_PRIVATE miniz lz4 Threads::Threads ${CMAKE_DL_LIBS}
+    LINK_WITH_PRIVATE miniz lz4$<$<CONFIG:Debug>:d> Threads::Threads ${CMAKE_DL_LIBS}
     INCLUDE_DIRECTORIES_PUBLIC source include
 )
 
@@ -225,7 +225,7 @@ if(SLANG_ENABLE_SLANGRT)
         # This compiles 'core' again with the SLANG_RT_DYNAMIC_EXPORT macro defined
         EXTRA_SOURCE_DIRS source/core
         USE_EXTRA_WARNINGS
-        LINK_WITH_PRIVATE miniz lz4 Threads::Threads ${CMAKE_DL_LIBS}
+        LINK_WITH_PRIVATE miniz lz4$<$<CONFIG:Debug>:d> Threads::Threads ${CMAKE_DL_LIBS}
         EXPORT_MACRO_PREFIX SLANG_RT
         INCLUDE_DIRECTORIES_PUBLIC include
         INSTALL
