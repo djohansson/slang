@@ -1,6 +1,8 @@
 // slang-glslang.cpp
 #include "slang-glslang.h"
 
+#include <slang.h>
+
 
 #include "glslang/Public/ResourceLimits.h"
 #include "glslang/Include/Worklist.h"
@@ -10,8 +12,6 @@
 #include "glslang/SPIRV/GLSL.std.450.h"
 #include "glslang/SPIRV/doc.h"
 #include "glslang/SPIRV/disassemble.h"
-
-#include "../../slang.h"
 
 #include "spirv-tools/optimizer.hpp"
 #include "spirv-tools/libspirv.h"
