@@ -528,10 +528,6 @@ if(SLANG_ENABLE_GFX)
             metal-cpp
             $<$<BOOL:${SLANG_ENABLE_XLIB}>:X11::X11>
             $<$<BOOL:${SLANG_ENABLE_CUDA}>:CUDA::cuda_driver>
-            $<$<PLATFORM_ID:Darwin>:-framework Foundation>
-            $<$<PLATFORM_ID:Darwin>:-framework Cocoa>
-            $<$<PLATFORM_ID:Darwin>:-framework QuartzCore>
-            $<$<PLATFORM_ID:Darwin>:-framework Metal>
         LINK_WITH_FRAMEWORK
             Foundation
             Cocoa
