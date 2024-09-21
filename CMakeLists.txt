@@ -585,16 +585,16 @@ if(SLANG_ENABLE_TESTS)
         EXECUTABLE
         EXCLUDE_FROM_ALL
         LINK_WITH_PRIVATE
-        compiler-core
-        slang
+            compiler-core
+            slang
         FOLDER test
     )
     slang_add_target(
         tools/test-process
         EXECUTABLE
         EXCLUDE_FROM_ALL
-        LINK_WITH_PRIVATE
-        compiler-core
+        LINK_WITH_PRIVATE compiler-core
+        INCLUDE_FROM_PRIVATE slang
         FOLDER test
     )
 
@@ -603,10 +603,10 @@ if(SLANG_ENABLE_TESTS)
         EXECUTABLE
         USE_FEWER_WARNINGS
         LINK_WITH_PRIVATE
-        compiler-core
-        slang
-        ${CMAKE_DL_LIBS}
-        Threads::Threads
+            compiler-core
+            slang
+            ${CMAKE_DL_LIBS}
+            Threads::Threads
         REQUIRES
             # Shared libraries dlopened by slang-test
             slang-reflection-test
