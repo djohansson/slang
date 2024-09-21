@@ -1,5 +1,5 @@
 // metal-api.h
 #pragma once
 
-#include <Metal/Metal.hpp>
-#include <QuartzCore/QuartzCore.hpp>
+#include <Metal/Metal.h>
+#include <QuartzCore/QuartzCore.h>
