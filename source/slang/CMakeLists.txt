@@ -189,7 +189,7 @@ add_custom_command(
     COMMAND
         ${CMAKE_COMMAND} -E make_directory ${SLANG_LOOKUP_GENERATOR_OUTPUT_DIR}
     COMMAND
-        slang-spirv-embed-generator
+        ${CMAKE_BINARY_DIR}/generators/$<CONFIG>/${runtime_subdir}/slang-spirv-embed-generator
         ${SLANG_SPIRV_CORE_SOURCE_JSON}
         ${SLANG_SPIRV_CORE_GRAMMAR_SOURCE}
     DEPENDS ${SLANG_SPIRV_CORE_SOURCE_JSON} slang-spirv-embed-generator
