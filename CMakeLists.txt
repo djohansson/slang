@@ -692,6 +692,8 @@ if(SLANG_ENABLE_TESTS)
             unit-test
             slang
             Threads::Threads
+        INCLUDE_FROM_PRIVATE slang
+        INCLUDE_DIRECTORIES_PRIVATE include
         OUTPUT_NAME slang-unit-test-tool
         FOLDER test/tools
     )
@@ -705,6 +707,8 @@ if(SLANG_ENABLE_TESTS)
             core
             slang
             Threads::Threads
+        INCLUDE_FROM_PRIVATE slang
+        INCLUDE_DIRECTORIES_PRIVATE include
         OUTPUT_NAME slang-reflection-test-tool
         FOLDER test/tools
     )
@@ -715,6 +719,8 @@ if(SLANG_ENABLE_TESTS)
         EXCLUDE_FROM_ALL
         LINK_WITH_PRIVATE
             slang
+        INCLUDE_FROM_PRIVATE slang
+        INCLUDE_DIRECTORIES_PRIVATE include
         FOLDER test
     )
 endif()
@@ -823,6 +829,8 @@ if (SLANG_ENABLE_REPLAYER)
             compiler-core
             slang
         INCLUDE_DIRECTORIES_PUBLIC source/slang-record-replay
+        INCLUDE_FROM_PRIVATE slang
+        INCLUDE_DIRECTORIES_PRIVATE include
         FOLDER test
     )
 endif()
