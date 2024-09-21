@@ -318,6 +318,7 @@ if(SLANG_ENABLE_SLANGD)
             slang-reflect-headers
             slang-capability-defs
             Threads::Threads
+        INCLUDE_FROM_PRIVATE slang
         INSTALL
     )
 endif()
@@ -328,9 +329,9 @@ if(SLANG_ENABLE_SLANGC)
         USE_FEWER_WARNINGS
         DEBUG_DIR ${slang_SOURCE_DIR}
         LINK_WITH_PRIVATE
-        core
-        slang
-        Threads::Threads
+            core
+            slang
+            Threads::Threads
         INSTALL
     )
 endif()
