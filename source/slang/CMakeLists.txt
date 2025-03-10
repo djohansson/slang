@@ -191,7 +191,7 @@ configure_file(
 # Copy headers into the build tree to support source linking
 #
 add_custom_target(
-    ${CMAKE_BINARY_DIR}/generators/$<CONFIG>/${runtime_subdir}/copy_slang_headers
+    copy_slang_headers
     COMMAND
         ${CMAKE_COMMAND} -E make_directory
         "${CMAKE_BINARY_DIR}/$<CONFIG>/include"
