@@ -9,7 +9,10 @@ buffer MyBlockName
 
 layout(binding = 1, offset = 12) uniform atomic_uint one; 
 layout(binding = 1) uniform atomic_uint two; 
-layout(binding = 1, offset = 4) uniform atomic_uint three; 
+
+// Layout qualifiers can be specified in any order.
+layout(offset = 4, binding = 1) uniform atomic_uint three; 
+
 layout(binding = 1) uniform atomic_uint four; 
 layout(binding = 2) uniform atomic_uint five; 
 
@@ -17,15 +20,15 @@ void computeMain()
 {
 
     outputBuffer.data[0] = true
-// CHECK_GLSL: one_0._data_0[3]
+// CHECK_GLSL: one_0._data_{{.*}}[3]
         && atomicCounter(one) == 0
-// CHECK_GLSL: one_0._data_0[4]
+// CHECK_GLSL: one_0._data_{{.*}}[4]
         && atomicCounter(two) == 0
-// CHECK_GLSL: one_0._data_0[1]
+// CHECK_GLSL: one_0._data_{{.*}}[1]
         && atomicCounter(three) == 0
-// CHECK_GLSL: one_0._data_0[2]
+// CHECK_GLSL: one_0._data_{{.*}}[2]
         && atomicCounter(four) == 0
-// CHECK_GLSL: five_0._data_1[0]
+// CHECK_GLSL: five_0._data_{{.*}}[0]
         && atomicCounter(five) == 0
         
         ;

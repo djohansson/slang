@@ -110,7 +110,7 @@ void test_0()
 The strings in `__requirePrelude` are deduplicated: the same prelude string will only be emitted once no matter how many times an intrinsic function is invoked. Therefore, it is good practice to put `#include` lines as separate `__requirePrelude` statements to prevent duplicate `#include`s being generated in the output code.
 
 ## Managing Cross-Platform Code
-If you are defining an intrinsic function that maps to multiple targets in different ways, you can use `__target_switch` construct to manage the target-specific definitions. For example, here is a snippet from Slang's builtin standard library that defines `getRealtimeClock`:
+If you are defining an intrinsic function that maps to multiple targets in different ways, you can use `__target_switch` construct to manage the target-specific definitions. For example, here is a snippet from the Slang core module that defines `getRealtimeClock`:
 ```hlsl
 [__requiresNVAPI]
 __glsl_extension(GL_EXT_shader_realtime_clock)
@@ -182,7 +182,7 @@ float modf(float x, out float ip)
 }
 ```
 
-Opcodes such as `OpCapbility`, `OpExtension` and type definitions are allowed inside a `spirv_asm` block. These instructions will be deduplicated and inserted into the correct sections defined by the SPIRV specification, for example:
+Opcodes such as `OpCapability`, `OpExtension` and type definitions are allowed inside a `spirv_asm` block. These instructions will be deduplicated and inserted into the correct sections defined by the SPIRV specification, for example:
 ```cpp
 uint4 WaveMatch(T value)
 {

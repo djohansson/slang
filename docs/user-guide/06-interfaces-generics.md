@@ -429,7 +429,7 @@ struct MultiArrayFloatContainer : IFloatContainer
 }
 ```
 
-In summary, an `asssociatedtype` requirement in an interface is similar to other types of requirements: a method requirement means that an implementation must provide a method matching the interface signature, while an `associatedtype` requirement means that an implementation must provide a type in its scope with the matching name and interface constraint. In general, when defining an interface that is producing and consuming an object whose actual type is implementation-dependent, the type of this object can often be modeled as an associated type in the interface.
+In summary, an `associatedtype` requirement in an interface is similar to other types of requirements: a method requirement means that an implementation must provide a method matching the interface signature, while an `associatedtype` requirement means that an implementation must provide a type in its scope with the matching name and interface constraint. In general, when defining an interface that is producing and consuming an object whose actual type is implementation-dependent, the type of this object can often be modeled as an associated type in the interface.
 
 
 ### Comparing Generics to C++ Templates
@@ -464,7 +464,7 @@ struct ArrayFloatContainer
 ```
 Because C++ does not require a template function to define _constraints_ on the templated type, there are no interfaces or inheritances involved in the definition of `ArrayFloatContainer`. However `ArrayFloatContainer` still needs to define what its `Iterator` type is, so the `sum` function can be successfully specialized with an `ArrayFloatContainer`.
 
-Note that the biggest difference between C++ templates and generics is that templates are not type-checked prior to specialization, and therefore the code that consumes a templated type (`TContainer` in this example) can simply assume `container` has a method named `getElementAt`, and the `TContainer` scope provides a type definition for `TContainer::Iterator`. Compiler error only arises when the programmer is attempting to specialize the `sum` function with a type that does not meet these assumptions. Contrarily, Slang requires all possible uses of a generic type be declared through an interface. By stating that `TContainer:IContainer` in the generics declaration, the Slang compiler can verify that `container.getElementAt` is calling a valid function. Similarily, the interface also tells the compiler that `TContainer.Iterator` is a valid type and enables the compiler to fully type check the `sum` function without specializing it first.
+Note that the biggest difference between C++ templates and generics is that templates are not type-checked prior to specialization, and therefore the code that consumes a templated type (`TContainer` in this example) can simply assume `container` has a method named `getElementAt`, and the `TContainer` scope provides a type definition for `TContainer::Iterator`. Compiler error only arises when the programmer is attempting to specialize the `sum` function with a type that does not meet these assumptions. Contrarily, Slang requires all possible uses of a generic type be declared through an interface. By stating that `TContainer:IContainer` in the generics declaration, the Slang compiler can verify that `container.getElementAt` is calling a valid function. Similarly, the interface also tells the compiler that `TContainer.Iterator` is a valid type and enables the compiler to fully type check the `sum` function without specializing it first.
 
 ### Similarity to Swift and Rust
 
@@ -823,7 +823,7 @@ interface IEnumerator<T>
 
 interface IEnumerable<T>
 {
-    assoicatedtype Enumerator : IEnumerator<T>;
+    associatedtype Enumerator : IEnumerator<T>;
     Enumerator getEnumerator();
 }
 ```

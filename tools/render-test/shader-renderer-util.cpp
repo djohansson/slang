@@ -2,7 +2,8 @@
 
 #include "shader-renderer-util.h"
 
-namespace renderer_test {
+namespace renderer_test
+{
 
 using namespace Slang;
 using Slang::Result;
@@ -69,11 +70,12 @@ inline int calcNumMipLevels(TextureType type, Extents size)
     TextureDesc textureDesc = {};
 
     // Default to R8G8B8A8_UNORM
-    const Format format = (inputDesc.format == Format::Unknown) ? Format::R8G8B8A8_UNORM : inputDesc.format;
+    const Format format =
+        (inputDesc.format == Format::Unknown) ? Format::R8G8B8A8_UNORM : inputDesc.format;
 
     textureDesc.sampleCount = inputDesc.sampleCount;
     textureDesc.format = format;
-    textureDesc.numMipLevels = texData.m_mipLevels;
+    textureDesc.mipLevelCount = texData.m_mipLevels;
     textureDesc.arrayLength = inputDesc.arrayLength > 0 ? inputDesc.arrayLength : 1;
     textureDesc.usage = TextureUsage::CopyDestination | TextureUsage::CopySource;
     switch (defaultState)
@@ -92,7 +94,7 @@ inline int calcNumMipLevels(TextureType type, Extents size)
     // It's the same size in all dimensions
     switch (inputDesc.dimension)
     {
-        case 1:
+    case 1:
         {
             textureDesc.type = TextureType::Texture1D;
             textureDesc.size.width = inputDesc.size;
@@ -101,7 +103,7 @@ inline int calcNumMipLevels(TextureType type, Extents size)
 
             break;
         }
-        case 2:
+    case 2:
         {
             textureDesc.type = inputDesc.isCube ? TextureType::TextureCube : TextureType::Texture2D;
             textureDesc.size.width = inputDesc.size;
@@ -109,7 +111,7 @@ inline int calcNumMipLevels(TextureType type, Extents size)
             textureDesc.size.depth = 1;
             break;
         }
-        case 3:
+    case 3:
         {
             textureDesc.type = TextureType::Texture3D;
             textureDesc.size.width = inputDesc.size;
@@ -119,17 +121,18 @@ inline int calcNumMipLevels(TextureType type, Extents size)
         }
     }
 
-    if (textureDesc.numMipLevels == 0)
+    if (textureDesc.mipLevelCount == 0)
     {
-        textureDesc.numMipLevels = calcNumMipLevels(textureDesc.type, textureDesc.size);
+        textureDesc.mipLevelCount = calcNumMipLevels(textureDesc.type, textureDesc.size);
     }
 
     List<SubresourceData> initSubresources;
-    int arrayLayerCount = textureDesc.arrayLength * (textureDesc.type == TextureType::TextureCube ? 6 : 1);
+    int arrayLayerCount =
+        textureDesc.arrayLength * (textureDesc.type == TextureType::TextureCube ? 6 : 1);
     int subResourceCounter = 0;
-    for( int a = 0; a < arrayLayerCount; ++a )
+    for (int a = 0; a < arrayLayerCount; ++a)
     {
-        for( int m = 0; m < textureDesc.numMipLevels; ++m )
+        for (int m = 0; m < textureDesc.mipLevelCount; ++m)
         {
             int subResourceIndex = subResourceCounter++;
             const int mipWidth = calcMipSize(textureDesc.size.width, m);
@@ -163,7 +166,8 @@ inline int calcNumMipLevels(TextureType type, Extents size)
     bufferDesc.size = bufferSize;
     bufferDesc.format = inputDesc.format;
     bufferDesc.elementSize = inputDesc.stride;
-    bufferDesc.usage = BufferUsage::CopyDestination | BufferUsage::CopySource | BufferUsage::ShaderResource | BufferUsage::UnorderedAccess;
+    bufferDesc.usage = BufferUsage::CopyDestination | BufferUsage::CopySource |
+                       BufferUsage::ShaderResource | BufferUsage::UnorderedAccess;
     bufferDesc.defaultState = ResourceState::UnorderedAccess;
 
     ComPtr<IBuffer> bufferResource = device->createBuffer(bufferDesc, initData);
@@ -187,10 +191,9 @@ static SamplerDesc _calcSamplerDesc(const InputSamplerDesc& srcDesc)
     return samplerDesc;
 }
 
-ComPtr<ISampler> _createSampler(IDevice* device,
-    const InputSamplerDesc& srcDesc)
+ComPtr<ISampler> _createSampler(IDevice* device, const InputSamplerDesc& srcDesc)
 {
     return device->createSampler(_calcSamplerDesc(srcDesc));
 }
 
-} // renderer_test
+} // namespace renderer_test

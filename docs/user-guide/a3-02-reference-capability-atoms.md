@@ -42,6 +42,9 @@ Targets
 `spirv`
 > Represents the SPIR-V code generation target.
 
+`wgsl`
+> Represents the WebGPU shading language code generation target.
+
 Stages
 ----------------------
 *Capabilities to specify code generation stages (`vertex`, `fragment`...)*
@@ -266,6 +269,14 @@ Versions
 > HLSL shader model 6.7 and related capabilities of other targets.
 > Includes related GLSL/SPIRV extensions.
 
+`sm_6_8_version`
+> HLSL shader model 6.8 and related capabilities of other targets.
+> Does not include related GLSL/SPIRV extensions.
+
+`sm_6_8`
+> HLSL shader model 6.8 and related capabilities of other targets.
+> Includes related GLSL/SPIRV extensions.
+
 `GLSL_130`
 > GLSL 130 and related capabilities of other targets.
 
@@ -360,6 +371,12 @@ Extensions
 `SPV_EXT_demote_to_helper_invocation`
 > Represents the SPIR-V extension for demoting to helper invocation.
 
+`SPV_KHR_maximal_reconvergence`
+> Represents the SPIR-V extension for maximal reconvergence.
+
+`SPV_KHR_quad_control`
+> Represents the SPIR-V extension for quad group control.
+
 `SPV_KHR_fragment_shader_barycentric`
 > Represents the SPIR-V extension for fragment shader barycentric.
 
@@ -398,11 +415,20 @@ Extensions
 `SPV_GOOGLE_user_type`
 > Represents the SPIR-V extension for SPV_GOOGLE_user_type.
 
+`SPV_EXT_replicated_composites`
+> Represents the SPIR-V extension for SPV_EXT_replicated_composites.
+
+`SPV_NV_cooperative_vector`
+> Represents the SPIR-V extension for SPV_NV_cooperative_vector.
+
 `spvAtomicFloat32AddEXT`
 > Represents the SPIR-V capability for atomic float 32 add operations.
 
 `spvAtomicFloat16AddEXT`
 > Represents the SPIR-V capability for atomic float 16 add operations.
+
+`spvAtomicFloat64AddEXT`
+> Represents the SPIR-V capability for atomic float 64 add operations.
 
 `spvInt64Atomics`
 > Represents the SPIR-V capability for 64-bit integer atomics.
@@ -412,6 +438,9 @@ Extensions
 
 `spvAtomicFloat16MinMaxEXT`
 > Represents the SPIR-V capability for atomic float 16 min/max operations.
+
+`spvAtomicFloat64MinMaxEXT`
+> Represents the SPIR-V capability for atomic float 64 min/max operations.
 
 `spvDerivativeControl`
 > Represents the SPIR-V capability for 'derivative control' operations.
@@ -494,6 +523,21 @@ Extensions
 `spvDemoteToHelperInvocation`
 > Represents the SPIR-V capability for demoting to helper invocation.
 
+`spvReplicatedCompositesEXT`
+> Represents the SPIR-V capability for replicated composites
+
+`spvCooperativeVectorNV`
+> Represents the SPIR-V capability for cooperative vectors
+
+`spvCooperativeVectorTrainingNV`
+> Represents the SPIR-V capability for cooperative vector training
+
+`spvMaximalReconvergenceKHR`
+> Represents the SPIR-V capability for maximal reconvergence.
+
+`spvQuadControlKHR`
+> Represents the SPIR-V capability for quad group control.
+
 `GL_EXT_buffer_reference`
 > Represents the GL_EXT_buffer_reference extension.
 
@@ -505,6 +549,12 @@ Extensions
 
 `GL_EXT_demote_to_helper_invocation`
 > Represents the GL_EXT_demote_to_helper_invocation extension.
+
+`GL_EXT_maximal_reconvergence`
+> Represents the GL_EXT_maximal_reconvergence extension.
+
+`GL_EXT_shader_quad_control`
+> Represents the GL_EXT_shader_quad_control extension.
 
 `GL_EXT_fragment_shader_barycentric`
 > Represents the GL_EXT_fragment_shader_barycentric extension.
@@ -681,6 +731,9 @@ Compound Capabilities
 `cpp_cuda_spirv`
 > CPP, CUDA and SPIRV code-gen targets
 
+`cuda_spirv`
+> CUDA and SPIRV code-gen targets
+
 `cpp_cuda_glsl_spirv`
 > CPP, CUDA, GLSL and SPIRV code-gen targets
 
@@ -690,8 +743,14 @@ Compound Capabilities
 `cpp_cuda_glsl_hlsl_spirv`
 > CPP, CUDA, GLSL, HLSL, and SPIRV code-gen targets
 
+`cpp_cuda_glsl_hlsl_spirv_wgsl`
+> CPP, CUDA, GLSL, HLSL, SPIRV and WGSL code-gen targets
+
 `cpp_cuda_glsl_hlsl_metal_spirv`
 > CPP, CUDA, GLSL, HLSL, Metal and SPIRV code-gen targets
+
+`cpp_cuda_glsl_hlsl_metal_spirv_wgsl`
+> CPP, CUDA, GLSL, HLSL, Metal, SPIRV and WGSL code-gen targets
 
 `cpp_cuda_hlsl`
 > CPP, CUDA, and HLSL code-gen targets
@@ -708,8 +767,14 @@ Compound Capabilities
 `cpp_glsl_hlsl_spirv`
 > CPP, GLSL, HLSL, and SPIRV code-gen targets
 
+`cpp_glsl_hlsl_spirv_wgsl`
+> CPP, GLSL, HLSL, SPIRV and WGSL code-gen targets
+
 `cpp_glsl_hlsl_metal_spirv`
 > CPP, GLSL, HLSL, Metal, and SPIRV code-gen targets
+
+`cpp_glsl_hlsl_metal_spirv_wgsl`
+> CPP, GLSL, HLSL, Metal, SPIRV and WGSL code-gen targets
 
 `cpp_hlsl`
 > CPP, and HLSL code-gen targets
@@ -723,14 +788,23 @@ Compound Capabilities
 `cuda_glsl_hlsl_spirv`
 > CUDA, GLSL, HLSL, and SPIRV code-gen targets
 
+`cuda_glsl_hlsl_spirv_wgsl`
+> CUDA, GLSL, HLSL, SPIRV, and WGSL code-gen targets
+
 `cuda_glsl_hlsl_metal_spirv`
 > CUDA, GLSL, HLSL, Metal, and SPIRV code-gen targets
+
+`cuda_glsl_hlsl_metal_spirv_wgsl`
+> CUDA, GLSL, HLSL, Metal, SPIRV and WGSL code-gen targets
 
 `cuda_glsl_spirv`
 > CUDA, GLSL, and SPIRV code-gen targets
 
 `cuda_glsl_metal_spirv`
 > CUDA, GLSL, Metal, and SPIRV code-gen targets
+
+`cuda_glsl_metal_spirv_wgsl`
+> CUDA, GLSL, Metal, SPIRV and WGSL code-gen targets
 
 `cuda_hlsl`
 > CUDA, and HLSL code-gen targets
@@ -741,14 +815,26 @@ Compound Capabilities
 `glsl_hlsl_spirv`
 > GLSL, HLSL, and SPIRV code-gen targets
 
+`glsl_hlsl_spirv_wgsl`
+> GLSL, HLSL, SPIRV and WGSL code-gen targets
+
 `glsl_hlsl_metal_spirv`
 > GLSL, HLSL, Metal, and SPIRV code-gen targets
+
+`glsl_hlsl_metal_spirv_wgsl`
+> GLSL, HLSL, Metal, SPIRV and WGSL code-gen targets
 
 `glsl_metal_spirv`
 > GLSL, Metal, and SPIRV code-gen targets
 
+`glsl_metal_spirv_wgsl`
+> GLSL, Metal, SPIRV and WGSL code-gen targets
+
 `glsl_spirv`
 > GLSL, and SPIRV code-gen targets
+
+`glsl_spirv_wgsl`
+> GLSL, SPIRV, and WGSL code-gen targets
 
 `hlsl_spirv`
 > HLSL, and SPIRV code-gen targets
@@ -795,7 +881,7 @@ Compound Capabilities
 `shadermemorycontrol`
 > (gfx targets) Capabilities needed to use memory barriers
 
-`waveprefix`
+`wave_multi_prefix`
 > Capabilities needed to use HLSL tier wave operations
 
 `bufferreference`
@@ -803,6 +889,14 @@ Compound Capabilities
 
 `bufferreference_int64`
 > Capabilities needed to use GLSL buffer-reference's with int64
+
+`cooperative_vector`
+> Capabilities needed to use cooperative vectors
+> Note that cpp and cuda are supported via a fallback non-cooperative implementation
+> No HLSL shader model bound yet
+
+`cooperative_vector_training`
+> Capabilities needed to train cooperative vectors
 
 `any_stage`
 > Collection of all shader stages
@@ -1007,7 +1101,7 @@ Compound Capabilities
 > Capabilities required to use GLSL-style subgroup operations 'subgroup_shuffle'
 
 `subgroup_shufflerelative`
-> Capabilities required to use GLSL-style subgroup operations 'subgroup_shufle_relative'
+> Capabilities required to use GLSL-style subgroup operations 'subgroup_shuffle_relative'
 
 `subgroup_clustered`
 > Capabilities required to use GLSL-style subgroup operations 'subgroup_clustered'
@@ -1038,6 +1132,9 @@ Compound Capabilities
 
 `helper_lane`
 > Capabilities required to enable helper-lane demotion
+
+`quad_control`
+> Capabilities required to enable quad group control
 
 `breakpoint`
 > Capabilities required to enable shader breakpoints
@@ -1159,6 +1256,9 @@ Other
 
 `DX_6_7`
 > Use `sm_6_7` instead
+
+`DX_6_8`
+> Use `sm_6_8` instead
 
 `GLSL_410_SPIRV_1_0`
 > User should not use this capability

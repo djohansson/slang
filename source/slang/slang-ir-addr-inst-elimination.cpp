@@ -1,15 +1,17 @@
 #include "slang-ir-addr-inst-elimination.h"
+
 #include "slang-ir-insts.h"
 #include "slang-ir-util.h"
 
 namespace Slang
 {
 
-// Rewrites address load/store into value extract/updates to allow SSA transform to apply to struct and array elements.
-// For example,
+// Rewrites address load/store into value extract/updates to allow SSA transform to apply to struct
+// and array elements. For example,
 //  load(elementPtr(arr, 1)) ==> elementExtract(load(arr), 1)
 //  store(fieldAddr(s, field_key), val) ==> store(s, updateField(load(s), fieldKey, val))
-// After this transform, all address operands of `load` and `store` insts will be either a var or a param. 
+// After this transform, all address operands of `load` and `store` insts will be either a var or a
+// param.
 
 struct AddressInstEliminationContext
 {
@@ -25,7 +27,7 @@ struct AddressInstEliminationContext
         case kIROp_GetElementPtr:
         case kIROp_FieldAddress:
             {
-                IRInst* args[] = { getValue(builder, addr->getOperand(0)), addr->getOperand(1) };
+                IRInst* args[] = {getValue(builder, addr->getOperand(0)), addr->getOperand(1)};
                 return builder.emitIntrinsicInst(
                     cast<IRPtrTypeBase>(addr->getFullType())->getValueType(),
                     (addr->getOp() == kIROp_GetElementPtr ? kIROp_GetElement : kIROp_FieldExtract),
@@ -113,9 +115,7 @@ struct AddressInstEliminationContext
         use->set(tempVar);
     }
 
-    SlangResult eliminateAddressInstsImpl(
-        IRFunc* func,
-        DiagnosticSink* inSink)
+    SlangResult eliminateAddressInstsImpl(IRFunc* func, DiagnosticSink* inSink)
     {
         sink = inSink;
 
@@ -131,7 +131,8 @@ struct AddressInstEliminationContext
                 if (auto ptrType = as<IRPtrTypeBase>(inst->getDataType()))
                 {
                     auto valType = unwrapAttributedType(ptrType->getValueType());
-                    if (!getResolvedInstForDecorations(valType)->findDecoration<IRNonCopyableTypeDecoration>())
+                    if (!getResolvedInstForDecorations(valType)
+                             ->findDecoration<IRNonCopyableTypeDecoration>())
                     {
                         workList.add(inst);
                     }
@@ -143,7 +144,7 @@ struct AddressInstEliminationContext
         {
             auto addrInst = workList[workListIndex];
 
-            for (auto use = addrInst->firstUse; use; )
+            for (auto use = addrInst->firstUse; use;)
             {
                 auto nextUse = use->nextUse;
 
@@ -152,9 +153,11 @@ struct AddressInstEliminationContext
                     use = nextUse;
                     continue;
                 }
-                    
+
                 IRBuilder transformBuilder(module);
-                IRBuilderSourceLocRAII sourceLocationScope(&transformBuilder, use->getUser()->sourceLoc);
+                IRBuilderSourceLocRAII sourceLocationScope(
+                    &transformBuilder,
+                    use->getUser()->sourceLoc);
 
                 switch (use->getUser()->getOp())
                 {
@@ -170,9 +173,12 @@ struct AddressInstEliminationContext
                 case kIROp_GetElementPtr:
                 case kIROp_FieldAddress:
                 case kIROp_Unmodified:
+                case kIROp_DebugValue:
                     break;
                 default:
-                    sink->diagnose(use->getUser()->sourceLoc, Diagnostics::unsupportedUseOfLValueForAutoDiff);
+                    sink->diagnose(
+                        use->getUser()->sourceLoc,
+                        Diagnostics::unsupportedUseOfLValueForAutoDiff);
                     break;
                 }
                 use = nextUse;
@@ -183,9 +189,7 @@ struct AddressInstEliminationContext
     }
 };
 
-SlangResult eliminateAddressInsts(
-    IRFunc* func,
-    DiagnosticSink* sink)
+SlangResult eliminateAddressInsts(IRFunc* func, DiagnosticSink* sink)
 {
     AddressInstEliminationContext ctx;
     ctx.module = func->getModule();
