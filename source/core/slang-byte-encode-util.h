@@ -3,6 +3,10 @@
 
 #include "slang-list.h"
 
+#if SLANG_VC
+#include <intrin.h>
+#endif
+
 namespace Slang
 {
 
