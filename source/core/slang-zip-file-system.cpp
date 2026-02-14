@@ -10,7 +10,7 @@
 #include "slang-string-util.h"
 #include "slang-uint-set.h"
 
-#include <miniz.h>
+#include <miniz/miniz.h>
 
 namespace Slang
 {

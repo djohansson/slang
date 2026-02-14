@@ -26,7 +26,7 @@ if(NOT SLANG_ENABLE_EXTERNAL_COMPILER_WARNINGS)
 endif()
 
 # Unordered dense
-if(NOT ${SLANG_USE_SYSTEM_UNORDERED_DENSE})
+if(NOT SLANG_USE_SYSTEM_UNORDERED_DENSE)
     if(NOT SLANG_OVERRIDE_UNORDERED_DENSE_PATH)
         add_subdirectory(unordered_dense EXCLUDE_FROM_ALL ${system})
     else()
@@ -39,13 +39,30 @@ if(NOT ${SLANG_USE_SYSTEM_UNORDERED_DENSE})
     endif()
 endif()
 
+# Unordered dense
+if(NOT SLANG_USE_SYSTEM_LUA)
+    if(SLANG_OVERRIDE_LUA_PATH)
+        add_subdirectory(
+            ${SLANG_OVERRIDE_LUA_PATH}
+            lua
+            EXCLUDE_FROM_ALL
+            ${system}
+        )
+    endif()
+endif()
+
 # Miniz
-if(NOT ${SLANG_USE_SYSTEM_MINIZ})
+if(NOT SLANG_USE_SYSTEM_MINIZ)
     if(NOT SLANG_OVERRIDE_MINIZ_PATH)
         add_subdirectory(miniz EXCLUDE_FROM_ALL ${system})
+        target_include_directories(
+            miniz
+            ${system}
+            INTERFACE "${CMAKE_CURRENT_LIST_DIR}"
+        )
     else()
         add_subdirectory(
-            ${SLANG_OVERRIDE_MINIZ_PATH}/miniz
+            ${SLANG_OVERRIDE_MINIZ_PATH}
             miniz
             EXCLUDE_FROM_ALL
             ${system}
@@ -61,7 +78,7 @@ if(NOT ${SLANG_USE_SYSTEM_MINIZ})
 endif()
 
 # LZ4
-if(NOT ${SLANG_USE_SYSTEM_LZ4})
+if(NOT SLANG_USE_SYSTEM_LZ4)
     set(LZ4_BUNDLED_MODE ON)
     if(NOT SLANG_OVERRIDE_LZ4_PATH)
         add_subdirectory(lz4/build/cmake EXCLUDE_FROM_ALL ${system})
@@ -82,7 +99,7 @@ if(NOT ${SLANG_USE_SYSTEM_LZ4})
 endif()
 
 # Vulkan headers
-if(NOT ${SLANG_USE_SYSTEM_VULKAN_HEADERS})
+if(NOT SLANG_USE_SYSTEM_VULKAN_HEADERS)
     if(NOT SLANG_OVERRIDE_VULKAN_HEADERS_PATH)
         add_subdirectory(vulkan EXCLUDE_FROM_ALL ${system})
     else()
@@ -103,91 +120,88 @@ target_include_directories(
 )
 
 # SPIRV-Headers
-if(${SLANG_USE_SYSTEM_SPIRV_HEADERS})
-    find_package(SPIRV-Headers REQUIRED)
-elseif(NOT SLANG_OVERRIDE_SPIRV_HEADERS_PATH)
-    add_subdirectory(spirv-headers EXCLUDE_FROM_ALL ${system})
-else()
-    add_subdirectory(
-        ${SLANG_OVERRIDE_SPIRV_HEADERS_PATH}/spirv-headers
-        spirv-headers
-        EXCLUDE_FROM_ALL
-        ${system}
-    )
+if(NOT SLANG_USE_SYSTEM_SPIRV_HEADERS)
+    if(NOT SLANG_OVERRIDE_SPIRV_HEADERS_PATH)
+        add_subdirectory(spirv-headers EXCLUDE_FROM_ALL ${system})
+    else()
+        add_subdirectory(
+            ${SLANG_OVERRIDE_SPIRV_HEADERS_PATH}/spirv-headers
+            spirv-headers
+            EXCLUDE_FROM_ALL
+            ${system}
+        )
+    endif()
 endif()
 
 if(SLANG_ENABLE_SLANG_GLSLANG)
-    # When using spirv headers via find_package, SPIRV-Headers_SOURCE_DIR is not set
-    # SPIRV-Tools requires that variable, as it uses it to detect if SPIRV-Headers is provided by the consumer.
-    # Fake a source build by setting it here. Ideally SPIRV-Tools should not depend on _SOURCE_DIR
-    if(${SLANG_USE_SYSTEM_SPIRV_HEADERS})
-        get_target_property(
-            SPIRV-Headers_SOURCE_DIR
-            SPIRV-Headers::SPIRV-Headers
-            INTERFACE_INCLUDE_DIRECTORIES
-        )
-        cmake_path(
-            GET
-            SPIRV-Headers_SOURCE_DIR
-            PARENT_PATH SPIRV-Headers_SOURCE_DIR
-        )
-    endif()
-
     # SPIRV-Tools
-    set(SPIRV_TOOLS_BUILD_STATIC ON)
-    set(SPIRV_WERROR OFF)
-    set(SPIRV_SKIP_TESTS ON)
-    # Tools
-    if(NOT SLANG_OVERRIDE_SPIRV_TOOLS_PATH)
-        add_subdirectory(spirv-tools EXCLUDE_FROM_ALL ${system})
-    else()
-        add_subdirectory(
-            ${SLANG_OVERRIDE_SPIRV_TOOLS_PATH}/spirv-tools
-            spirv-tools
-            EXCLUDE_FROM_ALL
-            ${system}
-        )
+    if(NOT SLANG_USE_SYSTEM_SPIRV_TOOLS)
+        set(SPIRV_TOOLS_BUILD_STATIC ON)
+        set(SPIRV_WERROR OFF)
+        set(SPIRV_SKIP_TESTS ON)
+        # Tools
+        if(NOT SLANG_OVERRIDE_SPIRV_TOOLS_PATH)
+            add_subdirectory(spirv-tools EXCLUDE_FROM_ALL ${system})
+        else()
+            add_subdirectory(
+                ${SLANG_OVERRIDE_SPIRV_TOOLS_PATH}/spirv-tools
+                spirv-tools
+                EXCLUDE_FROM_ALL
+                ${system}
+            )
+        endif()
     endif()
 
     # glslang
-    set(SKIP_GLSLANG_INSTALL ON)
-    set(ENABLE_OPT ON)
-    set(ENABLE_PCH OFF)
-    if(NOT SLANG_OVERRIDE_GLSLANG_PATH)
-        add_subdirectory(glslang EXCLUDE_FROM_ALL ${system})
-    else()
-        add_subdirectory(
-            ${SLANG_OVERRIDE_GLSLANG_PATH}/glslang
-            glslang
-            EXCLUDE_FROM_ALL
-            ${system}
-        )
+    if (NOT SLANG_USE_SYSTEM_GLSLANG)
+        set(SKIP_GLSLANG_INSTALL ON)
+        set(ENABLE_OPT ON)
+        set(ENABLE_PCH OFF)
+        if(NOT SLANG_OVERRIDE_GLSLANG_PATH)
+            add_subdirectory(glslang EXCLUDE_FROM_ALL ${system})
+            target_include_directories(
+                glslang
+                ${system}
+                INTERFACE "${CMAKE_CURRENT_LIST_DIR}"
+            )
+        else()
+            add_subdirectory(
+                ${SLANG_OVERRIDE_GLSLANG_PATH}/glslang
+                glslang
+                EXCLUDE_FROM_ALL
+                ${system}
+            )
+        endif()
     endif()
 endif()
 
 # imgui
-add_library(imgui INTERFACE)
-if(NOT SLANG_OVERRIDE_IMGUI_PATH)
-    target_include_directories(
-        imgui
-        ${system}
-        INTERFACE "${CMAKE_CURRENT_LIST_DIR}/imgui"
-    )
-else()
-    target_include_directories(
-        imgui
-        ${system}
-        INTERFACE "${SLANG_OVERRIDE_IMGUI_PATH}/imgui"
-    )
+if (NOT SLANG_USE_SYSTEM_IMGUI)
+    add_library(imgui INTERFACE)
+    if(NOT SLANG_OVERRIDE_IMGUI_PATH)
+        target_include_directories(
+            imgui
+            ${system}
+            INTERFACE "${CMAKE_CURRENT_LIST_DIR}/imgui"
+        )
+    else()
+        target_include_directories(
+            imgui
+            ${system}
+            INTERFACE "${SLANG_OVERRIDE_IMGUI_PATH}/imgui"
+        )
+    endif()
 endif()
 
 # stb
-add_library(stb INTERFACE)
-target_include_directories(
-    stb
-    ${system}
-    INTERFACE "${CMAKE_CURRENT_LIST_DIR}/stb"
-)
+if (NOT SLANG_USE_SYSTEM_STB)
+    add_library(stb INTERFACE)
+    target_include_directories(
+        stb
+        ${system}
+        INTERFACE "${CMAKE_CURRENT_LIST_DIR}/stb"
+    )
+endif()
 
 # slang-rhi
 if(SLANG_ENABLE_SLANG_RHI)

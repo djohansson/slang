@@ -24,12 +24,12 @@ list(TRANSFORM SLANG_FIDDLE_OUTPUTS
 add_custom_command(
     OUTPUT ${SLANG_FIDDLE_OUTPUTS}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${SLANG_FIDDLE_OUTPUT_DIR}
-    COMMAND slang-fiddle
-        -i "${SLANG_FIDDLE_INPUT_DIR}/"
-        -o "${SLANG_FIDDLE_OUTPUT_DIR}/"
-        ${SLANG_FIDDLE_INPUT_FILE_NAMES}
+    COMMAND ${CMAKE_COMMAND} -E copy -t $<TARGET_FILE_DIR:slang-fiddle> $<TARGET_RUNTIME_DLLS:slang-fiddle>
+    COMMAND
+        $<TARGET_FILE:slang-fiddle> -i "${SLANG_FIDDLE_INPUT_DIR}/" -o "${SLANG_FIDDLE_OUTPUT_DIR}/" ${SLANG_FIDDLE_INPUT_FILE_NAMES}
     DEPENDS ${SLANG_FIDDLE_INPUTS} slang-fiddle
     VERBATIM
+    COMMAND_EXPAND_LISTS
 )
 add_library(
     slang-fiddle-output
@@ -62,13 +62,13 @@ set(SLANG_CAPABILITY_GENERATED_SOURCE
 add_custom_command(
     OUTPUT ${SLANG_CAPABILITY_GENERATED_SOURCE}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${SLANG_CAPABILITY_OUTPUT_DIR}
+    COMMAND ${CMAKE_COMMAND} -E copy -t $<TARGET_FILE_DIR:slang-capability-generator> $<TARGET_RUNTIME_DLLS:slang-capability-generator>
     COMMAND
-        slang-capability-generator ${SLANG_CAPABILITY_SOURCE} --target-directory
+        $<TARGET_FILE:slang-capability-generator> ${SLANG_CAPABILITY_SOURCE} --target-directory
         ${SLANG_CAPABILITY_OUTPUT_DIR} --doc
         "${slang_SOURCE_DIR}/docs/user-guide/a3-02-reference-capability-atoms.md"
     DEPENDS ${SLANG_CAPABILITY_SOURCE} slang-capability-generator
-    WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}
-    VERBATIM
+    COMMAND_EXPAND_LISTS
 )
 slang_add_target(
     slang-capability-defs
@@ -99,7 +99,6 @@ slang_add_target(
 #
 # generated lookup tables
 #
-
 get_target_property(SLANG_SPIRV_HEADERS_INCLUDE_DIR SPIRV-Headers::SPIRV-Headers INTERFACE_INCLUDE_DIRECTORIES)
 
 set(SLANG_LOOKUP_GENERATOR_INPUT_JSON
@@ -118,14 +117,14 @@ set(SLANG_RECORD_REPLAY_SYSTEM
 
 add_custom_command(
     OUTPUT ${SLANG_LOOKUP_GENERATED_SOURCE}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${SLANG_LOOKUP_GENERATOR_OUTPUT_DIR}
+    COMMAND ${CMAKE_COMMAND} -E copy -t $<TARGET_FILE_DIR:slang-lookup-generator> $<TARGET_RUNTIME_DLLS:slang-lookup-generator>
     COMMAND
-        ${CMAKE_COMMAND} -E make_directory ${SLANG_LOOKUP_GENERATOR_OUTPUT_DIR}
-    COMMAND
-        slang-lookup-generator ${SLANG_LOOKUP_GENERATOR_INPUT_JSON}
+        $<TARGET_FILE:slang-lookup-generator> ${SLANG_LOOKUP_GENERATOR_INPUT_JSON}
         ${SLANG_LOOKUP_GENERATED_SOURCE} "GLSLstd450" "GLSLstd450"
         "spirv/unified1/GLSL.std.450.h"
     DEPENDS ${SLANG_LOOKUP_GENERATOR_INPUT_JSON} slang-lookup-generator
-    VERBATIM
+    COMMAND_EXPAND_LISTS
 )
 
 set(SLANG_SPIRV_CORE_SOURCE_JSON
@@ -136,13 +135,13 @@ set(SLANG_SPIRV_CORE_GRAMMAR_SOURCE
 )
 add_custom_command(
     OUTPUT ${SLANG_SPIRV_CORE_GRAMMAR_SOURCE}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${SLANG_LOOKUP_GENERATOR_OUTPUT_DIR}
+    COMMAND ${CMAKE_COMMAND} -E copy -t $<TARGET_FILE_DIR:slang-spirv-embed-generator> $<TARGET_RUNTIME_DLLS:slang-spirv-embed-generator>
     COMMAND
-        ${CMAKE_COMMAND} -E make_directory ${SLANG_LOOKUP_GENERATOR_OUTPUT_DIR}
-    COMMAND
-        slang-spirv-embed-generator ${SLANG_SPIRV_CORE_SOURCE_JSON}
+        $<TARGET_FILE:slang-spirv-embed-generator> ${SLANG_SPIRV_CORE_SOURCE_JSON}
         ${SLANG_SPIRV_CORE_GRAMMAR_SOURCE}
     DEPENDS ${SLANG_SPIRV_CORE_SOURCE_JSON} slang-spirv-embed-generator
-    VERBATIM
+    COMMAND_EXPAND_LISTS
 )
 
 slang_add_target(
@@ -154,7 +153,7 @@ slang_add_target(
         ${SLANG_LOOKUP_GENERATED_SOURCE}
         ${SLANG_SPIRV_CORE_GRAMMAR_SOURCE}
     EXPORT_TYPE_AS ${SLANG_LIB_TYPE}
-    LINK_WITH_PRIVATE core SPIRV-Headers::SPIRV-Headers
+    LINK_WITH_PRIVATE core SPIRV-Headers
     EXCLUDE_FROM_ALL
     FOLDER generated
 )
@@ -216,7 +215,7 @@ set(slang_link_args
     slang-capability-lookup
     slang-fiddle-output
     slang-lookup-tables
-    SPIRV-Headers::SPIRV-Headers
+    SPIRV-Headers
 )
 set(slang_interface_args INCLUDE_DIRECTORIES_PUBLIC ${slang_SOURCE_DIR}/include)
 set(slang_public_lib_args

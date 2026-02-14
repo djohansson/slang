@@ -158,8 +158,16 @@ option(
     ""
 )
 
-advanced_option(SLANG_USE_SYSTEM_MINIZ "Build using system Miniz library" OFF)
-advanced_option(SLANG_USE_SYSTEM_LZ4 "Build using system LZ4 library" OFF)
+advanced_option(
+    SLANG_USE_SYSTEM_MINIZ
+    "Build using system Miniz library"
+    OFF
+)
+advanced_option(
+    SLANG_USE_SYSTEM_LZ4
+    "Build using system LZ4 library"
+    OFF
+)
 advanced_option(
     SLANG_USE_SYSTEM_VULKAN_HEADERS
     "Build using system Vulkan headers"
@@ -171,8 +179,33 @@ advanced_option(
     OFF
 )
 advanced_option(
+    SLANG_USE_SYSTEM_SPIRV_TOOLS
+    "Build using system SPIR-V tools"
+    OFF
+)
+advanced_option(
     SLANG_USE_SYSTEM_UNORDERED_DENSE
     "Build using system unordered dense"
+    OFF
+)
+advanced_option(
+    SLANG_USE_SYSTEM_GLSLANG
+    "Build using system glslang library"
+    OFF
+)
+advanced_option(
+    SLANG_USE_SYSTEM_LUA
+    "Build using system lua library"
+    OFF
+)
+advanced_option(
+    SLANG_USE_SYSTEM_IMGUI
+    "Build using system imgui library"
+    OFF
+)
+advanced_option(
+    SLANG_USE_SYSTEM_STB
+    "Build using system stb library"
     OFF
 )
 
@@ -394,8 +427,54 @@ endif()
 
 find_package(Threads REQUIRED)
 
-if(${SLANG_USE_SYSTEM_UNORDERED_DENSE})
+if(SLANG_USE_SYSTEM_UNORDERED_DENSE)
     find_package(unordered_dense CONFIG QUIET)
+endif()
+
+if(SLANG_USE_SYSTEM_SPIRV_HEADERS)
+    find_package(SPIRV-Headers REQUIRED)
+endif()
+
+if (SLANG_USE_SYSTEM_MINIZ)
+    find_package(miniz CONFIG REQUIRED)
+endif()
+
+if(SLANG_USE_SYSTEM_LZ4)
+    find_package(lz4 CONFIG REQUIRED)
+endif()
+
+if(SLANG_USE_SYSTEM_LUA)
+    find_package(lua CONFIG REQUIRED)
+endif()
+
+if (SLANG_USE_SYSTEM_IMGUI)
+    find_package(imgui CONFIG REQUIRED)
+endif()
+
+if(SLANG_USE_SYSTEM_SPIRV_TOOLS)
+    find_package(SPIRV-Tools CONFIG REQUIRED)
+endif()
+
+if (SLANG_USE_SYSTEM_GLSLANG)
+    find_package(glslang CONFIG REQUIRED)
+endif()
+
+if(SLANG_ENABLE_SLANG_GLSLANG)
+    # When using spirv headers via find_package, SPIRV-Headers_SOURCE_DIR is not set
+    # SPIRV-Tools requires that variable, as it uses it to detect if SPIRV-Headers is provided by the consumer.
+    # Fake a source build by setting it here. Ideally SPIRV-Tools should not depend on _SOURCE_DIR
+    if(SLANG_USE_SYSTEM_SPIRV_HEADERS)
+        get_target_property(
+            SPIRV-Headers_SOURCE_DIR
+            SPIRV-Headers::SPIRV-Headers
+            INTERFACE_INCLUDE_DIRECTORIES
+        )
+        cmake_path(
+            GET
+            SPIRV-Headers_SOURCE_DIR
+            PARENT_PATH SPIRV-Headers_SOURCE_DIR
+        )
+    endif()
 endif()
 
 add_subdirectory(external)

@@ -45,22 +45,35 @@ function(generator dir)
     endif()
 endfunction()
 
-if(NOT SLANG_OVERRIDE_LUA_PATH)
+if(SLANG_USE_SYSTEM_LUA)
     generator(
         slang-fiddle
+        INCLUDE_DIRECTORIES_PRIVATE
+            ${LUA_INCLUDE_DIR}
+        EXTRA_COMPILE_DEFINITIONS_PRIVATE
+            SLANG_USE_SYSTEM_LUA=1
         LINK_WITH_PRIVATE
-        compiler-core
-        INCLUDE_DIRECTORIES_PUBLIC
-        ${slang_SOURCE_DIR}/external
+            compiler-core
+            ${LUA_LIBRARIES}
     )
 else()
-    generator(
-        slang-fiddle
-        LINK_WITH_PRIVATE
-        compiler-core
-        INCLUDE_DIRECTORIES_PUBLIC
-        ${SLANG_OVERRIDE_LUA_PATH}
-    )
+    if(NOT SLANG_OVERRIDE_LUA_PATH)
+        generator(
+            slang-fiddle
+            LINK_WITH_PRIVATE
+            compiler-core
+            INCLUDE_DIRECTORIES_PUBLIC
+            ${slang_SOURCE_DIR}/external/lua
+        )
+    else()
+        generator(
+            slang-fiddle
+            LINK_WITH_PRIVATE
+            compiler-core
+            INCLUDE_DIRECTORIES_PUBLIC
+            ${SLANG_OVERRIDE_LUA_PATH}
+        )
+    endif()
 endif()
 generator(slang-embed)
 generator(slang-generate USE_FEWER_WARNINGS)

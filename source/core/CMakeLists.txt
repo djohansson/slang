@@ -4,7 +4,11 @@ slang_add_target(
     EXPORT_MACRO_PREFIX SLANG
     EXCLUDE_FROM_ALL
     USE_EXTRA_WARNINGS
-    LINK_WITH_PRIVATE miniz lz4_static Threads::Threads ${CMAKE_DL_LIBS}
+    LINK_WITH_PRIVATE
+        $<IF:$<BOOL:${SLANG_USE_SYSTEM_MINIZ}>,miniz::miniz,miniz>
+        $<IF:$<BOOL:${SLANG_USE_SYSTEM_LZ4}>,lz4::lz4,lz4_static>
+        Threads::Threads
+        ${CMAKE_DL_LIBS}
     LINK_WITH_PUBLIC unordered_dense::unordered_dense
     INCLUDE_DIRECTORIES_PUBLIC
         ${slang_SOURCE_DIR}/source

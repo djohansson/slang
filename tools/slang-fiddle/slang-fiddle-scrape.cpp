@@ -3,6 +3,8 @@
 
 #include "slang-fiddle-script.h"
 
+#include <lauxlib.h>
+
 namespace fiddle
 {
 
@@ -1679,6 +1681,8 @@ void push(lua_State* L, Val* val)
     }
     lua_setmetatable(L, -2);
 }
+
+extern lua_State* getLuaState();
 
 void registerValWithScript(String name, Val* val)
 {

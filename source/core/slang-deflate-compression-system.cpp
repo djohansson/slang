@@ -8,7 +8,7 @@
 
 #include "slang-blob.h"
 
-#include <miniz.h>
+#include <miniz/miniz.h>
 
 namespace Slang
 {

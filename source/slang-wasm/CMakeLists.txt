@@ -10,8 +10,8 @@ if(EMSCRIPTEN)
         EXCLUDE_FROM_ALL
         USE_FEWER_WARNINGS
         LINK_WITH_PRIVATE
-            miniz
-            lz4_static
+            $<IF:$<BOOL:${SLANG_USE_SYSTEM_MINIZ}>,miniz::miniz,miniz>
+            $<IF:$<BOOL:${SLANG_USE_SYSTEM_LZ4}>,lz4::lz4,lz4_static>
             slang
             core
             compiler-core

@@ -193,8 +193,11 @@ error if they can't be found.
 | `SLANG_ENABLE_SLANG_RHI`           | `TRUE`  | Enable building and using [slang-rhi](https://github.com/shader-slang/slang-rhi) for tests                                     |
 | `SLANG_USE_SYSTEM_MINIZ`           | `FALSE` | Build using system Miniz library instead of the bundled version in [./external](./external)                                    |
 | `SLANG_USE_SYSTEM_LZ4`             | `FALSE` | Build using system LZ4 library instead of the bundled version in [./external](./external)                                      |
+| `SLANG_USE_SYSTEM_LUA`             | `FALSE` | Build using system lua library instead of the bundled version in [./external](./external)                                      |
 | `SLANG_USE_SYSTEM_VULKAN_HEADERS`  | `FALSE` | Build using system Vulkan headers instead of the bundled version in [./external](./external)                                   |
 | `SLANG_USE_SYSTEM_SPIRV_HEADERS`   | `FALSE` | Build using system SPIR-V headers instead of the bundled version in [./external](./external)                                   |
+| `SLANG_USE_SYSTEM_IMGUI`           | `FALSE` | Build using system imgui instead of the bundled version in [./external](./external)                                            |
+| `SLANG_USE_SYSTEM_STB`             | `FALSE` | Build using system stb instead of the bundled version in [./external](./external)                                              |
 | `SLANG_USE_SYSTEM_UNORDERED_DENSE` | `FALSE` | Build using system unordered dense instead of the bundled version in [./external](./external)                                  |
 | `SLANG_SPIRV_HEADERS_INCLUDE_DIR`  | ``      | Use this specific path to SPIR-V headers instead of the bundled version in [./external](./external)                            |
 

@@ -40,12 +40,12 @@ endforeach()
 add_custom_command(
     OUTPUT ${core_module_meta_generated_headers}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${core_module_meta_output_dir}
+    COMMAND ${CMAKE_COMMAND} -E copy -t $<TARGET_FILE_DIR:slang-generate> $<TARGET_RUNTIME_DLLS:slang-generate>
     COMMAND
-        slang-generate ${core_module_meta_source} --target-directory
+        $<TARGET_FILE:slang-generate> ${core_module_meta_source} --target-directory
         ${core_module_meta_output_dir}
     DEPENDS ${core_module_meta_source} slang-generate
-    WORKING_DIRECTORY "${core_module_meta_source_dir}"
-    VERBATIM
+    COMMAND_EXPAND_LISTS
 )
 
 #
@@ -117,12 +117,13 @@ set(glsl_module_generated_header ${glsl_module_generated_header} PARENT_SCOPE)
 
 add_custom_command(
     OUTPUT ${core_module_generated_header} ${glsl_module_generated_header}
+    COMMAND ${CMAKE_COMMAND} -E copy -t $<TARGET_FILE_DIR:slang-bootstrap> $<TARGET_RUNTIME_DLLS:slang-bootstrap>
     COMMAND
-        slang-bootstrap -archive-type riff-lz4 -save-core-module-bin-source
+        $<TARGET_FILE:slang-bootstrap> -archive-type riff-lz4 -save-core-module-bin-source
         ${core_module_generated_header} -save-glsl-module-bin-source
         ${glsl_module_generated_header}
     DEPENDS slang-bootstrap slang-without-embedded-core-module
-    VERBATIM
+    COMMAND_EXPAND_LISTS
 )
 # Add a target so that we can depend on the above step when we create the glsl
 # module
