@@ -3,7 +3,10 @@
 
 #include "slang-fiddle-script.h"
 
+extern "C"
+{
 #include <lauxlib.h>
+}
 
 namespace fiddle
 {
