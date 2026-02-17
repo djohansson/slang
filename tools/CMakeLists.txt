@@ -79,7 +79,7 @@ generator(slang-embed)
 generator(slang-generate USE_FEWER_WARNINGS)
 generator(slang-lookup-generator LINK_WITH_PRIVATE compiler-core)
 generator(slang-capability-generator LINK_WITH_PRIVATE compiler-core)
-generator(slang-spirv-embed-generator LINK_WITH_PRIVATE compiler-core)
+generator(slang-spirv-embed-generator INCLUDE_FROM_PRIVATE SPIRV-Headers::SPIRV-Headers LINK_WITH_PRIVATE compiler-core)
 generator(
     ${slang_SOURCE_DIR}/source/slangc
     TARGET_NAME
@@ -113,6 +113,7 @@ if(SLANG_ENABLE_SLANGD)
     slang_add_target(
         slangd
         EXECUTABLE
+        INCLUDE_FROM_PRIVATE SPIRV-Headers::SPIRV-Headers
         LINK_WITH_PRIVATE
             core
             compiler-core

@@ -432,7 +432,7 @@ if(SLANG_USE_SYSTEM_UNORDERED_DENSE)
 endif()
 
 if(SLANG_USE_SYSTEM_SPIRV_HEADERS)
-    find_package(SPIRV-Headers REQUIRED)
+    find_package(SPIRV-Headers CONFIG REQUIRED)
 endif()
 
 if (SLANG_USE_SYSTEM_MINIZ)
@@ -457,24 +457,6 @@ endif()
 
 if (SLANG_USE_SYSTEM_GLSLANG)
     find_package(glslang CONFIG REQUIRED)
-endif()
-
-if(SLANG_ENABLE_SLANG_GLSLANG)
-    # When using spirv headers via find_package, SPIRV-Headers_SOURCE_DIR is not set
-    # SPIRV-Tools requires that variable, as it uses it to detect if SPIRV-Headers is provided by the consumer.
-    # Fake a source build by setting it here. Ideally SPIRV-Tools should not depend on _SOURCE_DIR
-    if(SLANG_USE_SYSTEM_SPIRV_HEADERS)
-        get_target_property(
-            SPIRV-Headers_SOURCE_DIR
-            SPIRV-Headers::SPIRV-Headers
-            INTERFACE_INCLUDE_DIRECTORIES
-        )
-        cmake_path(
-            GET
-            SPIRV-Headers_SOURCE_DIR
-            PARENT_PATH SPIRV-Headers_SOURCE_DIR
-        )
-    endif()
 endif()
 
 add_subdirectory(external)
