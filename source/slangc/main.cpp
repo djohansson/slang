@@ -154,7 +154,7 @@ int wmain(int argc, wchar_t** argv)
         result = MAIN(argc, (char**)&argBuffers[0]);
     }
 
-#ifdef _MSC_VER
+#if defined(_MSC_VER) && !defined(__clang__)
     // _CrtXXX functions are functional only for debug build. The spec says,
     // "When _DEBUG isn't defined, calls to _CrtSetReportMode are removed
     // during preprocessing."
