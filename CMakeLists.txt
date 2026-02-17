@@ -453,6 +453,8 @@ endif()
 
 if(SLANG_USE_SYSTEM_SPIRV_TOOLS)
     find_package(SPIRV-Tools CONFIG REQUIRED)
+    find_package(SPIRV-Tools-link CONFIG REQUIRED)
+    find_package(SPIRV-Tools-opt CONFIG REQUIRED)
 endif()
 
 if (SLANG_USE_SYSTEM_GLSLANG)

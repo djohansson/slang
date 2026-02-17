@@ -6,7 +6,7 @@ if(SLANG_ENABLE_SLANG_GLSLANG)
         .
         MODULE
         USE_FEWER_WARNINGS
-        LINK_WITH_PRIVATE glslang::glslang glslang::SPIRV SPIRV-Tools-opt SPIRV-Tools-link
+        LINK_WITH_PRIVATE glslang::glslang glslang::SPIRV SPIRV-Tools-static SPIRV-Tools-opt SPIRV-Tools-link
         INCLUDE_DIRECTORIES_PRIVATE ${slang_SOURCE_DIR}/include
         INSTALL
         EXPORT_SET_NAME SlangTargets
