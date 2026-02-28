@@ -120,7 +120,7 @@ SLANG_COMPILE_TIME_ASSERT(E_OUTOFMEMORY == SLANG_E_OUT_OF_MEMORY);
     }
 
     // https://learn.microsoft.com/en-us/windows/win32/api/libloaderapi/nf-libloaderapi-loadlibraryexa
-    const HMODULE h = LoadLibraryExA(platformFileName, nullptr, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+    const HMODULE h = LoadLibraryExA(platformFileName, nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
     if (!h)
     {
         const DWORD lastError = GetLastError();
