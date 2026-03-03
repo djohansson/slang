@@ -8,6 +8,7 @@ slang_add_target(
     INCLUDE_FROM_PRIVATE SPIRV-Headers::SPIRV-Headers
     INCLUDE_DIRECTORIES_PRIVATE
         ${CMAKE_CURRENT_BINARY_DIR}/../slang/slang-version-header
+        ${SPIRV-Headers_SOURCE_DIR}/include
     PRECOMPILE_HEADERS
         ${slang_SOURCE_DIR}/source/core/slang-basic.h
 )

@@ -297,6 +297,8 @@ else()
         ${slang_link_args}
         TARGET_NAME slang-common-objects
         EXCLUDE_FROM_ALL
+        INCLUDE_DIRECTORIES_PRIVATE
+            ${SPIRV-Headers_SOURCE_DIR}/include
     )
     slang_add_target(
         .
