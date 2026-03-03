@@ -1,4 +1,5 @@
 //TEST(compute):COMPARE_COMPUTE_EX:-slang -compute -shaderobj -output-using-type
+//TEST(compute):COMPARE_COMPUTE_EX:-cuda -compute -shaderobj -output-using-type
 //TEST(compute, vulkan):COMPARE_COMPUTE_EX:-vk -compute -shaderobj -output-using-type
 //TEST:SIMPLE(filecheck=CHK):-target glsl -stage compute -entry computeMain -report-checkpoint-intermediates
 
@@ -42,4 +43,4 @@ void computeMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     }
 }
 
-//CHK: (0): note: no checkpoint contexts to report
+//CHK: note: no checkpoint contexts to report

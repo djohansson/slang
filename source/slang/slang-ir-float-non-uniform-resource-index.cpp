@@ -91,7 +91,7 @@ void processNonUniformResourceIndex(
                             user->getOperand(1));
                     }
                     break;
-                case kIROp_swizzle:
+                case kIROp_Swizzle:
                     // Ignore when `NonUniformResourceIndex` is not on base
                     if (user->getOperand(0) == inst)
                     {
@@ -103,7 +103,7 @@ void processNonUniformResourceIndex(
                         operands[0] = inst->getOperand(0);
                         newUser = builder.emitIntrinsicInst(
                             user->getFullType(),
-                            kIROp_swizzle,
+                            kIROp_Swizzle,
                             operands.getCount(),
                             operands.getArrayView().getBuffer());
                     }
@@ -141,7 +141,7 @@ void processNonUniformResourceIndex(
                 case kIROp_NonUniformResourceIndex:
                 case kIROp_CastDescriptorHandleToUInt2:
                 case kIROp_GetElement:
-                case kIROp_swizzle:
+                case kIROp_Swizzle:
                     resWorkList.add(nonuniformUser);
                     break;
                 };
@@ -166,22 +166,48 @@ void processNonUniformResourceIndex(
             continue;
         }
         // For each of the `NonUniformResourceIndex` inst that remain, decorate the base inst
-        // with a [NonUniformResource] decoration, which is the operand0 of the inst, only
-        // when the type is a resource type, or a pointer to a resource type, or a pointer
-        // in the Physical Storage buffer address space.
+        // with a [NonUniformResource] decoration. For SPIR-V we want the decoration on the
+        // index used in access chains, so prefer decorating index operands for getElement/
+        // getElementPtr (and loads of those).
         auto operand = inst->getOperand(0);
         auto type = operand->getDataType();
         if (isResourceType(type) || isPointerToResourceType(type))
         {
             IRBuilder builder(operand);
-            builder.addSPIRVNonUniformResourceDecoration(operand);
-            if (operand->getOp() == kIROp_Load)
+            auto decorate = [&](IRInst* value)
             {
-                // If the inst is a load, then the addr inst itself should also be decorated
-                // with the [NonUniformResource] decoration.
-                auto addr = operand->getOperand(0);
-                if (!addr->findDecoration<IRSPIRVNonUniformResourceDecoration>())
-                    builder.addSPIRVNonUniformResourceDecoration(addr);
+                if (!value->findDecoration<IRSPIRVNonUniformResourceDecoration>())
+                    builder.addSPIRVNonUniformResourceDecoration(value);
+            };
+
+            if (auto gep = as<IRGetElementPtr>(operand))
+            {
+                decorate(gep->getOperand(1));
+            }
+            else if (auto getElement = as<IRGetElement>(operand))
+            {
+                decorate(getElement->getOperand(1));
+            }
+            else if (auto load = as<IRLoad>(operand))
+            {
+                auto addr = load->getOperand(0);
+                if (auto addrGep = as<IRGetElementPtr>(addr))
+                {
+                    decorate(addrGep->getOperand(1));
+                }
+                else if (auto addrGetElement = as<IRGetElement>(addr))
+                {
+                    decorate(addrGetElement->getOperand(1));
+                }
+                else
+                {
+                    decorate(operand);
+                    decorate(addr);
+                }
+            }
+            else
+            {
+                decorate(operand);
             }
         }
         inst->replaceUsesWith(operand);

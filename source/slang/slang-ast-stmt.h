@@ -2,6 +2,8 @@
 #pragma once
 
 #include "slang-ast-base.h"
+
+//
 #include "slang-ast-stmt.h.fiddle"
 
 FIDDLE()
@@ -56,7 +58,6 @@ class UnparsedStmt : public Stmt
     Scope* currentScope = nullptr;
     Scope* outerScope = nullptr;
     SourceLanguage sourceLanguage;
-    bool isInVariadicGenerics = false;
 };
 
 FIDDLE()
@@ -85,6 +86,7 @@ class IfStmt : public Stmt
     FIDDLE() Expr* predicate = nullptr;
     FIDDLE() Stmt* positiveStatement = nullptr;
     FIDDLE() Stmt* negativeStatement = nullptr;
+    FIDDLE() SourceLoc afterLoc;
 };
 
 FIDDLE()

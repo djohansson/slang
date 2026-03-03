@@ -69,27 +69,45 @@ static bool _isSubCommand(const char* arg)
         "  -bindir <path>                 Set directory for binaries (default: the path to the "
         "slang-test executable)\n"
         "  -test-dir <path>               Set directory for test files (default: tests/)\n"
-        "  -v                             Enable verbose output\n"
+        "  -v [level]                     Set verbosity level (verbose, info, failure)\n"
+        "                                 Default: verbose when -v used, info otherwise\n"
         "  -hide-ignored                  Hide results from ignored tests\n"
         "  -api-only                      Only run tests that use specified APIs\n"
         "  -verbose-paths                 Use verbose paths in output\n"
         "  -category <name>               Only run tests in specified category\n"
         "  -exclude <name>                Exclude tests in specified category\n"
+        "  -exclude-prefix <prefix>       Exclude tests with specified path prefix\n"
         "  -api <expr>                    Enable specific APIs (e.g., 'vk+dx12' or '+dx11')\n"
         "  -synthesizedTestApi <expr>     Set APIs for synthesized tests\n"
         "  -skip-api-detection            Skip API availability detection\n"
+        "  -only-api-detection            Only run API detection and print results, then exit\n"
         "  -server-count <n>              Set number of test servers (default: 1)\n"
         "  -show-adapter-info             Show detailed adapter information\n"
         "  -generate-hlsl-baselines       Generate HLSL test baselines\n"
         "  -skip-reference-image-generation Skip generating reference images for render tests\n"
         "  -emit-spirv-via-glsl           Emit SPIR-V through GLSL instead of directly\n"
         "  -expected-failure-list <file>  Specify file containing expected failures\n"
+        "  -skip-list <file>              Specify file containing tests to skip (path prefixes)\n"
         "  -use-shared-library            Run tests in-process using shared library\n"
         "  -use-test-server               Run tests using test server\n"
         "  -use-fully-isolated-test-server  Run each test in isolated server\n"
         "  -capability <name>             Compile with the given capability\n"
+        "  -shuffle-tests                 Shuffle tests in directories\n"
+        "  -shuffle-seed <seed>           Set shuffle seed (default: 1)\n"
+        "  -explicit-test-order           Run tests in the order specified on command line\n"
+        "                                 (alphabetical for prefixes matching multiple tests)\n"
+        "  -dry-run                       List tests that would be run without running them\n"
+        "  -disable-retries               Disable automatic retries of failed tests\n"
+
+        // Recent Windows runtime versions started opening a dialog popup window when
+        // `abort()` is called, which breaks the CI workflow and some scripts that
+        // expect a normal termination.
+        // It can be helpful for debugging but we should ignore it for CI.
+        "  -ignore-abort-msg              Ignore abort message dialog popup on Windows\n"
+
         "  -enable-debug-layers [true|false] Enable or disable Validation Layer for Vulkan\n"
         "                                 and Debug Device for DX\n"
+        "  -cache-rhi-device [true|false] Enable or disable RHI device caching (default: true)\n"
 #if _DEBUG
         "  -disable-debug-layers          Disable the debug layers (default enabled in debug "
         "build)\n"
@@ -110,6 +128,7 @@ static bool _isSubCommand(const char* arg)
     int argc,
     char** argv,
     TestCategorySet* categorySet,
+    Slang::WriterHelper stdOut,
     Slang::WriterHelper stdError,
     Options* optionsOut)
 {
@@ -146,7 +165,7 @@ static bool _isSubCommand(const char* arg)
     {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0)
         {
-            showHelp(stdError);
+            showHelp(stdOut);
             return SLANG_FAIL;
         }
     }
@@ -215,7 +234,35 @@ static bool _isSubCommand(const char* arg)
         }
         else if (strcmp(arg, "-v") == 0)
         {
-            optionsOut->shouldBeVerbose = true;
+            if (argCursor == argEnd)
+            {
+                // Default to verbose if no argument provided (backward compatibility)
+                optionsOut->verbosity = VerbosityLevel::Verbose;
+            }
+            else
+            {
+                const char* verbosityArg = *argCursor;
+                if (strcmp(verbosityArg, "verbose") == 0)
+                {
+                    optionsOut->verbosity = VerbosityLevel::Verbose;
+                    argCursor++;
+                }
+                else if (strcmp(verbosityArg, "info") == 0)
+                {
+                    optionsOut->verbosity = VerbosityLevel::Info;
+                    argCursor++;
+                }
+                else if (strcmp(verbosityArg, "failure") == 0)
+                {
+                    optionsOut->verbosity = VerbosityLevel::Failure;
+                    argCursor++;
+                }
+                else
+                {
+                    // Not a verbosity level, treat as old-style -v
+                    optionsOut->verbosity = VerbosityLevel::Verbose;
+                }
+            }
         }
         else if (strcmp(arg, "-hide-ignored") == 0)
         {
@@ -232,6 +279,36 @@ static bool _isSubCommand(const char* arg)
         else if (strcmp(arg, "-generate-hlsl-baselines") == 0)
         {
             optionsOut->generateHLSLBaselines = true;
+        }
+        else if (strcmp(arg, "-shuffle-tests") == 0)
+        {
+            optionsOut->shuffleTests = true;
+        }
+        else if (strcmp(arg, "-explicit-test-order") == 0)
+        {
+            optionsOut->explicitTestOrder = true;
+        }
+        else if (strcmp(arg, "-dry-run") == 0)
+        {
+            optionsOut->dryRun = true;
+        }
+        else if (strcmp(arg, "-disable-retries") == 0)
+        {
+            optionsOut->disableRetries = true;
+        }
+        else if (strcmp(arg, "-shuffle-seed") == 0)
+        {
+            if (argCursor == argEnd)
+            {
+                stdError.print("error: expected operand for '%s'\n", arg);
+                showHelp(stdError);
+                return SLANG_FAIL;
+            }
+            optionsOut->shuffleSeed = stringToInt(*argCursor++);
+            if (optionsOut->shuffleSeed <= 0)
+            {
+                optionsOut->shuffleSeed = 1;
+            }
         }
         else if (strcmp(arg, "-release") == 0)
         {
@@ -327,6 +404,18 @@ static bool _isSubCommand(const char* arg)
                 optionsOut->excludeCategories.add(category, category);
             }
         }
+        else if (strcmp(arg, "-exclude-prefix") == 0)
+        {
+            if (argCursor == argEnd)
+            {
+                stdError.print("error: expected operand for '%s'\n", arg);
+                showHelp(stdError);
+                return SLANG_FAIL;
+            }
+            Slang::StringBuilder sb;
+            Slang::Path::simplify(*argCursor++, Slang::Path::SimplifyStyle::NoRoot, sb);
+            optionsOut->excludePrefixes.add(sb);
+        }
         else if (strcmp(arg, "-api") == 0)
         {
             if (argCursor == argEnd)
@@ -373,7 +462,23 @@ static bool _isSubCommand(const char* arg)
         }
         else if (strcmp(arg, "-skip-api-detection") == 0)
         {
+            if (optionsOut->apiDetectionOnly)
+            {
+                stdError.print(
+                    "error: -only-api-detection and -skip-api-detection are mutually exclusive\n");
+                return SLANG_FAIL;
+            }
             optionsOut->skipApiDetection = true;
+        }
+        else if (strcmp(arg, "-only-api-detection") == 0)
+        {
+            if (optionsOut->skipApiDetection)
+            {
+                stdError.print(
+                    "error: -only-api-detection and -skip-api-detection are mutually exclusive\n");
+                return SLANG_FAIL;
+            }
+            optionsOut->apiDetectionOnly = true;
         }
         else if (strcmp(arg, "-emit-spirv-via-glsl") == 0)
         {
@@ -388,6 +493,13 @@ static bool _isSubCommand(const char* arg)
                 return SLANG_FAIL;
             }
             optionsOut->capabilities.add(*argCursor++);
+        }
+        else if (strcmp(arg, "-ignore-abort-msg") == 0)
+        {
+            optionsOut->ignoreAbortMsg = true;
+#ifdef _MSC_VER
+            _set_abort_behavior(0, _WRITE_ABORT_MSG);
+#endif
         }
         else if (strcmp(arg, "-expected-failure-list") == 0)
         {
@@ -404,7 +516,53 @@ static bool _isSubCommand(const char* arg)
             StringUtil::split(text.getUnownedSlice(), '\n', lines);
             for (auto line : lines)
             {
-                optionsOut->expectedFailureList.add(line);
+                // Remove comments (everything after '#' character)
+                auto trimmedLine = line;
+                auto commentIndex = line.indexOf('#');
+                if (commentIndex != -1)
+                {
+                    trimmedLine = line.head(commentIndex);
+                }
+
+                // Trim whitespace and skip empty lines
+                trimmedLine = trimmedLine.trim();
+                if (trimmedLine.getLength() > 0)
+                {
+                    optionsOut->expectedFailureList.add(trimmedLine);
+                }
+            }
+        }
+        else if (strcmp(arg, "-skip-list") == 0)
+        {
+            if (argCursor == argEnd)
+            {
+                stdError.print("error: expected operand for '%s'\n", arg);
+                showHelp(stdError);
+                return SLANG_FAIL;
+            }
+            auto fileName = *argCursor++;
+            String text;
+            File::readAllText(fileName, text);
+            List<UnownedStringSlice> lines;
+            StringUtil::split(text.getUnownedSlice(), '\n', lines);
+            for (auto line : lines)
+            {
+                // Remove comments (everything after '#' character)
+                auto trimmedLine = line;
+                auto commentIndex = line.indexOf('#');
+                if (commentIndex != -1)
+                {
+                    trimmedLine = line.head(commentIndex);
+                }
+
+                // Trim whitespace and skip empty lines
+                trimmedLine = trimmedLine.trim();
+                if (trimmedLine.getLength() > 0)
+                {
+                    Slang::StringBuilder sb;
+                    Slang::Path::simplify(trimmedLine, Slang::Path::SimplifyStyle::NoRoot, sb);
+                    optionsOut->skipList.add(sb);
+                }
             }
         }
         else if (strcmp(arg, "-test-dir") == 0)
@@ -445,6 +603,26 @@ static bool _isSubCommand(const char* arg)
                 optionsOut->enableDebugLayers = false;
             }
         }
+        else if (strcmp(arg, "-cache-rhi-device") == 0)
+        {
+            optionsOut->cacheRhiDevice = true;
+
+            if (argCursor == argEnd)
+            {
+                stdError.print("error: expected operand for '%s'\n", arg);
+                showHelp(stdError);
+                return SLANG_FAIL;
+            }
+
+            // Check for false variants
+            const char* value = *argCursor++;
+            if (value[0] == 'f' || value[0] == 'F' || value[0] == 'n' || value[0] == 'N' ||
+                value[0] == '0' ||
+                ((value[0] == 'o' || value[0] == 'O') && (value[1] == 'f' || value[1] == 'F')))
+            {
+                optionsOut->cacheRhiDevice = false;
+            }
+        }
 #if _DEBUG
         else if (strcmp(arg, "-disable-debug-layers") == 0)
         {
@@ -471,6 +649,12 @@ static bool _isSubCommand(const char* arg)
         optionsOut->synthesizedTestApis &= optionsOut->enabledApis;
     }
 
+    // Check for conflicting options
+    if (optionsOut->shuffleTests && optionsOut->explicitTestOrder)
+    {
+        stdError.print("error: -shuffle-tests and -explicit-test-order are mutually exclusive\n");
+        return SLANG_FAIL;
+    }
 
     // first positional argument is source shader path
     optionsOut->testPrefixes.clear();

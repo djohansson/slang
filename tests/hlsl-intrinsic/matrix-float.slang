@@ -3,12 +3,14 @@
 
 //TEST(compute):COMPARE_COMPUTE_EX:-cpu -compute -output-using-type -shaderobj
 //TEST(compute):COMPARE_COMPUTE_EX:-slang -compute -output-using-type -shaderobj
-//TEST(compute):COMPARE_COMPUTE_EX:-slang -compute -dx12 -use-dxil -output-using-type -shaderobj -render-feature hardware-device
+//TEST(compute):COMPARE_COMPUTE_EX:-slang -compute -dx12 -output-using-type -shaderobj -render-feature hardware-device
 //DISABLE_TEST(compute, vulkan):COMPARE_COMPUTE_EX:-vk -compute -output-using-type -shaderobj
 //TEST(compute, vulkan):COMPARE_COMPUTE_EX:-cuda -compute -output-using-type -shaderobj
 //DISABLE_TEST(compute):COMPARE_COMPUTE:-slang -shaderobj -mtl
 // Not supported in WGSL: Integer matrices, Double and other unsupported scalar types
 //DISABLE_TEST(compute):COMPARE_COMPUTE_EX:-wgpu
+//TEST(compute):COMPARE_COMPUTE_EX:-llvm -compute -output-using-type -shaderobj
+//TEST(compute):COMPARE_COMPUTE_EX:-mtl -compute -output-using-type -shaderobj
 
 //TEST_INPUT:ubuffer(data=[0 0 0 0], stride=4):out,name outputBuffer
 RWStructuredBuffer<float> outputBuffer;

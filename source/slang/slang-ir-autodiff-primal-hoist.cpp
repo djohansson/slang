@@ -225,11 +225,11 @@ static Dictionary<IRBlock*, IRBlock*> createPrimalRecomputeBlocks(
             switch (terminator->getOp())
             {
             case kIROp_Switch:
-            case kIROp_ifElse:
+            case kIROp_IfElse:
                 newTerminator =
                     cloneCtx->cloneInstOutOfOrder(&builder, primalBlock->getTerminator());
                 break;
-            case kIROp_unconditionalBranch:
+            case kIROp_UnconditionalBranch:
                 newTerminator =
                     builder.emitBranch(as<IRUnconditionalBranch>(terminator)->getTargetBlock());
                 break;
@@ -302,20 +302,6 @@ bool areIndicesSubsetOf(List<IndexTrackingInfo>& indicesA, List<IndexTrackingInf
         if (indicesA[ii].primalCountParam != indicesB[ii + offset].primalCountParam)
             return false;
     }
-
-    return true;
-}
-
-bool canInstBeStored(IRInst* inst)
-{
-    // Cannot store insts whose value is a type or a witness table, or a function.
-    // These insts get lowered to target-specific logic, and cannot be
-    // stored into variables or context structs as normal values.
-    //
-    if (as<IRTypeType>(inst->getDataType()) || as<IRWitnessTableType>(inst->getDataType()) ||
-        as<IRTypeKind>(inst->getDataType()) || as<IRFuncType>(inst->getDataType()) ||
-        !inst->getDataType())
-        return false;
 
     return true;
 }
@@ -2667,11 +2653,12 @@ static bool shouldStoreInst(IRInst* inst)
     case kIROp_ExtractExistentialValue:
     case kIROp_ExtractExistentialType:
     case kIROp_ExtractExistentialWitnessTable:
-    case kIROp_undefined:
+    case kIROp_LoadFromUninitializedMemory:
+    case kIROp_Poison:
     case kIROp_GetSequentialID:
     case kIROp_GetStringHash:
     case kIROp_Specialize:
-    case kIROp_LookupWitness:
+    case kIROp_LookupWitnessMethod:
     case kIROp_Param:
     case kIROp_DetachDerivative:
         return false;
@@ -2704,7 +2691,7 @@ static bool shouldStoreInst(IRInst* inst)
 
     case kIROp_GetElement:
     case kIROp_FieldExtract:
-    case kIROp_swizzle:
+    case kIROp_Swizzle:
     case kIROp_UpdateElement:
     case kIROp_OptionalHasValue:
     case kIROp_GetOptionalValue:
@@ -2814,7 +2801,7 @@ bool DefaultCheckpointPolicy::canRecompute(UseOrPseudoUse use)
         {
             // An exception is a load of a constref parameter, which should
             // remain constant throughout the function.
-            if (as<IRConstRefType>(getRootAddr(ptr)->getDataType()))
+            if (as<IRBorrowInParamType>(getRootAddr(ptr)->getDataType()))
                 return true;
             if (isInstInPrimalOrTransposedParameterBlocks(ptr))
                 return false;

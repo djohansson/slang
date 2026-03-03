@@ -2,10 +2,9 @@
 #include "clang/Basic/TargetOptions.h"
 #include "clang/Basic/Version.h"
 #include "clang/CodeGen/CodeGenAction.h"
-#include "clang/CodeGen/ObjectFilePCHContainerOperations.h"
+#include "clang/CodeGen/ObjectFilePCHContainerWriter.h"
 #include "clang/Config/config.h"
 #include "clang/Driver/DriverDiagnostic.h"
-#include "clang/Driver/Options.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/CompilerInvocation.h"
 #include "clang/Frontend/FrontendAction.h"
@@ -15,9 +14,11 @@
 #include "clang/Frontend/Utils.h"
 #include "clang/FrontendTool/Utils.h"
 #include "clang/Lex/PreprocessorOptions.h"
+#include "clang/Serialization/ObjectFilePCHContainerReader.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Config/llvm-config.h"
 #include "llvm/LinkAllPasses.h"
+#include "llvm/MC/TargetRegistry.h"
 #include "llvm/Option/Arg.h"
 #include "llvm/Option/ArgList.h"
 #include "llvm/Option/OptTable.h"
@@ -28,12 +29,12 @@
 #include "llvm/Support/Path.h"
 #include "llvm/Support/Process.h"
 #include "llvm/Support/Signals.h"
-#include "llvm/Support/TargetRegistry.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/TimeProfiler.h"
 #include "llvm/Support/Timer.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetMachine.h"
+#include "llvm/TargetParser/Host.h"
 
 // Jit
 #include "llvm/ExecutionEngine/JITEventListener.h"
@@ -49,12 +50,14 @@
 
 #include "slang-com-helper.h"
 #include "slang-com-ptr.h"
+#include "slang-llvm-jit-shared-library.h"
 #include "slang.h"
 
 #include <compiler-core/slang-artifact-associated-impl.h>
 #include <compiler-core/slang-artifact-desc-util.h>
 #include <compiler-core/slang-downstream-compiler.h>
 #include <compiler-core/slang-slice-allocator.h>
+#include <compiler-core/slang-target-builtin-type-layout-info.h>
 #include <core/slang-com-object.h>
 #include <core/slang-hash.h>
 #include <core/slang-list.h>
@@ -170,81 +173,14 @@ public:
     Desc m_desc;
 };
 
-
-/* !!!!!!!!!!!!!!!!!!!!! LLVMJITSharedLibrary !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! */
-
-/* This implementation uses atomic ref counting to ensure the shared libraries lifetime can outlive
-the LLVMDownstreamCompileResult and the compilation that created it */
-class LLVMJITSharedLibrary : public ComBaseObject, public ISlangSharedLibrary
-{
-public:
-    // ISlangUnknown
-    SLANG_COM_BASE_IUNKNOWN_ALL
-
-    /// ICastable
-    virtual SLANG_NO_THROW void* SLANG_MCALL castAs(const Guid& guid) SLANG_OVERRIDE;
-
-    // ISlangSharedLibrary impl
-    virtual SLANG_NO_THROW void* SLANG_MCALL findSymbolAddressByName(char const* name)
-        SLANG_OVERRIDE;
-
-    LLVMJITSharedLibrary(std::unique_ptr<llvm::orc::LLJIT> jit)
-        : m_jit(std::move(jit))
-    {
-    }
-
-protected:
-    ISlangUnknown* getInterface(const SlangUUID& uuid);
-    void* getObject(const SlangUUID& uuid);
-
-    std::unique_ptr<llvm::orc::LLJIT> m_jit;
-};
-
-ISlangUnknown* LLVMJITSharedLibrary::getInterface(const SlangUUID& guid)
-{
-    if (guid == ISlangUnknown::getTypeGuid() || guid == ISlangCastable::getTypeGuid() ||
-        guid == ISlangSharedLibrary::getTypeGuid())
-    {
-        return static_cast<ISlangSharedLibrary*>(this);
-    }
-    return nullptr;
-}
-
-void* LLVMJITSharedLibrary::getObject(const SlangUUID& uuid)
-{
-    SLANG_UNUSED(uuid);
-    return nullptr;
-}
-
-void* LLVMJITSharedLibrary::castAs(const Guid& guid)
-{
-    if (auto ptr = getInterface(guid))
-    {
-        return ptr;
-    }
-    return getObject(guid);
-}
-
-void* LLVMJITSharedLibrary::findSymbolAddressByName(char const* name)
-{
-    auto fnExpected = m_jit->lookup(name);
-    if (fnExpected)
-    {
-        auto fn = std::move(*fnExpected);
-        return (void*)fn.getAddress();
-    }
-    return nullptr;
-}
-
-
 static void _ensureSufficientStack() {}
 
-static void _llvmErrorHandler(void* userData, const std::string& message, bool genCrashDiag)
+static void _llvmErrorHandler(void* userData, const char* message, bool genCrashDiag)
 {
     // DiagnosticsEngine& diags = *static_cast<DiagnosticsEngine*>(userData);
     // diags.Report(diag::err_fe_error_backend) << message;
 
-    printf("Clang/LLVM fatal error: %s\n", message.c_str());
+    printf("Clang/LLVM fatal error: %s\n", message);
 
     // Run the interrupt handlers to make sure any special cleanups get done, in
     // particular that we remove files registered with RemoveFileOnSignal.
@@ -432,6 +368,9 @@ static uint64_t __stdcall _aulldiv(uint64_t a, uint64_t b)
     x(F64_sinh, sinh, double, (double)) \
     x(F64_cosh, cosh, double, (double)) \
     x(F64_tanh, tanh, double, (double)) \
+    x(F64_asinh, asinh, double, (double)) \
+    x(F64_acosh, acosh, double, (double)) \
+    x(F64_atanh, atanh, double, (double)) \
     x(F64_log2, log2, double, (double)) \
     x(F64_log, log, double, (double)) \
     x(F64_log10, log10, double, (double)) \
@@ -467,6 +406,9 @@ static uint64_t __stdcall _aulldiv(uint64_t a, uint64_t b)
     x(F32_sinh, sinhf, float, (float)) \
     x(F32_cosh, coshf, float, (float)) \
     x(F32_tanh, tanhf, float, (float)) \
+    x(F32_asinh, asinhf, float, (float)) \
+    x(F32_acosh, acoshf, float, (float)) \
+    x(F32_atanh, atanhf, float, (float)) \
     x(F32_log2, log2f, float, (float)) \
     x(F32_log, logf, float, (float)) \
     x(F32_log10, log10f, float, (float)) \
@@ -654,7 +596,7 @@ SlangResult LLVMDownstreamCompiler::compile(
     pchOps->registerWriter(std::make_unique<ObjectFilePCHContainerWriter>());
     pchOps->registerReader(std::make_unique<ObjectFilePCHContainerReader>());
 
-    IntrusiveRefCntPtr<DiagnosticOptions> diagOpts = new DiagnosticOptions();
+    DiagnosticOptions diagOpts;
 
     ComPtr<IArtifactDiagnostics> diagnostics(new ArtifactDiagnostics);
 
@@ -722,8 +664,6 @@ SlangResult LLVMDownstreamCompiler::compile(
         }
     }
 
-    const InputKind inputKind(language, InputKind::Format::Source);
-
     {
         auto& opts = invocation.getFrontendOpts();
 
@@ -733,7 +673,7 @@ SlangResult LLVMDownstreamCompiler::compile(
         // input is a memory buffer. For Slang usage, this probably isn't an issue, because it's
         // *output* typically holds #line directives.
         {
-
+            const InputKind inputKind(language, InputKind::Format::Source);
             FrontendInputFile inputFile(*sourceBuffer, inputKind);
             opts.Inputs.push_back(inputFile);
         }
@@ -777,7 +717,7 @@ SlangResult LLVMDownstreamCompiler::compile(
     }
 
     {
-        auto opts = invocation.getLangOpts();
+        auto& opts = invocation.getLangOpts();
 
         std::vector<std::string> includes;
         for (const auto& includePath : options.includePaths)
@@ -785,16 +725,11 @@ SlangResult LLVMDownstreamCompiler::compile(
             includes.push_back(includePath.begin());
         }
 
-        clang::CompilerInvocation::setLangDefaults(
-            *opts,
-            inputKind,
-            targetTriple,
-            includes,
-            langStd);
+        clang::LangOptions::setLangDefaults(opts, language, targetTriple, includes, langStd);
 
         if (options.floatingPointMode == DownstreamCompileOptions::FloatingPointMode::Fast)
         {
-            opts->FastMath = true;
+            opts.FastMath = true;
         }
     }
 
@@ -854,7 +789,7 @@ SlangResult LLVMDownstreamCompiler::compile(
 #endif
 
     // Create the actual diagnostics engine.
-    clang->createDiagnostics();
+    clang->createDiagnostics(*llvm::vfs::getRealFileSystem(), diagOpts);
     clang->setDiagnostics(diags.get());
 
     if (!clang->hasDiagnostics())
@@ -862,7 +797,11 @@ SlangResult LLVMDownstreamCompiler::compile(
 
     //
     clang->createFileManager();
+#if LLVM_VERSION_MAJOR <= 21
     clang->createSourceManager(clang->getFileManager());
+#else
+    clang->createSourceManager();
+#endif
 
 
     std::unique_ptr<LLVMContext> llvmContext = std::make_unique<LLVMContext>();
@@ -1038,36 +977,33 @@ SlangResult LLVMDownstreamCompiler::compile(
                     // Add all the symbolmap
                     SymbolMap symbolMap;
 
-                    // symbolMap.insert(std::make_pair(mangler("sin"),
-                    // JITEvaluatedSymbol::fromPointer(static_cast<double (*)(double)>(&sin))));
-
                     {
                         static const NameAndFunc funcs[] = {SLANG_LLVM_FUNCS(
                             SLANG_LLVM_FUNC) SLANG_PLATFORM_FUNCS(SLANG_LLVM_FUNC)};
 
                         for (auto& func : funcs)
                         {
-                            symbolMap.insert(std::make_pair(
-                                mangler(func.name),
-                                JITEvaluatedSymbol::fromPointer(func.func)));
+                            symbolMap[mangler(func.name)] = {
+                                ExecutorAddr::fromPtr(func.func),
+                                JITSymbolFlags::Callable};
                         }
                     }
 
 #if SLANG_PTR_IS_32 && SLANG_VC
                     {
                         // https://docs.microsoft.com/en-us/windows/win32/devnotes/-win32-alldiv
-                        symbolMap.insert(std::make_pair(
-                            mangler("_alldiv"),
-                            JITEvaluatedSymbol::fromPointer(WinSpecific::_alldiv)));
-                        symbolMap.insert(std::make_pair(
-                            mangler("_allrem"),
-                            JITEvaluatedSymbol::fromPointer(WinSpecific::_allrem)));
-                        symbolMap.insert(std::make_pair(
-                            mangler("_aullrem"),
-                            JITEvaluatedSymbol::fromPointer(WinSpecific::_aullrem)));
-                        symbolMap.insert(std::make_pair(
-                            mangler("_aulldiv"),
-                            JITEvaluatedSymbol::fromPointer(WinSpecific::_aulldiv)));
+                        symbolMap[mangler("_alldiv")] = {
+                            ExecutorAddr::fromPtr(WinSpecific::_alldiv),
+                            JITSymbolFlags::Callable};
+                        symbolMap[mangler("_allrem")] = {
+                            ExecutorAddr::fromPtr(WinSpecific::_allrem),
+                            JITSymbolFlags::Callable};
+                        symbolMap[mangler("_aulldiv")] = {
+                            ExecutorAddr::fromPtr(WinSpecific::_aulldiv),
+                            JITSymbolFlags::Callable};
+                        symbolMap[mangler("_aullrem")] = {
+                            ExecutorAddr::fromPtr(WinSpecific::_aullrem),
+                            JITSymbolFlags::Callable};
                     }
 #endif
 
@@ -1077,7 +1013,9 @@ SlangResult LLVMDownstreamCompiler::compile(
                     }
 
                     // Required or the symbols won't be found
-                    jit->getMainJITDylib().addToLinkOrder(stdcLib);
+                    jit->getMainJITDylib().addToLinkOrder(
+                        stdcLib,
+                        JITDylibLookupFlags::MatchAllSymbols);
                 }
             }
 
@@ -1128,4 +1066,27 @@ createLLVMDownstreamCompiler_V4(const SlangUUID& intfGuid, Slang::IDownstreamCom
     }
 
     return SLANG_E_NO_INTERFACE;
+}
+
+extern "C" SLANG_DLL_EXPORT SlangResult getLLVMTargetBuiltinTypeLayoutInfo_V1(
+    Slang::CharSlice targetTripleSlice,
+    Slang::TargetBuiltinTypeLayoutInfo* out)
+{
+    llvm::InitializeAllTargetInfos();
+    llvm::InitializeAllTargets();
+    llvm::InitializeAllTargetMCs();
+
+    std::string targetTripleStr;
+    if (targetTripleSlice.count != 0)
+        targetTripleStr = std::string(targetTripleSlice.begin(), targetTripleSlice.count);
+    else
+        targetTripleStr = llvm::sys::getDefaultTargetTriple();
+
+    llvm::Triple targetTriple(targetTripleStr);
+
+    unsigned pointerBits = targetTriple.getArchPointerBitWidth();
+
+    out->genericPointerSize = pointerBits / 8;
+
+    return SLANG_OK;
 }

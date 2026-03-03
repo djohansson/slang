@@ -2,6 +2,8 @@
 #pragma once
 
 #include "slang-ast-base.h"
+
+//
 #include "slang-ast-expr.h.fiddle"
 
 FIDDLE()
@@ -79,7 +81,7 @@ class OverloadedExpr2 : public Expr
     Expr* base = nullptr;
 
     // The lookup result that was ambiguous
-    List<Expr*> candidiateExprs;
+    List<Expr*> candidateExprs;
 };
 
 FIDDLE(abstract)
@@ -500,6 +502,31 @@ class CountOfExpr : public SizeOfLikeExpr
     FIDDLE(...)
 };
 
+/// Expression for compile-time bit casting from floating-point to integer.
+/// __floatAsInt(expr) reinterprets the bits of a floating-point value as an integer.
+/// The input can be:
+///   - A floating-point literal with suffix: 1.0h (half), 1.0f or 1.0 (float), 1.0lf (double)
+///   - An explicit cast: half(x), float(x), double(x)
+/// Returns:
+///   - half -> int16_t
+///   - float -> int32_t (int)
+///   - double -> int64_t
+/// This is evaluated at compile-time when the argument is a constant.
+FIDDLE()
+class FloatBitCastExpr : public Expr
+{
+    FIDDLE(...)
+    /// The floating-point expression being bit-cast
+    FIDDLE() Expr* value = nullptr;
+};
+
+FIDDLE()
+class AddressOfExpr : public Expr
+{
+    FIDDLE(...)
+    FIDDLE() Expr* arg = nullptr;
+};
+
 FIDDLE()
 class MakeOptionalExpr : public Expr
 {
@@ -576,7 +603,7 @@ FIDDLE()
 class ParenExpr : public Expr
 {
     FIDDLE(...)
-    Expr* base = nullptr;
+    FIDDLE() Expr* base = nullptr;
 };
 
 // An expression that constructs a tuple `(arg1, arg2, ...)`
@@ -800,6 +827,7 @@ class PartiallyAppliedGenericExpr : public Expr
     FIDDLE(...)
 public:
     Expr* originalExpr = nullptr;
+    Expr* baseExpr = nullptr;
 
     /// The generic being applied
     DeclRef<GenericDecl> baseGenericDeclRef;

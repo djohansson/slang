@@ -3,7 +3,9 @@
 
 #include "slang-ir-dominators.h"
 #include "slang-ir-insts.h"
+#include "slang-ir-util.h"
 #include "slang-ir.h"
+#include "slang-rich-diagnostics.h"
 
 namespace Slang
 {
@@ -59,8 +61,12 @@ bool isConstExpr(IRInst* value)
     case kIROp_StructKey:
     case kIROp_WitnessTable:
     case kIROp_Generic:
+    case kIROp_GlobalConstant:
         return true;
-
+    case kIROp_Param:
+        if (isGenericParam(value))
+            return true;
+        break;
     default:
         break;
     }
@@ -92,10 +98,13 @@ bool opCanBeConstExpr(IROp op)
     case kIROp_Less:
     case kIROp_Neq:
     case kIROp_Eql:
+    case kIROp_And:
+    case kIROp_Or:
     case kIROp_BitAnd:
     case kIROp_BitOr:
     case kIROp_BitXor:
     case kIROp_BitNot:
+    case kIROp_Not:
     case kIROp_Lsh:
     case kIROp_Rsh:
     case kIROp_Select:
@@ -129,7 +138,7 @@ bool opCanBeConstExpr(IROp op)
     case kIROp_MakeUInt64:
     case kIROp_MakeArray:
     case kIROp_MakeArrayFromElement:
-    case kIROp_swizzle:
+    case kIROp_Swizzle:
     case kIROp_GetElement:
     case kIROp_FieldExtract:
     case kIROp_UpdateElement:
@@ -142,7 +151,7 @@ bool opCanBeConstExpr(IROp op)
     case kIROp_GetOptionalValue:
     case kIROp_DifferentialPairGetDifferential:
     case kIROp_DifferentialPairGetPrimal:
-    case kIROp_LookupWitness:
+    case kIROp_LookupWitnessMethod:
     case kIROp_Specialize:
         // TODO: more cases
         return true;
@@ -156,8 +165,10 @@ bool opCanBeConstExprByForwardPass(IRInst* value)
 {
     // TODO: handle call inst here.
 
-    if (value->getOp() == kIROp_Param)
+    if (value->getOp() == kIROp_Param || value->getOp() == kIROp_Specialize)
+    {
         return false;
+    }
     return opCanBeConstExpr(value->getOp());
 }
 
@@ -393,12 +404,6 @@ bool propagateConstExprBackward(PropagateConstExprContext* context, IRGlobalValu
                     // the callee for this call statically, and if so try to propagate
                     // constexpr from the parameters back to the arguments.
                     auto callInst = (IRCall*)ii;
-
-                    UInt operandCount = callInst->getOperandCount();
-
-                    UInt firstCallArg = 1;
-                    UInt callArgCount = operandCount - firstCallArg;
-
                     auto callee = callInst->getOperand(0);
 
                     // If we are calling a generic operation, then
@@ -423,64 +428,35 @@ bool propagateConstExprBackward(PropagateConstExprContext* context, IRGlobalValu
                     }
 
                     auto calleeFunc = as<IRFunc>(callee);
-                    if (calleeFunc && isDefinition(calleeFunc))
+                    auto calleeType = callee->getDataType();
+                    if (auto caleeFuncType = as<IRFuncType>(calleeType))
                     {
-                        // We have an IR-level function definition we are calling,
-                        // and thus we can propagate `constexpr` information
-                        // through its `IRParam`s.
-
-                        auto calleeFuncType = calleeFunc->getDataType();
-
-                        UInt callParamCount = calleeFuncType->getParamCount();
-                        SLANG_RELEASE_ASSERT(callParamCount == callArgCount);
-
-                        // If the callee has a definition, then we can read `constexpr`
-                        // information off of the parameters of its first IR block.
-                        if (auto calleeFirstBlock = calleeFunc->getFirstBlock())
+                        UInt operandCount = callInst->getOperandCount();
+                        UInt firstCallArg = 1;
+                        UInt callArgCount = operandCount - firstCallArg;
+                        auto paramCount = caleeFuncType->getParamCount();
+                        SLANG_RELEASE_ASSERT(paramCount == callArgCount);
+                        for (UInt pp = 0; pp < paramCount; ++pp)
                         {
-                            UInt paramCounter = 0;
-                            for (auto pp = calleeFirstBlock->getFirstParam(); pp;
-                                 pp = pp->getNextParam())
+                            auto paramType = caleeFuncType->getParamType(pp);
+                            if (isConstExpr(paramType))
                             {
-                                UInt paramIndex = paramCounter++;
-
-                                auto param = pp;
-                                auto arg = callInst->getOperand(firstCallArg + paramIndex);
-
-                                if (isConstExpr(param))
-                                {
-                                    if (maybeMarkConstExprBackwardPass(context, arg))
-                                    {
-                                        changedThisIteration = true;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    else
-                    {
-                        // If we don't have a concrete callee function
-                        // definition, then we need to extract the
-                        // type of the callee instruction, and try to work
-                        // with that.
-                        //
-                        // Note that this does not allow us to propagate
-                        // `constexpr` information from the body of a callee
-                        // back to call sites.
-                        auto calleeType = callee->getDataType();
-                        if (auto caleeFuncType = as<IRFuncType>(calleeType))
-                        {
-                            auto paramCount = caleeFuncType->getParamCount();
-                            for (UInt pp = 0; pp < paramCount; ++pp)
-                            {
-                                auto paramType = caleeFuncType->getParamType(pp);
                                 auto arg = callInst->getOperand(firstCallArg + pp);
-                                if (isConstExpr(paramType))
+                                if (maybeMarkConstExprBackwardPass(context, arg))
                                 {
-                                    if (maybeMarkConstExprBackwardPass(context, arg))
-                                    {
-                                        changedThisIteration = true;
-                                    }
+                                    changedThisIteration = true;
+                                }
+                                // If arg is not constexpr after this, meaning it can't be
+                                // marked constexpr for some reason, but the param requires
+                                // that. This is not expected.
+                                if (!isConstExpr(arg))
+                                {
+                                    context->getSink()->diagnose(Diagnostics::ArgIsNotConstexpr{
+                                        .argIndex = static_cast<int64_t>(pp + 1),
+                                        .funcName = calleeFunc,
+                                        .location = callInst->sourceLoc,
+                                    });
+                                    return false;
                                 }
                             }
                         }
@@ -576,8 +552,7 @@ void validateConstExpr(PropagateConstExprContext* context, IRGlobalValueWithCode
                         // Diagnose the failure.
 
                         context->getSink()->diagnose(
-                            ii->sourceLoc,
-                            Diagnostics::needCompileTimeConstant);
+                            Diagnostics::NeedCompileTimeConstant{.location = ii->sourceLoc});
 
                         break;
                     }

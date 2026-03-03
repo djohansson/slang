@@ -35,11 +35,11 @@ static bool isKnownOpCodeWithSideEffect(IROp op)
 {
     switch (op)
     {
-    case kIROp_ifElse:
-    case kIROp_unconditionalBranch:
+    case kIROp_IfElse:
+    case kIROp_UnconditionalBranch:
     case kIROp_Switch:
     case kIROp_Return:
-    case kIROp_loop:
+    case kIROp_Loop:
     case kIROp_Call:
     case kIROp_Param:
     case kIROp_Unreachable:
@@ -80,6 +80,20 @@ public:
             }
         }
         return true;
+    }
+
+    bool isDebugInst(IRInst* inst)
+    {
+        switch (inst->getOp())
+        {
+        case kIROp_DebugLine:
+        case kIROp_DebugScope:
+        case kIROp_DebugVar:
+        case kIROp_DebugValue:
+            return true;
+        default:
+            return false;
+        }
     }
 
     virtual bool propagate(IRBuilder& builder, IRFunc* f) override
@@ -137,7 +151,6 @@ public:
                         hasReadNoneCall = true;
                         break;
                     }
-                    break;
                 }
             }
             if (hasReadNoneCall)

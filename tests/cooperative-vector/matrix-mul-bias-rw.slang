@@ -1,8 +1,8 @@
-//DISABLE_TEST(compute):COMPARE_COMPUTE(filecheck-buffer=CHECK):-vk -render-feature cooperative-vector -output-using-type
+//TEST(compute):COMPARE_COMPUTE(filecheck-buffer=CHECK):-vk -render-feature cooperative-vector -output-using-type
 //TEST(compute):COMPARE_COMPUTE(filecheck-buffer=CHECK):-cpu -output-using-type
 
-// Disabled because HLSL doesn't support int8 
-//DISABLE_DISABLE_TEST(compute):COMPARE_COMPUTE(filecheck-buffer=CHECK):-dx12 -render-feature cooperative-vector -dx12-experimental -use-dxil -output-using-type -profile cs_6_9 -Xslang... -Xdxc -Vd -X.
+// Disabled because HLSL doesn't support int8
+//DISABLE_TEST(compute):COMPARE_COMPUTE(filecheck-buffer=CHECK):-dx12 -render-feature cooperative-vector -dx12-experimental -output-using-type -profile cs_6_9 -Xslang... -Xdxc -Vd -X.
 
 // CHECK: type: int32_t
 // CHECK-NEXT: 35
@@ -27,6 +27,10 @@ RWByteAddressBuffer bias;
 [numthreads(1, 1, 1)]
 void computeMain()
 {
+    // Expected to fail with Vulkan 1.4.313.0 or below due to a bug in the VVL
+    // The VVL incorrectly reports that the result type in the following command is `VK_COMPONENT_TYPE_UINT32_KHR`.
+    // Tracking the issue in github #7715.
+
     CoopVec<int8_t, 4> vec = coopVecLoad<4, int8_t>(input);
     CoopVec<int32_t, 4> result = coopVecMatMulAdd<int32_t, 4, 4>(
         vec,
@@ -43,5 +47,5 @@ void computeMain()
     );
 
     for(int i = 0; i < result.getCount(); ++i)
-        outputBuffer[i] = result[i];;
+        outputBuffer[i] = result[i];
 }

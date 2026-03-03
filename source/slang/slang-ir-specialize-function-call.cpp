@@ -40,6 +40,12 @@ bool FunctionCallSpecializeCondition::isParamSuitableForSpecialization(
         if (as<IRGlobalValueWithCode>(arg))
             return true;
 
+        if (isUserPointerType(arg->getDataType()))
+            return true;
+
+        if (as<IRCastDescriptorHandleToResource>(arg))
+            return true;
+
         // As we will see later, we can also
         // specialize a call when the argument
         // is the result of indexing into an
@@ -47,17 +53,29 @@ bool FunctionCallSpecializeCondition::isParamSuitableForSpecialization(
         // of the indexing operation is also
         // suitable for specialization.
         //
-        if (arg->getOp() == kIROp_GetElement || arg->getOp() == kIROp_Load)
+        switch (arg->getOp())
         {
-            auto base = arg->getOperand(0);
+        case kIROp_GetElement:
+        case kIROp_StructuredBufferLoad:
+        case kIROp_ByteAddressBufferLoad:
+        case kIROp_GetElementPtr:
+        case kIROp_RWStructuredBufferGetElementPtr:
+        case kIROp_FieldAddress:
+        case kIROp_FieldExtract:
+        case kIROp_Load:
+            {
+                auto base = arg->getOperand(0);
 
-            // We will "recurse" on the base of
-            // the indexing operation by continuing
-            // our loop with the `base` as our new
-            // argument.
-            //
-            arg = base;
-            continue;
+                // We will "recurse" on the base of
+                // the indexing operation by continuing
+                // our loop with the `base` as our new
+                // argument.
+                //
+                arg = base;
+                continue;
+            }
+        default:
+            break;
         }
 
         // By default, we will *not* consider an argument
@@ -225,7 +243,7 @@ struct FunctionParameterSpecializationContext
             // If neither the parameter nor the argument wants specialization,
             // then we need to keep looking.
             //
-            auto paramWantSpecialization = doesParamWantSpecialization(param, arg);
+            auto paramWantSpecialization = doesParamWantSpecialization(param, arg, call);
             auto paramTypeWantSpecialization = doesParamTypeWantSpecialization(param, arg);
             if (!paramWantSpecialization && !paramTypeWantSpecialization)
                 continue;
@@ -255,9 +273,9 @@ struct FunctionParameterSpecializationContext
     // Of course, now we need to back-fill the predicates that
     // the above function used to evaluate prameters and arguments.
 
-    bool doesParamWantSpecialization(IRParam* param, IRInst* arg)
+    bool doesParamWantSpecialization(IRParam* param, IRInst* arg, IRCall* callInst)
     {
-        return condition->doesParamWantSpecialization(param, arg);
+        return condition->doesParamWantSpecialization(param, arg, callInst);
     }
 
     bool doesParamTypeWantSpecialization(IRParam* param, IRInst* arg)
@@ -320,7 +338,7 @@ struct FunctionParameterSpecializationContext
     struct FuncSpecializationInfo
     {
         List<IRParam*> newParams;
-        List<IRInst*> newBodyInsts;
+        IRBlock* newBodyInsts;
         List<IRInst*> replacementsForOldParameters;
     };
 
@@ -338,7 +356,9 @@ struct FunctionParameterSpecializationContext
         // correctly check the preconditions.
         //
         auto oldFunc = as<IRFunc>(oldCall->getCallee());
-        SLANG_ASSERT(oldFunc);
+        if (!oldFunc)
+            return;
+
         SLANG_ASSERT(oldFunc->isDefinition());
 
         // Our first information-gathering pass will
@@ -390,6 +410,14 @@ struct FunctionParameterSpecializationContext
         newCall->insertBefore(oldCall);
         oldCall->replaceUsesWith(newCall);
         oldCall->removeAndDeallocate();
+
+        // If old func is no longer used after the specialization,
+        // remove it.
+        if (!oldFunc->hasUses())
+        {
+            if (!shouldInstBeLiveIfParentIsLive(oldFunc, IRDeadCodeEliminationOptions{}))
+                oldFunc->removeAndDeallocate();
+        }
     }
 
     // Before diving into the details on how we gather information
@@ -474,16 +502,20 @@ struct FunctionParameterSpecializationContext
             UInt oldArgIndex = oldArgCounter++;
             auto oldArg = oldCall->getArg(oldArgIndex);
 
-            getCallInfoForParam(callInfo, oldParam, oldArg);
+            getCallInfoForParam(callInfo, oldParam, oldArg, oldCall);
         }
     }
 
-    void getCallInfoForParam(CallSpecializationInfo& ioInfo, IRParam* oldParam, IRInst* oldArg)
+    void getCallInfoForParam(
+        CallSpecializationInfo& ioInfo,
+        IRParam* oldParam,
+        IRInst* oldArg,
+        IRCall* callInst)
     {
         // We know that the case where the parameter
         // and argument don't want specialization is easy.
         //
-        if (!doesParamWantSpecialization(oldParam, oldArg))
+        if (!doesParamWantSpecialization(oldParam, oldArg, callInst))
         {
             // The new call site will use the same argument
             // value as the old one, and we don't need
@@ -536,7 +568,15 @@ struct FunctionParameterSpecializationContext
             // Similarly for other global constants
             ioInfo.key.vals.add(globalConstant);
         }
-        else if (oldArg->getOp() == kIROp_GetElement)
+        else if (isUserPointerType(oldArg->getDataType()))
+        {
+            // If the arg is a user pointer, we can pass it as an ordinary argument,
+            // and we won't need further tracing down the access chain.
+            //
+            ioInfo.key.vals.add(oldArg->getFullType());
+            ioInfo.newArgs.add(oldArg);
+        }
+        else if (isElementAccessInst(oldArg))
         {
             // This is the case where the `oldArg` is
             // in the form `oldBase[oldIndex]`
@@ -577,19 +617,45 @@ struct FunctionParameterSpecializationContext
 
             ioInfo.newArgs.add(oldIndex);
         }
+        else if (isFieldAccessInst(oldArg))
+        {
+            // This is the case where the `oldArg` is
+            // in the form `oldBase.structKey`
+            //
+            auto oldBase = oldArg->getOperand(0);
+            auto structKey = oldArg->getOperand(1);
+
+            // Similar to the getElement case, we recursively setting up whatever
+            // `oldBase` needs first.
+            //
+            getCallInfoForArg(ioInfo, oldBase);
+
+            // The main difference from the `getElement` case is we actually want
+            // the structKey to be in the specialization key because it will be baked
+            // into the specialized function.
+            // And we won't introduce a new parameter to hold the index.
+            //
+            ioInfo.key.vals.add(structKey);
+        }
         else if (oldArg->getOp() == kIROp_Load)
         {
             auto oldBase = oldArg->getOperand(0);
             getCallInfoForArg(ioInfo, oldBase);
         }
+        else if (oldArg->getOp() == kIROp_CastDescriptorHandleToResource)
+        {
+            // We are accessing a resource from a bindless handle.
+            // We can stop recursion here and just pass in the bindless handle as
+            // an argument.
+            auto oldBase = oldArg->getOperand(0);
+            ioInfo.key.vals.add(oldBase->getFullType());
+            ioInfo.newArgs.add(oldBase);
+        }
         else
         {
             // If we fail to match any of the cases above
-            // then a precondition was violated in that
-            // `isArgSuitableForSpecialization` is allowing
-            // a case that this routine is not covering.
-            //
-            SLANG_UNEXPECTED("mising case in 'getCallInfoForArg'");
+            // then the `SpecializeCondition` is letting through constructs that we cannot handle.
+            SLANG_UNEXPECTED("unexpected function call specialization argument form.");
         }
     }
 
@@ -620,6 +686,11 @@ struct FunctionParameterSpecializationContext
     //
     void gatherFuncInfo(IRCall* oldCall, IRFunc* oldFunc, FuncSpecializationInfo& funcInfo)
     {
+        // Create a new block to hold the specialized instructions so that they
+        // have a valid parent.
+        auto builder = getBuilder();
+        funcInfo.newBodyInsts = builder->createBlock();
+
         UInt oldArgCounter = 0;
         for (auto oldParam : oldFunc->getParams())
         {
@@ -631,7 +702,7 @@ struct FunctionParameterSpecializationContext
             // will stand in for the parameter in the specialized
             // function.
             //
-            auto newVal = getSpecializedValueForParam(funcInfo, oldParam, oldArg);
+            auto newVal = getSpecializedValueForParam(funcInfo, oldParam, oldArg, oldCall);
 
             // We will collect the replacement value to use
             // for each of the original parameters in an array.
@@ -648,16 +719,16 @@ struct FunctionParameterSpecializationContext
         IRType* resultType = argType;
         switch (paramType->getOp())
         {
-        case kIROp_InOutType:
-        case kIROp_OutType:
-        case kIROp_RefType:
-        case kIROp_ConstRefType:
-            argType = as<IRPtrTypeBase>(argType)->getValueType();
-            resultType = getBuilder()->getPtrType(
-                paramType->getOp(),
-                argType,
-                as<IRPtrTypeBase>(paramType)->getAddressSpace());
-            break;
+        case kIROp_BorrowInOutParamType:
+        case kIROp_OutParamType:
+        case kIROp_RefParamType:
+        case kIROp_BorrowInParamType:
+            {
+                auto ptrParamType = as<IRPtrTypeBase>(paramType);
+                argType = as<IRPtrTypeBase>(argType)->getValueType();
+                resultType = getBuilder()->getPtrType(argType, ptrParamType);
+                break;
+            }
         }
         if (auto rate = paramType->getRate())
         {
@@ -671,12 +742,13 @@ struct FunctionParameterSpecializationContext
     IRInst* getSpecializedValueForParam(
         FuncSpecializationInfo& ioInfo,
         IRParam* oldParam,
-        IRInst* oldArg)
+        IRInst* oldArg,
+        IRCall* callInst)
     {
         // As always, the easy case is when the parameter of
         // the original function doesn't need specialization.
         //
-        if (!doesParamWantSpecialization(oldParam, oldArg))
+        if (!doesParamWantSpecialization(oldParam, oldArg, callInst))
         {
             // The specialized callee will need a new parameter
             // that fills the same role as the old one, so we
@@ -708,6 +780,36 @@ struct FunctionParameterSpecializationContext
         }
     }
 
+    // Returns true if `inst` is an instruction that accesses an element from an array or a buffer.
+    //
+    static bool isElementAccessInst(IRInst* inst)
+    {
+        switch (inst->getOp())
+        {
+        case kIROp_GetElementPtr:
+        case kIROp_GetElement:
+        case kIROp_RWStructuredBufferGetElementPtr:
+        case kIROp_StructuredBufferLoad:
+        case kIROp_ByteAddressBufferLoad:
+            return true;
+        }
+        return false;
+    }
+
+    // Returns true if `inst` is an instruction that accesses a field from a struct, that is
+    // either a FieldAddress or FieldExtract.
+    //
+    static bool isFieldAccessInst(IRInst* inst)
+    {
+        switch (inst->getOp())
+        {
+        case kIROp_FieldAddress:
+        case kIROp_FieldExtract:
+            return true;
+        }
+        return false;
+    }
+
     IRInst* getSpecializedValueForArg(FuncSpecializationInfo& ioInfo, IRInst* oldArg)
     {
         // The logic here parallels `gatherCallInfoForArg`,
@@ -725,13 +827,24 @@ struct FunctionParameterSpecializationContext
             //
             return globalParam;
         }
+        if (isUserPointerType(oldArg->getDataType()))
+        {
+            // If argument is a user pointer, we can pass it into the callee
+            // directly as an oridinary argument without further specializing
+            // for the access chain beyond the pointer.
+            //
+            auto builder = getBuilder();
+            auto newParam = builder->createParam(oldArg->getFullType());
+            ioInfo.newParams.add(newParam);
+            return newParam;
+        }
         if (auto globalFunc = as<IRGlobalValueWithCode>(oldArg))
         {
             // As above, the identity of the specialized function is sufficient
             // to resolve the uses
             return globalFunc;
         }
-        else if (oldArg->getOp() == kIROp_GetElement)
+        else if (isElementAccessInst(oldArg))
         {
             // This is the case where the argument is
             // in the form `oldBase[oldIndex]`.
@@ -778,28 +891,32 @@ struct FunctionParameterSpecializationContext
             // instructions if an insertion location
             // is set.
             //
-            // TODO(tfoley): We should really question any cases where
-            // we are creating IR instructions but not inserting them into the
-            // hierarchy of the IR module anywhere. Ideally we would have an
-            // invariant that all IR instructions are always parented somewhere
-            // under their IR module, except during very brief interludes.
-            //
-            // A good fix here would be for a pass like this to create a transient
-            // IR block to serve as a "nursery" for the newly-created instructions,
-            // instead of using `newBodyInsts` to hold them. The new IR block could
-            // be placed directly under the IR module during the construction phase
-            // of things, and then inserted to a more permanent location later.
-            //
-            builder->setInsertLoc(IRInsertLoc());
-            auto newVal = builder->emitElementExtract(oldArg->getFullType(), newBase, newIndex);
+            builder->setInsertInto(ioInfo.newBodyInsts);
+            IRInst* newOperands[] = {newBase, newIndex};
+            auto newVal =
+                builder->emitIntrinsicInst(oldArg->getFullType(), oldArg->getOp(), 2, newOperands);
 
-            // Because our new instruction wasn't
-            // actually inserted anywhere, we need to
-            // add it to our gathered list of instructions
-            // that should be inserted into the body of
-            // the specialized callee.
+            return newVal;
+        }
+        else if (isFieldAccessInst(oldArg))
+        {
+            // This is the case where the argument is
+            // in the form `oldBase.structKey`.
             //
-            ioInfo.newBodyInsts.add(newVal);
+            auto oldBase = oldArg->getOperand(0);
+            auto structKey = oldArg->getOperand(1);
+
+            // We handle this case in a similar way as the `oldBase[oldIndex]`
+            // case, except that we don't need to introduce a new parameter
+            // for the index, since the struct key is known at compile-time.
+            auto newBase = getSpecializedValueForArg(ioInfo, oldBase);
+
+            auto builder = getBuilder();
+
+            builder->setInsertInto(ioInfo.newBodyInsts);
+            IRInst* newOperands[] = {newBase, structKey};
+            auto newVal =
+                builder->emitIntrinsicInst(oldArg->getFullType(), oldArg->getOp(), 2, newOperands);
 
             return newVal;
         }
@@ -809,21 +926,34 @@ struct FunctionParameterSpecializationContext
             auto newPtr = getSpecializedValueForArg(ioInfo, oldPtr);
 
             auto builder = getBuilder();
-            builder->setInsertLoc(IRInsertLoc());
+            builder->setInsertInto(ioInfo.newBodyInsts);
             auto newVal = builder->emitLoad(oldArg->getFullType(), newPtr);
-            ioInfo.newBodyInsts.add(newVal);
 
+            return newVal;
+        }
+        else if (auto castHandleToResource = as<IRCastDescriptorHandleToResource>(oldArg))
+        {
+            // We are accessing a resource from a bindless handle.
+            // We should create a param for the handle, and load the resource from the param.
+            auto builder = getBuilder();
+            auto oldHandle = castHandleToResource->getOperand(0);
+            auto newHandle = builder->createParam(oldHandle->getFullType());
+            ioInfo.newParams.add(newHandle);
+
+            builder->setInsertInto(ioInfo.newBodyInsts);
+            IRInst* newOperands[] = {newHandle};
+            auto newVal = builder->emitIntrinsicInst(
+                oldArg->getFullType(),
+                kIROp_CastDescriptorHandleToResource,
+                1,
+                newOperands);
             return newVal;
         }
         else
         {
             // If we don't match one of the above cases,
-            // then `isArgSuitableForSpecialization` is
-            // letting through cases that this function
-            // hasn't been updated to handle.
-            //
-            SLANG_UNEXPECTED("mising case in 'getSpecializedValueForArg'");
-            UNREACHABLE_RETURN(nullptr);
+            // then we are running into an invalid case.
+            SLANG_UNEXPECTED("unknown argument form for function call specialization.");
         }
     }
 
@@ -881,6 +1011,7 @@ struct FunctionParameterSpecializationContext
             oldFunc->getResultType());
 
         IRFunc* newFunc = builder->createFunc();
+        funcInfo.newBodyInsts->insertAtStart(newFunc);
         newFunc->setFullType(funcType);
 
         // The above step has accomplished the "first phase"
@@ -958,10 +1089,14 @@ struct FunctionParameterSpecializationContext
         {
             newParam->insertBefore(newFirstOrdinary);
         }
-        for (auto newBodyInst : funcInfo.newBodyInsts)
+        for (auto newBodyInst = funcInfo.newBodyInsts->getFirstChild(); newBodyInst;)
         {
+            auto next = newBodyInst->next;
             newBodyInst->insertBefore(newFirstOrdinary);
+            newBodyInst = next;
         }
+
+        funcInfo.newBodyInsts->removeAndDeallocate();
 
         // We need to handle a corner case where the new argument of
         // the callee of this specialized function could be a use of

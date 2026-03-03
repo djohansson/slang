@@ -1,4 +1,4 @@
-//TEST:SIMPLE(filecheck=CHECK):-target spirv -entry main -stage compute -g2 -emit-spirv-directly
+//TEST:SIMPLE(filecheck=CHECK):-target spirv -entry main -stage compute -g2 -emit-spirv-directly -O0
 
 struct TestType
 {
@@ -27,4 +27,4 @@ void main()
 // CHECK: DebugFunctionDefinition
 // CHECK: DebugScope
 // CHECK: DebugLine
-// CHECK: DebugValue
+// CHECK: DebugDeclare

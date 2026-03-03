@@ -131,9 +131,12 @@ DeclRefBase* LookupDeclRef::_substituteImplOverride(
 
 void LookupDeclRef::_toTextOverride(StringBuilder& out)
 {
-    getLookupSource()->toText(out);
-    if (out.getLength() && !out.endsWith("."))
-        out << ".";
+    if (!as<ThisType>(getLookupSource()))
+    {
+        getLookupSource()->toText(out);
+        if (out.getLength() && !out.endsWith("."))
+            out << ".";
+    }
     if (getDecl()->getName() && getDecl()->getName()->text.getLength() != 0)
     {
         out << getDecl()->getName()->text;
@@ -421,6 +424,14 @@ SourceLoc DeclRefBase::getNameLoc() const
 SourceLoc DeclRefBase::getLoc() const
 {
     return getDecl()->loc;
+}
+
+// Keep this function here for better debuggin purpose
+String DeclRefBase::toString() const
+{
+    StringBuilder sb;
+    const_cast<DeclRefBase*>(this)->toText(sb);
+    return sb.produceString();
 }
 
 DeclRefBase* DeclRefBase::getParent()

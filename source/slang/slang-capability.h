@@ -8,6 +8,10 @@
 #include <optional>
 #include <stdint.h>
 
+#define SLANG_PROFILE_CAPABILITY_SETS
+// uncomment this define to instrument capability sets
+// #define SLANG_PROFILE_CAPABILITY_SETS SLANG_PROFILE
+
 namespace Slang
 {
 
@@ -29,6 +33,10 @@ namespace Slang
 //
 #include "slang-generated-capability-defs.h"
 
+class CapabilitySetVal;
+class CapabilityTargetSetVal;
+class ASTBuilder;
+
 // Once we have a universe of suitable capability atoms, we can define
 // the capabilities of a target as simply the set of all atomic capabilities
 // that it supports.
@@ -36,7 +44,7 @@ namespace Slang
 // The situation is slightly more complicated for a function. A function
 // might require a specific set of atomic feature, and that is the simple
 // case. In this simple case, we know that a target can run a function
-// if the features of the target are a super-set of those required by
+// if the features of the target are a superset of those required by
 // the function.
 //
 // In the more general case, we might have a function that can be used
@@ -51,6 +59,11 @@ namespace Slang
 struct CapabilityAtomSet : UIntSet
 {
     using UIntSet::UIntSet;
+
+    CapabilityAtomSet(const UIntSet& set)
+        : UIntSet(set)
+    {
+    }
 
     CapabilityAtomSet newSetWithoutImpliedAtoms() const;
 };
@@ -68,6 +81,8 @@ struct CapabilityStageSet
     /// LinkedList of all disjoint sets for fast remove/add of unconstrained list positions.
     std::optional<CapabilityAtomSet> atomSet{};
 
+    HashCode64 getHashCode() const;
+
     void addNewSet(CapabilityAtomSet&& setToAdd)
     {
         if (!atomSet)
@@ -80,6 +95,10 @@ struct CapabilityStageSet
     /// Return false when `other` is fully incompatible.
     /// incompatability is when `this->stage` is not a supported stage by `other.shaderStageSets`.
     bool tryJoin(const CapabilityTargetSet& other);
+    bool tryJoin(const CapabilityTargetSetVal& other);
+
+    /// See definition of CapabilityTargetSet::compatibleMerge for details.
+    bool compatibleMerge(const CapabilityStageSet& stageSet);
 };
 
 /// CapabilityTargetSet encapsulates all capabilities of a specific target
@@ -91,17 +110,69 @@ struct CapabilityTargetSet
 
     CapabilityStageSets shaderStageSets{};
 
+    HashCode64 getHashCode() const;
+
     /// Join a compatable target set from `this` with `CapabilityTargetSet other`.
     /// Return false when `other` is fully incompatible.
     /// incompatability is when one of 2 senarios are true:
     /// 1. `this->target` is not a supported target by `other.shaderStageSets`
     /// 2. `this` has completly disjoint shader stages from other.
     bool tryJoin(const CapabilityTargetSets& other);
+    bool tryJoin(const CapabilitySetVal& other);
     void unionWith(const CapabilityTargetSet& other);
+    void unionWith(const CapabilityTargetSetVal& other);
+
+    const CapabilityStageSets& getShaderStageSets() const { return shaderStageSets; }
+    CapabilityStageSets& getShaderStageSets() { return shaderStageSets; }
+
+    /// Are the two CapabilityTargetSet equal?
+    bool operator==(CapabilityTargetSet const& that) const;
+
+    /// Perform a compatibleMerge on the given `targetSet` with `this`.
+    /// This function treats the whole target set as a single bit mask, and perform the
+    /// operation on it.
+    /// Definition of compatibleMerge is:
+    /// # compatibleMerge(A, B) =
+    /// ⎧ B   if A = ∅
+    /// ⎪ A   if B = ∅
+    /// ⎪ A   if A ⊆ B
+    /// ⎪ B   if B ⊆ A
+    /// ⎩ ∅   otherwise, and function will return false.
+    /// For example:
+    /// if A = {spirv, ext_X}, and B = {spirv, ext_X, ext_Y}, compatibleMerge(A, B) = A
+    /// if A = {spirv, ext_X, ext_Y}, and B = {spirv, ext_X}, compatibleMerge(A, B) = B
+    /// if A = {spirv, ext_X}, and B = {spirv, ext_Y}, compatibleMerge(A, B) = ∅
+    /// If target A doesn't exist, then add target B directly.
+    bool compatibleMerge(const CapabilityTargetSet& targetSet);
+
+    /// Similar to compatibleMerge for CapabilityTargetSet, but this overload perform the operation
+    /// on a finer granularity, we perform the operation on a specific stage of a target
+    bool compatibleMerge(const CapabilityStageSet& stageSet);
+};
+
+enum class CheckCapabilityRequirementOptions
+{
+    // `available` can have a subset of the abstract atoms `required` has
+    AvailableCanHaveSubsetOfAbstractAtoms,
+    // `available` and `required` both must have equal abstract stage & target atoms
+    MustHaveEqualAbstractAtoms,
+};
+
+enum class CheckCapabilityRequirementResult
+{
+    // `available` is a superset to `required`
+    AvailableIsASuperSetToRequired,
+    // `available` is not a superset to `required`
+    AvailableIsNotASuperSetToRequired,
+    // `available` has abstract atoms that `required` is missing.
+    // Only possible with CheckCapabilityRequirementOptions::MustHaveEqualAbstractAtoms
+    RequiredIsMissingAbstractAtoms,
 };
 
 struct CapabilitySet
 {
+    friend class CapabilitySetVal;
+
 public:
     /// Default-construct an empty capability set
     CapabilitySet();
@@ -120,11 +191,16 @@ public:
     /// Construct a singleton set from a single atomic capability
     explicit CapabilitySet(CapabilityName atom);
 
+    /// Construct a capability set from an optional CapabilitySetVal
+    explicit CapabilitySet(CapabilitySetVal const* other);
+
     /// Make an empty capability set
     static CapabilitySet makeEmpty();
 
     /// Make an invalid capability set (such that no target could ever support it)
     static CapabilitySet makeInvalid();
+
+    HashCode64 getHashCode() const;
 
     /// Is this capability set empty (such that any target supports it)?
     bool isEmpty() const;
@@ -147,9 +223,12 @@ public:
         Implied = 1 << 0,
     };
     /// Does this capability set imply all the capabilities in `other`?
+    /// `this` can have excess target+stage sets.
     bool implies(CapabilitySet const& other) const;
     /// Does this capability set imply at least 1 set in other.
     ImpliesReturnFlags atLeastOneSetImpliedInOther(CapabilitySet const& other) const;
+    /// Will a `join` with `other` change `this`?
+    bool joinWithOtherWillChangeThis(CapabilitySet const& other) const;
 
     /// Does this capability set imply the atomic capability `other`?
     bool implies(CapabilityAtom other) const;
@@ -158,13 +237,16 @@ public:
     /// Destroy incompatible targets/sets apart of 'this' between ('this' & 'other').
     /// `this` may be made invalid if other is fully disjoint.
     CapabilitySet& join(const CapabilitySet& other);
+    CapabilitySet& join(const CapabilitySetVal* other);
 
     /// Join two capability sets to form ('this' & 'other').
     /// If a target/set has an incompatible atom, do not destroy the target/set.
     void nonDestructiveJoin(const CapabilitySet& other);
+    void nonDestructiveJoin(const CapabilitySetVal* other);
 
     /// Add all targets/sets of 'other' into 'this'. Overlapping sets are removed.
     void unionWith(const CapabilitySet& other);
+    void unionWith(const CapabilitySetVal* other);
 
     /// Return a capability set of 'target' atoms 'this' has, but 'other' does not.
     CapabilitySet getTargetsThisHasButOtherDoesNot(const CapabilitySet& other);
@@ -186,12 +268,14 @@ public:
         CapabilitySet const& targetCaps,
         bool& isEqual) const;
 
-    /// Find any capability sets which are in 'available' but not in 'required'. Return false if
+    /// Identify capability sets which are in 'available' but not in 'required'. Return false if
     /// this situation occurs.
-    static bool checkCapabilityRequirement(
+    static void checkCapabilityRequirement(
+        CheckCapabilityRequirementOptions options,
         CapabilitySet const& available,
         CapabilitySet const& required,
-        CapabilityAtomSet& outFailedAvailableSet);
+        CapabilityAtomSet& outFailedAvailableSet,
+        CheckCapabilityRequirementResult& result);
 
     // For each element in `elementsToPermutateWith`, create and add a different conjunction
     // permutation by adding to `setToPermutate`.
@@ -208,7 +292,7 @@ public:
         CapabilityAtomSet conjunction,
         CapabilityAtom knownTarget,
         CapabilityAtom knownStage);
-    inline void addUnexpandedCapabilites(CapabilityName atom);
+    void addUnexpandedCapabilites(CapabilityName atom);
 
     CapabilityTargetSets& getCapabilityTargetSets() { return m_targetSets; }
     const CapabilityTargetSets& getCapabilityTargetSets() const { return m_targetSets; }
@@ -320,6 +404,42 @@ public:
         return (*(*m_targetSets.begin()).second.shaderStageSets.begin()).first;
     }
 
+    // Perform a compatibleMerge on the given `targetSet` with `this`.
+    // see CapabilityTargetSet::compatibleMerge for definition of 'compatibleMerge' operation.
+    bool compatibleMerge(const CapabilityTargetSet& targetSet)
+    {
+        if (auto existTarget = m_targetSets.tryGetValue(targetSet.target))
+        {
+            return existTarget->compatibleMerge(targetSet);
+        }
+        else
+        {
+            m_targetSets.add(targetSet.target, targetSet);
+            return true;
+        }
+    }
+
+    // Perform a compatibleMerge on the given `stageSet` and `target` with `this`.
+    // see CapabilityTargetSet::compatibleMerge for definition of 'compatibleMerge' operation.
+    bool compatibleMerge(CapabilityAtom target, const CapabilityStageSet& stageSet)
+    {
+        if (auto targetIt = m_targetSets.tryGetValue(target))
+        {
+            return targetIt->compatibleMerge(stageSet);
+        }
+        else
+        {
+            CapabilityTargetSet newTargetSet;
+            newTargetSet.target = target;
+            newTargetSet.shaderStageSets.add(stageSet.stage, stageSet);
+            m_targetSets.add(target, newTargetSet);
+            return true;
+        }
+    }
+
+    /// Convert this mutable capability set to an immutable CapabilitySetVal
+    [[nodiscard]] CapabilitySetVal* freeze(ASTBuilder* astBuilder) const;
+
 private:
     /// underlying data of CapabilitySet.
     CapabilityTargetSets m_targetSets{};
@@ -330,8 +450,29 @@ private:
 
     enum class ImpliesFlags
     {
+        // All permutations of target+stage from `other` must be implied by a target+stage
+        // in `this`.
         None = 0,
+        // Given a single target+stage permutation, if 1 permutation is implied in `other`,
+        // return true.
         OnlyRequireASingleValidImply = 1 << 0,
+        // The target+stage permuations in `this` cannot have extra permutations
+        // relative to `other`.
+        // Ex: `{metal|glsl}.implies({glsl})` is false
+        //     `{glsl}.implies({glsl|metal})` is false
+        //     `{glsl}.implies({glsl|glsl})` is true
+        CannotHaveMoreTargetAndStageSets = 1 << 1,
+        // The target+stage permuations in `this` can have less permutations
+        // than `other`. This means, only for the shared permutations of `this`
+        // and `other` does `thisSet[target][stage].imply(otherSet)` have to be
+        // true.
+        // If `this` is empty, `this` is not able to imply `other` unless `other`
+        // is empty.
+        // Ex: `{glsl}.implies({glsl|metal})` is true since we only compare shared-permutations.
+        CanHaveSubsetOfTargetAndStageSets = 1 << 2,
+
+        WillAJoinWithOtherModifyThis =
+            CannotHaveMoreTargetAndStageSets | CanHaveSubsetOfTargetAndStageSets
     };
     ImpliesReturnFlags _implies(CapabilitySet const& other, ImpliesFlags flags) const;
 };
@@ -370,6 +511,7 @@ bool isSpirvExtensionAtom(CapabilityAtom name);
 
 void printDiagnosticArg(StringBuilder& sb, CapabilityAtom atom);
 void printDiagnosticArg(StringBuilder& sb, CapabilityName name);
+void printDiagnosticArg(StringBuilder& sb, const CapabilityAtomSet& atomSet);
 
 const CapabilityAtomSet& getAtomSetOfTargets();
 const CapabilityAtomSet& getAtomSetOfStages();

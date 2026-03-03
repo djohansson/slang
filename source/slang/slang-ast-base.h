@@ -2,10 +2,12 @@
 
 #pragma once
 
-#include "slang-ast-base.h.fiddle"
 #include "slang-ast-forward-declarations.h"
 #include "slang-ast-support-types.h"
 #include "slang-capability.h"
+
+//
+#include "slang-ast-base.h.fiddle"
 
 // This file defines the primary base classes for the hierarchy of
 // AST nodes and related objects. For example, this is where the
@@ -27,8 +29,8 @@ class NodeBase
     // Note that the astBuilder is not stored in the NodeBase derived types by default.
     SLANG_FORCE_INLINE void init(ASTNodeType inAstNodeType, ASTBuilder* inAstBuilder)
     {
-        SLANG_UNUSED(inAstBuilder);
         astNodeType = inAstNodeType;
+        _astBuilder = inAstBuilder;
 #ifdef _DEBUG
         _initDebug(inAstNodeType, inAstBuilder);
 #endif
@@ -46,6 +48,15 @@ class NodeBase
 #ifdef _DEBUG
     int32_t _debugUID = 0;
 #endif
+
+    /// Get the AST builder that was used to allocate this node.
+    ASTBuilder* getASTBuilder() { return _astBuilder; }
+
+private:
+    friend class ASTBuilder;
+
+    /// The AST builder that was used to allocate this node.
+    ASTBuilder* _astBuilder = nullptr;
 };
 
 // Casting of NodeBase
@@ -587,6 +598,20 @@ protected:
     ASTBuilder* m_astBuilderForReflection;
 };
 
+struct TypePair
+{
+    Type* type0;
+    Type* type1;
+    HashCode getHashCode() const
+    {
+        return combineHash(Slang::getHashCode(type0), Slang::getHashCode(type1));
+    }
+    bool operator==(const TypePair& other) const
+    {
+        return type0 == other.type0 && type1 == other.type1;
+    }
+};
+
 template<typename T>
 SLANG_FORCE_INLINE T* as(Type* obj)
 {
@@ -648,12 +673,7 @@ class DeclRefBase : public Val
     SourceLoc getNameLoc() const;
     SourceLoc getLoc() const;
     DeclRefBase* getParent();
-    String toString() const
-    {
-        StringBuilder sb;
-        const_cast<DeclRefBase*>(this)->toText(sb);
-        return sb.produceString();
-    }
+    String toString() const;
     DeclRefBase* getBase();
     void toText(StringBuilder& out);
 };
@@ -749,7 +769,7 @@ public:
     DeclRefBase* getDefaultDeclRef();
 
     FIDDLE() NameLoc nameAndLoc;
-    FIDDLE() CapabilitySet inferredCapabilityRequirements;
+    FIDDLE() CapabilitySetVal* inferredCapabilityRequirements = nullptr;
 
     RefPtr<MarkupEntry> markup;
 

@@ -1,7 +1,7 @@
 //TEST(compute):COMPARE_COMPUTE_EX:-cpu -compute  -shaderobj -output-using-type
 //TEST(compute):COMPARE_COMPUTE_EX:-slang -compute -shaderobj -output-using-type
 //TEST(compute):COMPARE_COMPUTE_EX:-slang -compute -dx12  -shaderobj -output-using-type
-//TEST(compute):COMPARE_COMPUTE_EX:-slang -compute -dx12 -profile cs_6_0 -use-dxil -shaderobj -output-using-type
+//TEST(compute):COMPARE_COMPUTE_EX:-slang -compute -dx12 -profile cs_6_0 -shaderobj -output-using-type
 //TEST(compute, vulkan):COMPARE_COMPUTE_EX:-vk -compute -shaderobj -output-using-type -render-feature hardware-device
 //TEST(compute):COMPARE_COMPUTE_EX:-cuda -compute  -shaderobj -output-using-type
 
@@ -11,6 +11,9 @@
 
 // Not supported in WGSL: 1D array texture not supported in WGSL
 //DISABLE_TEST(compute):COMPARE_COMPUTE:-slang -shaderobj -wgpu
+
+// Not supported in LLVM: textures are not currently available
+//DISABLE_TEST(compute):COMPARE_COMPUTE: -slang -shaderobj -llvm
 
 //TEST_INPUT: Texture1D(size=4, content = one):name t1D
 Texture1D<float> t1D;

@@ -191,6 +191,9 @@ public:
     TraceOptions m_traceOptions = TraceOptions::Off;
     std::chrono::time_point<std::chrono::system_clock> m_lastDiagnosticUpdateTime;
     Dictionary<String, String> m_lastPublishedDiagnostics;
+    HashSet<String> m_pendingModulesToUpdateDiagnostics;
+
+    void removePendingModuleToUpdateDiagnostics(const String& uri);
 
     LanguageServer(LanguageServerStartupOptions options)
         : m_core(options)
@@ -250,6 +253,7 @@ private:
     void updateSearchInWorkspace(const JSONValue& value);
     void updateCommitCharacters(const JSONValue& value);
     void updateFormattingOptions(
+        const JSONValue& enableFormatOnType,
         const JSONValue& clangFormatLoc,
         const JSONValue& clangFormatStyle,
         const JSONValue& clangFormatFallbackStyle,
@@ -257,6 +261,7 @@ private:
         const JSONValue& allowLineBreakInRange);
     void updateInlayHintOptions(const JSONValue& deducedTypes, const JSONValue& parameterNames);
     void updateTraceOptions(const JSONValue& value);
+    void updateWorkspaceFlavor(const JSONValue& value);
 
     void sendConfigRequest();
     void registerCapability(const char* methodName);
@@ -274,4 +279,7 @@ inline bool _isIdentifierChar(char ch)
 }
 
 SLANG_API SlangResult runLanguageServer(LanguageServerStartupOptions options);
+SLANG_API SlangResult
+getBuiltinModuleSource(const UnownedStringSlice& moduleName, slang::IBlob** blob);
+
 } // namespace Slang

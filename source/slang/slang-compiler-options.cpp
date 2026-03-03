@@ -1,10 +1,13 @@
 #include "slang-compiler-options.h"
 
+#include "../core/slang-writer.h"
 #include "slang-compiler.h"
+
+#include <cstdio>
 
 namespace Slang
 {
-void CompilerOptionSet::load(uint32_t count, slang::CompilerOptionEntry* entries)
+void CompilerOptionSet::load(uint32_t count, const slang::CompilerOptionEntry* entries)
 {
     for (uint32_t i = 0; i < count; i++)
     {
@@ -143,6 +146,7 @@ void CompilerOptionSet::writeCommandLineArgs(Session* globalSession, StringBuild
         case CompilerOptionName::EmitSpirvDirectly:
         case CompilerOptionName::GLSLForceScalarLayout:
         case CompilerOptionName::ForceDXLayout:
+        case CompilerOptionName::ForceCLayout:
         case CompilerOptionName::MatrixLayoutRow:
         case CompilerOptionName::MatrixLayoutColumn:
         case CompilerOptionName::VulkanInvertY:
@@ -199,6 +203,8 @@ bool CompilerOptionSet::allowDuplicate(CompilerOptionName name)
     case CompilerOptionName::VulkanBindShift:
     case CompilerOptionName::VulkanBindShiftAll:
     case CompilerOptionName::TypeConformance:
+    case CompilerOptionName::DumpIRBefore:
+    case CompilerOptionName::DumpIRAfter:
         return true;
     }
     return false;
@@ -405,5 +411,18 @@ void applySettingsToDiagnosticSink(
                 Severity::Warning,
                 Severity::Error);
     }
+    if (options.shouldEmitRichDiagnostics())
+    {
+        targetSink->setFlag(DiagnosticSink::Flag::AlwaysGenerateRichDiagnostics);
+    }
+    if (options.shouldEmitMachineReadableDiagnostics())
+    {
+        targetSink->setFlag(DiagnosticSink::Flag::MachineReadableDiagnostics);
+    }
+
+    // Handle diagnostic color setting
+    // The sink will handle AUTO by checking writer->isConsole()
+    targetSink->setDiagnosticColorMode(
+        (SlangDiagnosticColor)options.getIntOption(CompilerOptionName::DiagnosticColor));
 }
 } // namespace Slang

@@ -121,7 +121,7 @@ Type* SemanticsVisitor::_tryJoinTypeWithInterface(
     ConversionCost bestCost = kConversionCost_Explicit;
     if (auto basicType = dynamicCast<BasicExpressionType>(type))
     {
-        for (Int baseTypeFlavorIndex = 0; baseTypeFlavorIndex < Int(BaseType::CountOf);
+        for (Int baseTypeFlavorIndex = 0; baseTypeFlavorIndex < Int(BaseType::CountOfPrimitives);
              baseTypeFlavorIndex++)
         {
             // Don't consider `type`, since we already know it doesn't work.
@@ -150,6 +150,7 @@ Type* SemanticsVisitor::_tryJoinTypeWithInterface(
             if (!bestType)
             {
                 bestType = candidateType;
+                bestCost = conversionCost;
             }
             else
             {
@@ -170,7 +171,15 @@ Type* SemanticsVisitor::_tryJoinTypeWithInterface(
             }
         }
         if (bestType)
+        {
+            // Track the conversion cost for type promotion in the constraint system.
+            // This cost represents promoting a type (e.g., int -> float) to satisfy
+            // an interface constraint (e.g., __BuiltinFloatingPointType).
+            // This ensures that overload resolution prefers exact type matches over
+            // candidates that require type promotion.
+            constraints->typePromotionCost += bestCost;
             return bestType;
+        }
     }
 
     // If `interfaceType` represents some generic interface type, such as `IFoo<T>`, and `type`
@@ -330,6 +339,99 @@ Type* SemanticsVisitor::TryJoinTypes(ConstraintSystem* constraints, QualType lef
     return nullptr;
 }
 
+bool addTypeCoercionWitnessToArgs(
+    ASTBuilder* astBuilder,
+    SemanticsVisitor* visitor,
+    TypeCoercionConstraintDecl* constraintDecl,
+    DeclRef<GenericDecl> genericDeclRef,
+    SemanticsVisitor::OverloadResolveContext* maybeContext,
+    HashSet<Decl*>* maybeConstrainedGenericParams,
+    ShortList<Val*>& args,
+    bool shouldEmitError)
+{
+    // To emit an error, `maybeContext` must be provided.
+    SLANG_ASSERT(!shouldEmitError || shouldEmitError && maybeContext);
+
+    DeclRef<TypeCoercionConstraintDecl> constraintDeclRef =
+        astBuilder
+            ->getGenericAppDeclRef(genericDeclRef, args.getArrayView().arrayView, constraintDecl)
+            .as<TypeCoercionConstraintDecl>();
+    auto fromType = getFromType(astBuilder, constraintDeclRef);
+    auto toType = getToType(astBuilder, constraintDeclRef);
+    TypeCoercionWitness* typeCoercionWitness = nullptr;
+    DeclRef<Decl> declRefUsedToConvert{};
+    ConversionCost conversionCost = kConversionCost_Impossible;
+    visitor->_coerce(
+        CoercionSite::General,
+        toType,
+        nullptr,
+        fromType,
+        nullptr,
+        visitor->getSink(),
+        &conversionCost,
+        &typeCoercionWitness);
+    if (constraintDecl->findModifier<ImplicitConversionModifier>())
+    {
+        // The viable conversion is not an implicit conversion, but implicit was requested, fail
+        if (conversionCost > kConversionCost_GeneralConversion)
+        {
+            if (shouldEmitError)
+            {
+                visitor->getSink()->diagnose(
+                    Diagnostics::ImplicitTypeCoerceConstraintWithNonImplicitConversion{
+                        .fromType = fromType,
+                        .toType = toType,
+                        .location = maybeContext->loc});
+
+                if (auto declRefTypeCoercionWitness =
+                        as<DeclRefTypeCoercionWitness>(typeCoercionWitness))
+                {
+                    visitor->getSink()->diagnose(Diagnostics::SeeDefinitionOfConversionFunction{
+                        .decl = declRefTypeCoercionWitness->getDeclRef().getDecl()});
+                }
+                visitor->getSink()->diagnose(
+                    Diagnostics::SeeDefinitionOfConstraint{.decl = constraintDecl});
+            }
+            return false;
+        }
+    }
+
+    // The type arguments are not convertible, return failure.
+    if (conversionCost == kConversionCost_Impossible)
+    {
+        if (shouldEmitError)
+        {
+            visitor->getSink()->diagnose(Diagnostics::TypeCoerceConstraintMissingConversion{
+                .fromType = fromType,
+                .toType = toType,
+                .location = maybeContext->loc});
+            visitor->getSink()->diagnose(
+                Diagnostics::SeeDefinitionOf{.decl = genericDeclRef.getDecl()->inner});
+        }
+        return false;
+    }
+
+    if (maybeConstrainedGenericParams)
+    {
+        if (auto fromDecl = isDeclRefTypeOf<Decl>(constraintDecl->fromType))
+        {
+            maybeConstrainedGenericParams->add(fromDecl.getDecl());
+        }
+        if (auto toDecl = isDeclRefTypeOf<Decl>(constraintDecl->toType))
+        {
+            maybeConstrainedGenericParams->add(toDecl.getDecl());
+        }
+    }
+
+    // Unhandled case in `_coerce`
+    if (!typeCoercionWitness)
+        typeCoercionWitness =
+            astBuilder->getDeclRefTypeCoercionWitness(fromType, toType, DeclRef<Decl>());
+
+    args.add(typeCoercionWitness);
+    return true;
+}
+
 DeclRef<Decl> SemanticsVisitor::trySolveConstraintSystem(
     ConstraintSystem* system,
     DeclRef<GenericDecl> genericDeclRef,
@@ -363,6 +465,7 @@ DeclRef<Decl> SemanticsVisitor::trySolveConstraintSystem(
         ValUnificationContext unificationContext;
         unificationContext.optionalConstraint =
             constraintDeclRef.getDecl()->hasModifier<OptionalConstraintModifier>();
+        unificationContext.equalityConstraint = constraintDeclRef.getDecl()->isEqualityConstraint;
         if (!TryUnifyTypes(
                 *system,
                 unificationContext,
@@ -491,6 +594,8 @@ DeclRef<Decl> SemanticsVisitor::trySolveConstraintSystem(
                 if (!joinType)
                 {
                     if (c.isOptional)
+                        joinType = type;
+                    else if (c.isEquality)
                         joinType = type;
                     else
                         // failure!
@@ -745,45 +850,16 @@ DeclRef<Decl> SemanticsVisitor::trySolveConstraintSystem(
     for (auto constraintDecl :
          genericDeclRef.getDecl()->getMembersOfType<TypeCoercionConstraintDecl>())
     {
-        DeclRef<TypeCoercionConstraintDecl> constraintDeclRef =
-            m_astBuilder
-                ->getGenericAppDeclRef(
-                    genericDeclRef,
-                    args.getArrayView().arrayView,
-                    constraintDecl)
-                .as<TypeCoercionConstraintDecl>();
-        auto fromType = constraintDeclRef.substitute(m_astBuilder, constraintDecl->fromType.Ptr());
-        auto toType = constraintDeclRef.substitute(m_astBuilder, constraintDecl->toType.Ptr());
-        auto conversionCost = getConversionCost(toType, fromType);
-        if (constraintDecl->findModifier<ImplicitConversionModifier>())
-        {
-            if (conversionCost > kConversionCost_GeneralConversion)
-            {
-                // The type arguments are not implicitly convertible, return failure.
-                return DeclRef<Decl>();
-            }
-        }
-        else
-        {
-            if (conversionCost == kConversionCost_Impossible)
-            {
-                // The type arguments are not convertible, return failure.
-                return DeclRef<Decl>();
-            }
-        }
-        if (auto fromDecl = isDeclRefTypeOf<Decl>(constraintDecl->fromType))
-        {
-            constrainedGenericParams.add(fromDecl.getDecl());
-        }
-        if (auto toDecl = isDeclRefTypeOf<Decl>(constraintDecl->toType))
-        {
-            constrainedGenericParams.add(toDecl.getDecl());
-        }
-        // If we are to expand the support of type coercion constraint beyond simple builtin core
-        // module functions, then the witness should be a reference to the conversion function. For
-        // now, this isn't required, and it is not easy to get it from the coercion logic, so we
-        // leave it empty.
-        args.add(m_astBuilder->getTypeCoercionWitness(fromType, toType, DeclRef<Decl>()));
+        if (!addTypeCoercionWitnessToArgs(
+                getASTBuilder(),
+                this,
+                constraintDecl,
+                genericDeclRef,
+                nullptr,
+                &constrainedGenericParams,
+                args,
+                false))
+            return DeclRef<Decl>();
     }
 
     // Add a flat cost to all unconstrained generic params.
@@ -792,6 +868,11 @@ DeclRef<Decl> SemanticsVisitor::trySolveConstraintSystem(
         if (!constrainedGenericParams.contains(typeParamDecl))
             outBaseCost += kConversionCost_UnconstraintGenericParam;
     }
+
+    // Add the accumulated type promotion cost from constraint solving.
+    // This includes costs from promoting types to satisfy interface constraints
+    // (e.g., int -> float to satisfy __BuiltinFloatingPointType).
+    outBaseCost += system->typePromotionCost;
 
     return m_astBuilder->getGenericAppDeclRef(genericDeclRef, args.getArrayView().arrayView);
 }
@@ -970,6 +1051,7 @@ bool SemanticsVisitor::TryUnifyTypeParam(
     constraint.val = type;
     constraint.isUsedAsLValue = type.isLeftValue;
     constraint.isOptional = unificationContext.optionalConstraint;
+    constraint.isEquality = unificationContext.equalityConstraint;
     constraints.constraints.add(constraint);
 
     return true;
@@ -1023,15 +1105,88 @@ bool SemanticsVisitor::TryUnifyIntParam(
     }
 }
 
+bool SemanticsVisitor::TryUnifyFunctorByStructuralMatch(
+    ConstraintSystem& constraints,
+    ValUnificationContext unifyCtx,
+    StructDecl* fstStructDecl,
+    FuncType* sndFuncType)
+{
+    // Here we just need to find an invocation method for our functor
+    // to perform unification with.
+    // We do not validate the validity of the functor at this step,
+    // we only need to perform a reasonable unification so that constraints
+    // can correctly solve.
+    FuncDecl* functorInvokeMethod =
+        as<FuncDecl>(fstStructDecl->findLastDirectMemberDeclOfName(getName("()")));
+    if (!functorInvokeMethod)
+        return false;
+
+    return TryUnifyFuncTypesByStructuralMatch(
+        constraints,
+        unifyCtx,
+        getFuncType(this->getASTBuilder(), functorInvokeMethod),
+        sndFuncType);
+}
+
+bool SemanticsVisitor::TryUnifyFuncTypesByStructuralMatch(
+    ConstraintSystem& constraints,
+    ValUnificationContext unifyCtx,
+    FuncType* fstFunType,
+    FuncType* sndFunType)
+{
+    const Index numParams = fstFunType->getParamCount();
+    if (numParams != sndFunType->getParamCount())
+        return false;
+    for (Index i = 0; i < numParams; ++i)
+    {
+        if (!TryUnifyTypes(
+                constraints,
+                unifyCtx,
+                fstFunType->getParamTypeWithModeWrapper(i),
+                sndFunType->getParamTypeWithModeWrapper(i)))
+            return false;
+    }
+    return TryUnifyTypes(
+        constraints,
+        unifyCtx,
+        fstFunType->getResultType(),
+        sndFunType->getResultType());
+}
+
 bool SemanticsVisitor::TryUnifyTypesByStructuralMatch(
     ConstraintSystem& constraints,
     ValUnificationContext unifyCtx,
     QualType fst,
     QualType snd)
 {
+    if (auto sndDeclRefType = as<DeclRefType>(snd))
+    {
+        auto sndDeclRef = sndDeclRefType->getDeclRef();
+
+        if (auto sndStructDecl = as<StructDecl>(sndDeclRef))
+        {
+            if (auto fstFunType = as<FuncType>(fst))
+                return TryUnifyFunctorByStructuralMatch(
+                    constraints,
+                    unifyCtx,
+                    sndStructDecl.getDecl(),
+                    fstFunType);
+        }
+    }
+
     if (auto fstDeclRefType = as<DeclRefType>(fst))
     {
         auto fstDeclRef = fstDeclRefType->getDeclRef();
+
+        if (auto fstStructDecl = as<StructDecl>(fstDeclRef))
+        {
+            if (auto sndFunType = as<FuncType>(snd))
+                return TryUnifyFunctorByStructuralMatch(
+                    constraints,
+                    unifyCtx,
+                    fstStructDecl.getDecl(),
+                    sndFunType);
+        }
 
         if (auto typeParamDecl = as<GenericTypeParamDecl>(fstDeclRef.getDecl()))
             if (typeParamDecl->parentDecl == constraints.genericDecl)
@@ -1098,23 +1253,11 @@ bool SemanticsVisitor::TryUnifyTypesByStructuralMatch(
     {
         if (auto sndFunType = as<FuncType>(snd))
         {
-            const Index numParams = fstFunType->getParamCount();
-            if (numParams != sndFunType->getParamCount())
-                return false;
-            for (Index i = 0; i < numParams; ++i)
-            {
-                if (!TryUnifyTypes(
-                        constraints,
-                        unifyCtx,
-                        fstFunType->getParamType(i),
-                        sndFunType->getParamType(i)))
-                    return false;
-            }
-            return TryUnifyTypes(
+            return TryUnifyFuncTypesByStructuralMatch(
                 constraints,
                 unifyCtx,
-                fstFunType->getResultType(),
-                sndFunType->getResultType());
+                fstFunType,
+                sndFunType);
         }
     }
     else if (auto expandType = as<ExpandType>(fst))

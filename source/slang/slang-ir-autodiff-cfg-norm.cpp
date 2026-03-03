@@ -123,7 +123,7 @@ struct CFGNormalizationPass
         builder->emitBranch(afterBlock);
 
         // Is after-block unreachable?
-        if (auto unreachInst = as<IRUnreachable>(afterBlock->getFirstOrdinaryInst()))
+        if (auto unreachInst = as<IRUnreachableBase>(afterBlock->getFirstOrdinaryInst()))
         {
             // Link it to the parentAfterBlock.
             builder->setInsertInto(afterBlock);
@@ -265,14 +265,14 @@ struct CFGNormalizationPass
             auto terminator = currentBlock->getTerminator();
             switch (terminator->getOp())
             {
-            case kIROp_unconditionalBranch:
+            case kIROp_UnconditionalBranch:
                 {
                     auto targetBlock = as<IRUnconditionalBranch>(terminator)->getTargetBlock();
                     currentBlock = targetBlock;
                     break;
                 }
 
-            case kIROp_ifElse:
+            case kIROp_IfElse:
                 {
                     auto ifElse = as<IRIfElse>(terminator);
 
@@ -377,7 +377,7 @@ struct CFGNormalizationPass
                     // originally unreachable, all potential paths to it must have
                     // broken out of the region.
                     //
-                    if (auto unreachInst = as<IRUnreachable>(afterBlock->getTerminator()))
+                    if (auto unreachInst = as<IRUnreachableBase>(afterBlock->getTerminator()))
                     {
                         // Link it to the parentAfterBlock.
                         builder.setInsertInto(afterBlock);
@@ -441,7 +441,7 @@ struct CFGNormalizationPass
                     break;
                 }
 
-            case kIROp_loop:
+            case kIROp_Loop:
             case kIROp_Switch:
                 {
                     auto breakBlock = normalizeBreakableRegion(terminator);
@@ -509,7 +509,7 @@ struct CFGNormalizationPass
 
         switch (branchInst->getOp())
         {
-        case kIROp_loop:
+        case kIROp_Loop:
             {
                 BreakableRegionInfo info;
                 info.breakBlock = as<IRLoop>(branchInst)->getBreakBlock();
@@ -712,6 +712,7 @@ struct CFGNormalizationPass
 };
 
 void normalizeCFG(
+    TargetProgram* targetProgram,
     IRModule* module,
     IRGlobalValueWithCode* func,
     IRCFGNormalizationPass const& options)
@@ -757,7 +758,7 @@ void normalizeCFG(
     // no longer dominate the use. We fix these up by going through the IR and create temp
     // vars for such uses.
     sortBlocksInFunc(func);
-    legalizeDefUse(func);
+    legalizeDefUse(func, targetProgram);
 
     {
         auto validationScope = disableIRValidationScope();

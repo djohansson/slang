@@ -4,6 +4,7 @@
 #include "slang-ir-insts.h"
 #include "slang-ir-util.h"
 #include "slang-ir.h"
+#include "slang-rich-diagnostics.h"
 
 namespace Slang
 {
@@ -126,7 +127,7 @@ struct GlobalVarTranslationContext
                             if (auto sizeAttr = lastFieldVarLayout->getTypeLayout()->findSizeAttr(
                                     LayoutResourceKind::VaryingInput))
                             {
-                                size_t finiteSize = sizeAttr->getFiniteSize();
+                                const auto finiteSize = sizeAttr->getFiniteSize();
                                 if (auto offsetAttr = lastFieldVarLayout->findOffsetAttr(
                                         LayoutResourceKind::VaryingInput))
                                 {
@@ -180,17 +181,10 @@ struct GlobalVarTranslationContext
                 {
                     varLayoutBuilder.setSystemValueSemantic(
                         semanticDecor->getSemanticName(),
-                        semanticDecor->getSemanticIndex());
+                        semanticDecor->getEffectiveSemanticIndex());
                 }
                 else
                 {
-                    if (!hasExistingLayout)
-                    {
-                        fieldTypeLayoutBuilder.addResourceUsage(
-                            LayoutResourceKind::VaryingInput,
-                            LayoutSize(1));
-                    }
-
                     // Start off the offset as nextOffset. If the global "in"s have existing
                     // offsetAttr's, we will add the offsets from those as well.
                     auto resInfo =
@@ -208,10 +202,17 @@ struct GlobalVarTranslationContext
                     if (entryPointDecor->getProfile().getStage() == Stage::Fragment)
                     {
                         varLayoutBuilder.setUserSemantic("COLOR", inputVarIndex);
+                        if (!key->findDecoration<IRSemanticDecoration>())
+                            builder.addSemanticDecoration(key, toSlice("COLOR"), inputVarIndex);
                     }
                     else if (entryPointDecor->getProfile().getStage() == Stage::Vertex)
                     {
                         varLayoutBuilder.setUserSemantic("VERTEX_IN_", inputVarIndex);
+                        if (!key->findDecoration<IRSemanticDecoration>())
+                            builder.addSemanticDecoration(
+                                key,
+                                toSlice("VERTEX_IN_"),
+                                inputVarIndex);
                     }
                     inputVarIndex++;
                 }
@@ -220,8 +221,8 @@ struct GlobalVarTranslationContext
                 input->transferDecorationsTo(key);
 
                 // Emit a new param here to represent the global input var.
-                auto inputParam = builder.emitParam(
-                    builder.getPtrType(kIROp_ConstRefType, inputType, AddressSpace::Input));
+                auto inputParam =
+                    builder.emitParam(builder.getBorrowInParamType(inputType, AddressSpace::Input));
 
                 // Copy the global input vars original decorations onto the new param.
                 // We need to do this to ensure that we can do things like get system
@@ -277,8 +278,8 @@ struct GlobalVarTranslationContext
                     kIROp_VoidType)
                 {
                     context->getSink()->diagnose(
-                        entryPointFunc,
-                        Diagnostics::entryPointMustReturnVoidWhenGlobalOutputPresent);
+                        Diagnostics::EntryPointMustReturnVoidWhenGlobalOutputPresent{
+                            .location = entryPointFunc->sourceLoc});
                     continue;
                 }
                 builder.setInsertBefore(entryPointFunc);
@@ -290,20 +291,36 @@ struct GlobalVarTranslationContext
                     auto key = builder.createStructKey();
                     auto ptrType = as<IRPtrTypeBase>(output->getDataType());
                     builder.createStructField(resultType, key, ptrType->getValueType());
-                    IRTypeLayout::Builder fieldTypeLayout(&builder);
-                    IRVarLayout::Builder varLayoutBuilder(&builder, fieldTypeLayout.build());
+
+                    IRTypeLayout::Builder fieldTypeLayoutBuilder(&builder);
+                    IRTypeLayout* fieldTypeLayout = nullptr;
+                    bool hasExistingLayout = false;
+                    if (auto existingLayoutDecoration =
+                            output->findDecoration<IRLayoutDecoration>())
+                    {
+                        if (auto existingVarLayout =
+                                as<IRVarLayout>(existingLayoutDecoration->getLayout()))
+                        {
+                            fieldTypeLayout = existingVarLayout->getTypeLayout();
+                            hasExistingLayout = true;
+                        }
+                    }
+
+                    if (!hasExistingLayout)
+                    {
+                        fieldTypeLayout = fieldTypeLayoutBuilder.build();
+                    }
+
+                    IRVarLayout::Builder varLayoutBuilder(&builder, fieldTypeLayout);
                     varLayoutBuilder.setStage(entryPointDecor->getProfile().getStage());
                     if (auto semanticDecor = output->findDecoration<IRSemanticDecoration>())
                     {
                         varLayoutBuilder.setSystemValueSemantic(
                             semanticDecor->getSemanticName(),
-                            semanticDecor->getSemanticIndex());
+                            semanticDecor->getEffectiveSemanticIndex());
                     }
                     else
                     {
-                        fieldTypeLayout.addResourceUsage(
-                            LayoutResourceKind::VaryingOutput,
-                            LayoutSize(1));
                         if (auto layoutDecor = findVarLayout(output))
                         {
                             if (auto offsetAttr =
@@ -317,10 +334,20 @@ struct GlobalVarTranslationContext
                         if (entryPointDecor->getProfile().getStage() == Stage::Fragment)
                         {
                             varLayoutBuilder.setSystemValueSemantic("SV_TARGET", outputVarIndex);
+                            if (!key->findDecoration<IRSemanticDecoration>())
+                                builder.addSemanticDecoration(
+                                    key,
+                                    toSlice("SV_TARGET"),
+                                    outputVarIndex);
                         }
                         else if (entryPointDecor->getProfile().getStage() == Stage::Vertex)
                         {
                             varLayoutBuilder.setUserSemantic("COLOR", outputVarIndex);
+                            if (!key->findDecoration<IRSemanticDecoration>())
+                                builder.addSemanticDecoration(
+                                    key,
+                                    toSlice("COLOR"),
+                                    outputVarIndex);
                         }
                         outputVarIndex++;
                     }
@@ -494,7 +521,7 @@ struct GlobalVarTranslationContext
     }
 };
 
-void translateGlobalVaryingVar(CodeGenContext* context, IRModule* module)
+void translateGlobalVaryingVar(IRModule* module, CodeGenContext* context)
 {
     GlobalVarTranslationContext ctx;
     ctx.context = context;

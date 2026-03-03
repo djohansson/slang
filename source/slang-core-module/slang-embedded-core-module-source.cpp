@@ -151,30 +151,6 @@ static const BaseTypeConversionInfo kBaseTypes[] = {
      kBaseTypeConversionRank_IntPtr},
 };
 
-void Session::finalizeSharedASTBuilder()
-{
-    // Force creation of all builtin types so we can make sure
-    // they are created by the builtin AST builder instead of
-    // some user linkage's ast builder. This avoid the problem
-    // of storing a reference to these global types that are
-    // owned by a user linkage that gets deleted with the linkage.
-    //
-    globalAstBuilder->getNoneType();
-    globalAstBuilder->getNullPtrType();
-    globalAstBuilder->getBottomType();
-    globalAstBuilder->getErrorType();
-    globalAstBuilder->getInitializerListType();
-    globalAstBuilder->getOverloadedType();
-    globalAstBuilder->getStringType();
-    globalAstBuilder->getEnumTypeType();
-    globalAstBuilder->getDiffInterfaceType();
-    globalAstBuilder->getSharedASTBuilder()->getDynamicType();
-    globalAstBuilder->getSharedASTBuilder()->getDiffInterfaceType();
-    globalAstBuilder->getSharedASTBuilder()->getNativeStringType();
-    for (auto& baseType : kBaseTypes)
-        globalAstBuilder->getBuiltinType(baseType.tag);
-}
-
 // Given two base types, we need to be able to compute the cost of converting between them.
 ConversionCost getBaseTypeConversionCost(
     BaseTypeConversionInfo const& toInfo,
@@ -350,6 +326,15 @@ struct IntrinsicOpInfo
 
 #define EMIT_LINE_DIRECTIVE() sb << "#line " << (__LINE__ + 1) << " \"" << path << "\"\n"
 
+#if SLANG_CLANG
+// Clang takes around 10 minutes to compile this file with optimizations, with EarlyCSEPass taking
+// ~95% of the execution time. Disabling optimizations here reduces the compilation time to seconds
+// and has no noticeable impact on run-time performance. These functions are only called once,
+// either at build time by slang-bootstrap, or on the first run of the slang-compiler library,
+// depending on the value of the SLANG_EMBED_CORE_MODULE CMake option.
+#pragma clang optimize off
+#endif
+
 ComPtr<ISlangBlob> Session::getCoreLibraryCode()
 {
 #if SLANG_EMBED_CORE_MODULE_SOURCE
@@ -394,6 +379,7 @@ ComPtr<ISlangBlob> Session::getAutodiffLibraryCode()
 
 ComPtr<ISlangBlob> Session::getGLSLLibraryCode()
 {
+#if SLANG_EMBED_CORE_MODULE_SOURCE
     if (!glslLibraryCode)
     {
         const String path = getCoreModulePath();
@@ -401,6 +387,11 @@ ComPtr<ISlangBlob> Session::getGLSLLibraryCode()
 #include "glsl.meta.slang.h"
         glslLibraryCode = StringBlob::moveCreate(sb);
     }
+#endif
     return glslLibraryCode;
 }
 } // namespace Slang
+
+#if SLANG_CLANG
+#pragma clang optimize on
+#endif

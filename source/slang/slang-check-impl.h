@@ -24,6 +24,17 @@ bool diagnoseCapabilityErrors(
     return sink->diagnose(pos, info, args...);
 }
 
+template<typename D>
+bool diagnoseCapabilityErrors(
+    DiagnosticSink* sink,
+    CompilerOptionSet& optionSet,
+    D const& diagnostic)
+{
+    if (optionSet.getBoolOption(CompilerOptionName::IgnoreCapabilities))
+        return false;
+    return sink->diagnose(diagnostic);
+}
+
 enum class IsSubTypeOptions
 {
     None = 0,
@@ -55,7 +66,15 @@ Type* getPointedToTypeIfCanImplicitDeref(Type* type);
 
 inline int getIntValueBitSize(IntegerLiteralValue val)
 {
-    uint64_t v = val > 0 ? (uint64_t)val : (uint64_t)-val;
+#if SLANG_VC
+// Disable MSVC warning: "unary minus operator applied to unsigned type, result still unsigned"
+#pragma warning(push)
+#pragma warning(disable : 4146)
+#endif
+    uint64_t v = val > 0 ? (uint64_t)val : -(uint64_t)val;
+#if SLANG_VC
+#pragma warning(pop)
+#endif
     int result = 1;
     while (v >>= 1)
     {
@@ -64,19 +83,22 @@ inline int getIntValueBitSize(IntegerLiteralValue val)
     return result;
 }
 
-int getTypeBitSize(Type* t);
+// This returns the number of bits that the type could be. The only exceptional
+// cases are IntPtr and UIntPtr, whose sizes are not known during checking, and
+// the maximum supported value of 64 is returned instead.
+int getMaximumTypeBitSize(Type* t);
 
 // A flat representation of basic types (scalars, vectors and matrices)
 // that can be used as lookup key in caches
 struct BasicTypeKey
 {
-    uint32_t baseType : 8;
-    uint32_t dim1 : 4;
-    uint32_t dim2 : 4;
-    uint32_t knownConstantBitCount : 8;
+    uint32_t baseType : 5;
+    uint32_t dim1 : 8;
+    uint32_t dim2 : 8;
+    uint32_t knownConstantBitCount : 6;
     uint32_t knownNegative : 1;
     uint32_t isLValue : 1;
-    uint32_t reserved : 6;
+    uint32_t reserved : 3;
     uint32_t getRaw() const
     {
         uint32_t val;
@@ -84,7 +106,7 @@ struct BasicTypeKey
         return val;
     }
     bool operator==(BasicTypeKey other) const { return getRaw() == other.getRaw(); }
-    static BasicTypeKey invalid() { return BasicTypeKey{0xff, 0, 0, 0, 0, 0, 0}; }
+    static BasicTypeKey invalid() { return BasicTypeKey{0x1f, 0, 0, 0, 0, 0, 0}; }
 };
 
 SLANG_FORCE_INLINE BasicTypeKey makeBasicTypeKey(
@@ -458,6 +480,12 @@ struct FacetImpl
     ///
     Facet::Origin origin;
 
+    // DeclRef to the container that represent this facet for member lookup.
+    // If the facet is for an interface decl, this declref will be a specialized `LookupDeclRef`
+    // containing the subtype witness that the type this facet belongs to is a subtype of interface
+    // represented by this facet.
+    DeclRef<ContainerDecl> declRefForMemberLookup;
+
     Type* getType() const { return origin.type; }
     DeclRef<Decl> getDeclRef() const { return origin.declRef; }
 
@@ -470,9 +498,18 @@ struct FacetImpl
     /// The next facet in the linearized inheritance list of the entity.
     Facet next;
 
+    void setSubtypeWitness(ASTBuilder* builder, SubtypeWitness* witness)
+    {
+        subtypeWitness = witness;
+        init(builder);
+    }
+
+    void init(ASTBuilder* builder);
+
     FacetImpl() {}
 
     FacetImpl(
+        ASTBuilder* astBuilder,
         Facet::Kind kind,
         Facet::Directness directness,
         DeclRef<Decl> declRef,
@@ -480,6 +517,7 @@ struct FacetImpl
         SubtypeWitness* subtypeWitness)
         : kind(kind), directness(directness), origin(declRef, type), subtypeWitness(subtypeWitness)
     {
+        init(astBuilder);
     }
 };
 
@@ -683,6 +721,14 @@ struct SharedSemanticsContext : public RefObject
 
     GLSLBindingOffsetTracker m_glslBindingOffsetTracker;
 
+    Dictionary<Decl*, bool> m_typeContainsRecursionCache;
+
+    Dictionary<TypePair, ConversionCost> m_typeConversionCostCache;
+
+    // Track diagnostics that have already been reported to avoid duplicates.
+    // Key format: "diagnosticId|sourceLocRaw" or "diagnosticId|sourceLocRaw|extraInfo"
+    HashSet<String> m_reportedDiagnosticKeys;
+
 public:
     SharedSemanticsContext(
         Linkage* linkage,
@@ -803,6 +849,10 @@ private:
     /// Is the `m_mapTypeDeclToCandidateExtensions` dictionary valid and up to date?
     bool m_candidateExtensionListsBuilt = false;
 
+    /// The count of loadedModulesList when the candidate extension cache was last built.
+    /// Used to detect when loadedModulesList has changed and the cache needs updating.
+    Index m_candidateExtensionListsBuiltForModuleCount = 0;
+
     /// Add candidate extensions declared in `moduleDecl` to `m_mapTypeDeclToCandidateExtensions`
     void _addCandidateExtensionsFromModule(ModuleDecl* moduleDecl);
 
@@ -903,19 +953,6 @@ private:
         FacetList baseFacets,
         FacetList::Builder& ioMergedFacets);
 
-    struct TypePair
-    {
-        Type* type0;
-        Type* type1;
-        HashCode getHashCode() const
-        {
-            return combineHash(Slang::getHashCode(type0), Slang::getHashCode(type1));
-        }
-        bool operator==(const TypePair& other) const
-        {
-            return type0 == other.type0 && type1 == other.type1;
-        }
-    };
     Dictionary<Type*, InheritanceInfo> m_mapTypeToInheritanceInfo;
     Dictionary<DeclRef<Decl>, InheritanceInfo> m_mapDeclRefToInheritanceInfo;
     Dictionary<TypePair, SubtypeWitness*> m_mapTypePairToSubtypeWitness;
@@ -1053,6 +1090,18 @@ public:
         return result;
     }
 
+    // Setup the flag to indicate we're in a for-loop side effect context where comma operators are
+    // allowed
+    SemanticsContext withInForLoopSideEffect()
+    {
+        SemanticsContext result(*this);
+        result.m_inForLoopSideEffect = true;
+        return result;
+    }
+
+    bool getInForLoopSideEffect() { return m_inForLoopSideEffect; }
+
+
     TryClauseType getEnclosingTryClauseType() { return m_enclosingTryClauseType; }
 
     SemanticsContext withEnclosingTryClauseType(TryClauseType tryClauseType)
@@ -1186,6 +1235,11 @@ protected:
     // 3. the logic expression is in an array size declaration.
     bool m_shouldShortCircuitLogicExpr = true;
 
+    // Flag to track when we're in a for-loop side effect expression where comma operators are
+    // allowed
+    bool m_inForLoopSideEffect = false;
+
+
     ExpandExpr* m_parentExpandExpr = nullptr;
 
     OrderedHashSet<Type*>* m_capturedTypePacks = nullptr;
@@ -1241,6 +1295,39 @@ struct SemanticsVisitor : public SemanticsContext
 
     CompilerOptionSet& getOptionSet() { return getShared()->getOptionSet(); }
 
+    /// Diagnose a diagnostic only once per unique key (diagnostic ID + location + parameters).
+    /// Useful for avoiding duplicate warnings in loops over aggregate elements.
+    template<typename... Args>
+    void diagnoseOnce(SourceLoc loc, DiagnosticInfo const& diagnostic, Args&&... args)
+    {
+        // Key = diagnostic ID + source location + all parameters
+        StringBuilder keyBuilder;
+        keyBuilder << diagnostic.id << "|" << loc.getRaw();
+        if constexpr (sizeof...(args) > 0)
+        {
+            ((keyBuilder << "|" << args), ...); // Fold expression to append all args
+        }
+        String key = keyBuilder.produceString();
+        if (!getShared()->m_reportedDiagnosticKeys.add(key))
+            return; // Already reported
+        getSink()->diagnose(loc, diagnostic, std::forward<Args>(args)...);
+    }
+
+    /// Diagnose a rich diagnostic only once per unique key (diagnostic ID + serialized content).
+    template<typename D>
+    void diagnoseOnce(D const& diagnostic)
+    {
+        auto genericDiag = diagnostic.toGenericDiagnostic();
+        StringBuilder keyBuilder;
+        keyBuilder << D::getInfo()->id;
+        keyBuilder << "|" << genericDiag.primarySpan.range.begin.getRaw();
+        keyBuilder << "|" << genericDiag.primarySpan.message;
+        String key = keyBuilder.produceString();
+        if (!getShared()->m_reportedDiagnosticKeys.add(key))
+            return; // Already reported
+        getSink()->diagnose(diagnostic);
+    }
+
 public:
     // Translate Types
 
@@ -1252,8 +1339,8 @@ public:
     TypeExp TranslateTypeNode(TypeExp const& typeExp);
     Type* getRemovedModifierType(ModifiedType* type, ModifierVal* modifier);
     Type* getConstantBufferType(Type* elementType, Type* layoutType);
-
     DeclRefType* getExprDeclRefType(Expr* expr);
+    LookupResult lookupConstructorsInType(Type* type, Scope* sourceScope);
 
     /// Is `decl` usable as a static member?
     bool isDeclUsableAsStaticMember(Decl* decl);
@@ -1389,7 +1476,11 @@ public:
     DeclRef<Decl> resolveDeclRef(DeclRef<Decl> declRef);
 
     /// Attempt to "resolve" an overloaded `LookupResult` to only include the "best" results
-    LookupResult resolveOverloadedLookup(LookupResult const& lookupResult);
+    LookupResult resolveOverloadedLookup(LookupResult const& lookupResult, Type* targetType);
+    inline LookupResult resolveOverloadedLookup(LookupResult const& lookupResult)
+    {
+        return resolveOverloadedLookup(lookupResult, nullptr);
+    }
 
     /// Attempt to resolve `expr` into an expression that refers to a single declaration/value.
     /// If `expr` isn't overloaded, then it will be returned as-is.
@@ -1401,26 +1492,40 @@ public:
     /// appropriate "ambiguous reference" error will be reported, and an error expression will be
     /// returned. Otherwise, the original expression is returned if resolution fails.
     ///
-    Expr* maybeResolveOverloadedExpr(Expr* expr, LookupMask mask, DiagnosticSink* diagSink);
+    Expr* maybeResolveOverloadedExpr(
+        Expr* expr,
+        LookupMask mask,
+        Type* targetType,
+        DiagnosticSink* diagSink);
+
+    inline Expr* maybeResolveOverloadedExpr(Expr* expr, LookupMask mask, DiagnosticSink* diagSink)
+    {
+        return maybeResolveOverloadedExpr(expr, mask, nullptr, diagSink);
+    }
 
     /// Attempt to resolve `overloadedExpr` into an expression that refers to a single
     /// declaration/value.
     ///
     /// Equivalent to `maybeResolveOverloadedExpr` with `diagSink` bound to the sink for the
     /// `SemanticsVisitor`.
-    Expr* resolveOverloadedExpr(OverloadedExpr* overloadedExpr, LookupMask mask);
+    Expr* resolveOverloadedExpr(OverloadedExpr* overloadedExpr, Type* targetType, LookupMask mask);
+    inline Expr* resolveOverloadedExpr(OverloadedExpr* overloadedExpr, LookupMask mask)
+    {
+        return resolveOverloadedExpr(overloadedExpr, nullptr, mask);
+    }
 
     /// Worker reoutine for `maybeResolveOverloadedExpr` and `resolveOverloadedExpr`.
     Expr* _resolveOverloadedExprImpl(
         OverloadedExpr* overloadedExpr,
         LookupMask mask,
+        Type* targetType,
         DiagnosticSink* diagSink);
 
     void diagnoseAmbiguousReference(
         OverloadedExpr* overloadedExpr,
         LookupResult const& lookupResult);
     void diagnoseAmbiguousReference(Expr* overloadedExpr);
-
+    bool maybeDiagnoseAmbiguousReference(Expr* overloadedExpr);
 
     Expr* ExpectATypeRepr(Expr* expr);
 
@@ -1428,7 +1533,18 @@ public:
 
     Type* ExtractGenericArgType(Expr* exp);
 
-    IntVal* ExtractGenericArgInteger(Expr* exp, Type* genericParamType, DiagnosticSink* sink);
+    enum class ConstantFoldingKind
+    {
+        CompileTime,
+        LinkTime,
+        SpecializationConstant
+    };
+
+    IntVal* ExtractGenericArgInteger(
+        Expr* exp,
+        Type* genericParamType,
+        ConstantFoldingKind kind,
+        DiagnosticSink* sink);
     IntVal* ExtractGenericArgInteger(Expr* exp, Type* genericParamType);
 
     Val* ExtractGenericArgVal(Expr* exp);
@@ -1473,6 +1589,8 @@ public:
     /// on each declaration in the group.
     ///
     void ensureDeclBase(DeclBase* decl, DeclCheckState state, SemanticsContext* baseContext);
+
+    void ensureOuterGenericConstraints(Decl* decl, DeclCheckState state);
 
     // Check if `lambdaStruct` can be coerced to `funcType`, if so returns the coerced
     // expression in `outExpr`. The coercion is only valid if the lambda struct
@@ -1529,6 +1647,12 @@ public:
     Expr* CheckTerm(Expr* term);
 
     Expr* _CheckTerm(Expr* term);
+
+    /// If inside a lambda body, check whether `exprIn` (or its base sub-expression chain)
+    /// references an outer-scope variable that needs to be captured into the lambda struct.
+    /// This handles the case where an expression was already checked by the parser's
+    /// two-phase generic disambiguation before the lambda capture context was established.
+    Expr* maybeRegisterLambdaCapture(Expr* exprIn);
 
     Expr* CreateErrorExpr(Expr* expr);
 
@@ -1700,6 +1824,17 @@ public:
     /// when a conversion is being done "for real" so that diagnostics
     /// should be emitted on failure.
     ///
+    /// If `outWitnessOfConversion` is non-null and zero valid conversions are found
+    /// `outWitnessOfConversion` will be set to a `nullptr`.
+    ///
+    /// If `outWitnessOfConversion` is non-null and a conversion is found,
+    /// `outWitnessOfConversion` will either be set to:
+    /// (1) `BuiltinTypeCoercionWitness*` to signify that Slang casts without
+    /// a user-definition.
+    /// (2) `DeclRefTypeCoercionWitness*` to signify that Slang will cast
+    /// via a user-definition.
+    /// (3) `nullptr` to signify that the case is unhandled and should be handled
+    ///
     bool _coerce(
         CoercionSite site,
         Type* toType,
@@ -1707,7 +1842,8 @@ public:
         QualType fromType,
         Expr* fromExpr,
         DiagnosticSink* sink,
-        ConversionCost* outCost);
+        ConversionCost* outCost,
+        TypeCoercionWitness** outWitnessOfConversion);
 
     /// Check whether implicit type coercion from `fromType` to `toType` is possible.
     ///
@@ -1773,6 +1909,9 @@ public:
         UncheckedAttribute* uncheckedAttr,
         ModifiableSyntaxNode* attrTarget);
 
+    AttributeDecl* findOrSynthesizeAttributeDeclFromUserDefinedAttributeStruct(
+        StructDecl* attributeTypeDecl);
+
     AttributeBase* checkGLSLLayoutAttribute(
         UncheckedGLSLLayoutAttribute* uncheckedAttr,
         ModifiableSyntaxNode* attrTarget);
@@ -1784,11 +1923,6 @@ public:
 
     void checkModifiers(ModifiableSyntaxNode* syntaxNode);
     void checkVisibility(Decl* decl);
-
-    bool doesSignatureMatchRequirement(
-        DeclRef<CallableDecl> satisfyingMemberDeclRef,
-        DeclRef<CallableDecl> requiredMemberDeclRef,
-        RefPtr<WitnessTable> witnessTable);
 
     bool doesAccessorMatchRequirement(
         DeclRef<AccessorDecl> satisfyingMemberDeclRef,
@@ -1830,10 +1964,6 @@ public:
     //
     // If it does, then inserts a witness into `witnessTable`
     // and returns `true`, otherwise returns `false`
-    bool doesMemberSatisfyRequirement(
-        DeclRef<Decl> memberDeclRef,
-        DeclRef<Decl> requiredMemberDeclRef,
-        RefPtr<WitnessTable> witnessTable);
 
     // State used while checking if a declaration (either a type declaration
     // or an extension of that type) conforms to the interfaces it claims
@@ -1850,11 +1980,41 @@ public:
         /// declaration)
         ContainerDecl* parentDecl;
 
-        // An inner diagnostic sink to store diagnostics about why requirement synthesis failed.
-        DiagnosticSink innerSink;
-
         Dictionary<DeclRef<InterfaceDecl>, RefPtr<WitnessTable>> mapInterfaceToWitnessTable;
     };
+
+    /// Reasons why witness synthesis can fail
+    enum class WitnessSynthesisFailureReason
+    {
+        General,                  // Generic failure (default)
+        MethodResultTypeMismatch, // Method return type doesn't match interface requirement
+        ParameterDirMismatch,     // Parameter direction mismatch (e.g., `in` vs `out`)
+        GenericSignatureMismatch, // Generic signature mismatch (e.g., number of generic parameters)
+    };
+
+    /// Details about method witness synthesis failure
+    struct MethodWitnessSynthesisFailureDetails
+    {
+        WitnessSynthesisFailureReason reason = WitnessSynthesisFailureReason::General;
+        DeclRef<Decl> candidateMethod; // The method that was considered but failed
+        Type* actualType = nullptr;    // For type mismatches: the actual type found
+        Type* expectedType = nullptr;  // For type mismatches: the expected type
+        ParamPassingMode actualDir =
+            ParamPassingMode::In; // For direction mismatches: the actual direction
+        ParamPassingMode expectedDir =
+            ParamPassingMode::In;       // For direction mismatches: the expected direction
+        ParamDecl* paramDecl = nullptr; // For direction mismatches: the parameter declaration
+    };
+
+    bool doesSignatureMatchRequirement(
+        DeclRef<CallableDecl> satisfyingMemberDeclRef,
+        DeclRef<CallableDecl> requiredMemberDeclRef,
+        RefPtr<WitnessTable> witnessTable);
+
+    bool doesMemberSatisfyRequirement(
+        DeclRef<Decl> memberDeclRef,
+        DeclRef<Decl> requiredMemberDeclRef,
+        RefPtr<WitnessTable> witnessTable);
 
     void addModifiersToSynthesizedDecl(
         ConformanceCheckingContext* context,
@@ -1908,12 +2068,14 @@ public:
     /// `lookupResult`.
     ///
     /// On success, installs the syntethesized method in `witnessTable` and returns `true`.
-    /// Otherwise, returns `false`.
+    /// Otherwise, returns `false` and sets `outFailureDetails` with information about why
+    /// synthesis failed.
     bool trySynthesizeMethodRequirementWitness(
         ConformanceCheckingContext* context,
         LookupResult const& lookupResult,
         DeclRef<FuncDecl> requiredMemberDeclRef,
-        RefPtr<WitnessTable> witnessTable);
+        RefPtr<WitnessTable> witnessTable,
+        MethodWitnessSynthesisFailureDetails* outFailureDetails = nullptr);
 
     bool trySynthesizeConstructorRequirementWitness(
         ConformanceCheckingContext* context,
@@ -1933,45 +2095,25 @@ public:
         DeclRef<PropertyDecl> requiredMemberDeclRef,
         RefPtr<WitnessTable> witnessTable);
 
-    bool trySynthesizeWrapperTypePropertyRequirementWitness(
-        ConformanceCheckingContext* context,
-        DeclRef<PropertyDecl> requiredMemberDeclRef,
-        RefPtr<WitnessTable> witnessTable);
-
     bool trySynthesizeSubscriptRequirementWitness(
         ConformanceCheckingContext* context,
         const LookupResult& lookupResult,
         DeclRef<SubscriptDecl> requiredMemberDeclRef,
         RefPtr<WitnessTable> witnessTable);
 
-    bool trySynthesizeWrapperTypeSubscriptRequirementWitness(
-        ConformanceCheckingContext* context,
-        DeclRef<SubscriptDecl> requiredMemberDeclRef,
-        RefPtr<WitnessTable> witnessTable);
-
-    bool trySynthesizeAssociatedTypeRequirementWitness(
-        ConformanceCheckingContext* context,
-        LookupResult const& lookupResult,
-        DeclRef<AssocTypeDecl> requiredMemberDeclRef,
-        RefPtr<WitnessTable> witnessTable);
-
-    bool trySynthesizeAssociatedConstantRequirementWitness(
-        ConformanceCheckingContext* context,
-        LookupResult const& lookupResult,
-        DeclRef<VarDeclBase> requiredMemberDeclRef,
-        RefPtr<WitnessTable> witnessTable);
 
     /// Attempt to synthesize a declartion that can satisfy `requiredMemberDeclRef` using
     /// `lookupResult`.
     ///
     /// On success, installs the syntethesized declaration in `witnessTable` and returns `true`.
-    /// Otherwise, returns `false`.
+    /// Otherwise, returns `false` and sets `outFailureDetails` with information about why
+    /// synthesis failed.
     bool trySynthesizeRequirementWitness(
         ConformanceCheckingContext* context,
         LookupResult const& lookupResult,
         DeclRef<Decl> requiredMemberDeclRef,
-        RefPtr<WitnessTable> witnessTable);
-
+        RefPtr<WitnessTable> witnessTable,
+        MethodWitnessSynthesisFailureDetails* outFailureDetails = nullptr);
 
     enum SynthesisPattern
     {
@@ -2040,6 +2182,8 @@ public:
 
     // Check and register a type if it is differentiable.
     void maybeRegisterDifferentiableType(ASTBuilder* builder, Type* type);
+
+    void maybeCheckMissingNoDiffThis(Expr* expr);
 
     // Find the default implementation of an interface requirement,
     // and insert it to the witness table, if it exists.
@@ -2119,6 +2263,12 @@ public:
     /// Is `type` a scalar integer type.
     bool isScalarIntegerType(Type* type);
 
+    // This function is used to get the best integer type that matches the given type.
+    // If `type` is already an integer type, return it as is.
+    // If `type` is a enum type, return the tag type if it exists.
+    // Otherwise, return the 32-bit signed integer type.
+    Type* getMatchingIntType(Type* type);
+
     /// Is `type` a scalar half type.
     bool isHalfType(Type* type);
 
@@ -2158,12 +2308,6 @@ public:
 
     Expr* checkPredicateExpr(Expr* expr);
 
-    enum class ConstantFoldingKind
-    {
-        CompileTime,
-        LinkTime,
-        SpecializationConstant
-    };
     Expr* checkExpressionAndExpectIntegerConstant(
         Expr* expr,
         IntVal** outIntVal,
@@ -2174,6 +2318,7 @@ public:
     void maybeInferArraySizeForVariable(VarDeclBase* varDecl);
 
     void validateArraySizeForVariable(VarDeclBase* varDecl);
+    void validateArrayElementTypeForVariable(VarDeclBase* varDecl);
 
     IntVal* getIntVal(IntegerLiteralExpr* expr);
 
@@ -2274,7 +2419,7 @@ public:
 
     /// Given an immutable `expr` used as an l-value emit a special diagnostic if it was derived
     /// from `this`.
-    void maybeDiagnoseThisNotLValue(Expr* expr);
+    void maybeDiagnoseConstVariableAssignment(Expr* expr);
 
     // Figure out what type an initializer/constructor declaration
     // is supposed to return. In most cases this is just the type
@@ -2305,6 +2450,11 @@ public:
         // if it is otherwise unconstrained, but doesn't take precedence over a constraint that is
         // not optional.
         bool isOptional = false;
+
+        // Is this constraint an equality? This tells us that "joining" types is meaningless, we
+        // know the result will be the sub type. If it is not, we will error once we start
+        // substituting types.
+        bool isEquality = false;
     };
 
     // A collection of constraints that will need to be satisfied (solved)
@@ -2325,6 +2475,11 @@ public:
         // Additional subtype witnesses available to the currentt constraint solving context.
         Type* subTypeForAdditionalWitnesses = nullptr;
         Dictionary<Type*, SubtypeWitness*>* additionalSubtypeWitnesses = nullptr;
+
+        // Accumulated conversion cost from type promotions during constraint solving.
+        // This tracks costs when a type parameter is promoted to satisfy an interface
+        // constraint (e.g., int -> float to satisfy __BuiltinFloatingPointType).
+        ConversionCost typePromotionCost = kConversionCost_None;
     };
 
     Type* TryJoinVectorAndScalarType(
@@ -2658,6 +2813,7 @@ public:
     {
         Index indexInTypePack = 0;
         bool optionalConstraint = false;
+        bool equalityConstraint = false;
     };
 
     // Try to find a unification for two values
@@ -2702,6 +2858,18 @@ public:
         ValUnificationContext unificationContext,
         DeclRef<VarDeclBase> const& varRef,
         IntVal* val);
+
+    bool TryUnifyFunctorByStructuralMatch(
+        ConstraintSystem& constraints,
+        ValUnificationContext unifyCtx,
+        StructDecl* fst,
+        FuncType* snd);
+
+    bool TryUnifyFuncTypesByStructuralMatch(
+        ConstraintSystem& constraints,
+        ValUnificationContext unifyCtx,
+        FuncType* fst,
+        FuncType* snd);
 
     bool TryUnifyTypesByStructuralMatch(
         ConstraintSystem& constraints,
@@ -2778,6 +2946,10 @@ public:
     void AddGenericOverloadCandidate(LookupResultItem baseItem, OverloadResolveContext& context);
 
     void AddGenericOverloadCandidates(Expr* baseExpr, OverloadResolveContext& context);
+
+    // Given an argument list, expand all `expand` expressions, if the type/value pack being
+    // expanded is already specialized.
+    void maybeExpandArgList(List<Expr*>& args);
 
     template<class T>
     void trySetGenericToRayTracingWithParamAttribute(
@@ -2936,7 +3108,8 @@ public:
     }
 
     Expr* visitSizeOfLikeExpr(SizeOfLikeExpr* expr);
-
+    Expr* visitFloatBitCastExpr(FloatBitCastExpr* expr);
+    Expr* visitAddressOfExpr(AddressOfExpr* expr);
     Expr* visitIncompleteExpr(IncompleteExpr* expr);
     Expr* visitBoolLiteralExpr(BoolLiteralExpr* expr);
     Expr* visitNullPtrLiteralExpr(NullPtrLiteralExpr* expr);
@@ -2981,7 +3154,6 @@ public:
 
     void maybeCheckKnownBuiltinInvocation(Expr* invokeExpr);
 
-    Expr* maybeRegisterLambdaCapture(Expr* exprIn);
     //
     // Some syntax nodes should not occur in the concrete input syntax,
     // and will only appear *after* checking is complete. We need to
@@ -3145,9 +3317,11 @@ bool isUnsizedArrayType(Type* type);
 
 bool isInterfaceType(Type* type);
 
+bool isImmutableBufferType(Type* type);
+
 // Check if `type` is nullable. An `Optional<T>` will occupy the same space as `T`, if `T`
 // is nullable.
-bool isNullableType(Type* type);
+bool doesTypeHaveAnUnusedBitPatternThatCanBeUsedForOptionalRepresentation(Type* type);
 
 EnumDecl* isEnumType(Type* type);
 
@@ -3167,7 +3341,7 @@ void diagnoseMissingCapabilityProvenance(
     CompilerOptionSet& optionSet,
     DiagnosticSink* sink,
     Decl* decl,
-    CapabilitySet& setToFind);
+    CapabilitySet const& setToFind);
 void diagnoseCapabilityProvenance(
     CompilerOptionSet& optionSet,
     DiagnosticSink* sink,
@@ -3197,5 +3371,40 @@ bool getExtensionTargetDeclList(
     DeclRefType* targetDeclRefType,
     ExtensionDecl* extDeclRef,
     ShortList<AggTypeDecl*>& targetDecls);
+
+void validateEntryPoint(EntryPoint* entryPoint, DiagnosticSink* sink);
+
+RefPtr<ComponentType> createUnspecializedGlobalComponentType(
+    FrontEndCompileRequest* compileRequest);
+
+RefPtr<ComponentType> createUnspecializedGlobalAndEntryPointsComponentType(
+    FrontEndCompileRequest* compileRequest,
+    List<RefPtr<ComponentType>>& outUnspecializedEntryPoints);
+
+RefPtr<ComponentType> createSpecializedGlobalComponentType(EndToEndCompileRequest* endToEndReq);
+
+RefPtr<ComponentType> createSpecializedGlobalAndEntryPointsComponentType(
+    EndToEndCompileRequest* endToEndReq,
+    List<RefPtr<ComponentType>>& outSpecializedEntryPoints);
+
+// Returns `false` if coerce fails.
+// * `constraintDecl` is the constraint we need to satisfy
+// * `genericDeclRef` is the generic decl we are operating on
+// * `maybeContext` is the contect for our current operation. This variable must be filled if
+// `shouldEmitError == true`.
+// * `maybeConstrainedGenericParams` contains set of constrained params relative to `genericDeclRef`
+// and current context.
+//   This param is optional. Coercion `toType` and `fromType` will be added to the set if function
+//   succeeds.
+// * `args` are the current arguments relative to `genericDeclRef`.
+bool addTypeCoercionWitnessToArgs(
+    ASTBuilder* astBuilder,
+    SemanticsVisitor* visitor,
+    TypeCoercionConstraintDecl* constraintDecl,
+    DeclRef<GenericDecl> genericDeclRef,
+    SemanticsVisitor::OverloadResolveContext* maybeContext,
+    HashSet<Decl*>* maybeConstrainedGenericParams,
+    ShortList<Val*>& args,
+    bool shouldEmitError);
 
 } // namespace Slang

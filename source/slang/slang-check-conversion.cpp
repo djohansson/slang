@@ -1,6 +1,7 @@
 // slang-check-conversion.cpp
 #include "slang-ast-synthesis.h"
 #include "slang-check-impl.h"
+#include "slang-rich-diagnostics.h"
 
 // This file contains semantic-checking logic for dealing
 // with conversion (both implicit and explicit) of expressions
@@ -149,6 +150,7 @@ bool SemanticsVisitor::_readValueFromInitializerList(
             firstInitExpr->type,
             firstInitExpr,
             getSink(),
+            nullptr,
             nullptr);
     }
 
@@ -258,6 +260,16 @@ bool SemanticsVisitor::isCStyleType(Type* type, HashSet<Type*>& isVisit)
             return cacheResult(false);
     }
 
+    // Opaque types are not C-style.
+    // These types have no well-defined default value (they usually need a separate API call to be
+    // created and/or bound) and thus cannot be default-initialized.
+    {
+        TypeTag tags = getTypeTags(type);
+        const bool isOpaque = ((int)tags & (int)TypeTag::Opaque) != 0;
+        if (isOpaque)
+            return cacheResult(false);
+    }
+
     // A tuple type is C-style if all of its members are C-style.
     if (auto tupleType = as<TupleType>(type))
     {
@@ -266,7 +278,7 @@ bool SemanticsVisitor::isCStyleType(Type* type, HashSet<Type*>& isVisit)
             auto elementType = tupleType->getMember(i);
             // Avoid infinite loop in case of circular reference.
             if (isVisit.contains(elementType))
-                return cacheResult(false);
+                continue;
             if (!isCStyleType(elementType, isVisit))
                 return cacheResult(false);
         }
@@ -346,6 +358,8 @@ Expr* SemanticsVisitor::_createCtorInvokeExpr(
     auto* varExpr = getASTBuilder()->create<VarExpr>();
     varExpr->type = (QualType)getASTBuilder()->getTypeType(toType);
     varExpr->declRef = isDeclRefTypeOf<Decl>(toType);
+    varExpr->loc = loc;
+    varExpr->checked = true;
 
     auto* constructorExpr = getASTBuilder()->create<ExplicitCtorInvokeExpr>();
     constructorExpr->functionExpr = varExpr;
@@ -382,6 +396,13 @@ bool SemanticsVisitor::createInvokeExprForExplicitCtor(
                 fromInitializerListExpr->args);
 
             DiagnosticSink tempSink(getSourceManager(), nullptr);
+            if (auto parentSink = getSink())
+            {
+                tempSink.setFlags(parentSink->getFlags());
+                tempSink.setDiagnosticColorMode(parentSink->getDiagnosticColorMode());
+                tempSink.setEnableUnicode(parentSink->getEnableUnicode());
+            }
+
             SemanticsVisitor subVisitor(withSink(&tempSink));
             ctorInvokeExpr = subVisitor.CheckTerm(ctorInvokeExpr);
 
@@ -395,6 +416,12 @@ bool SemanticsVisitor::createInvokeExprForExplicitCtor(
                     getSink()->diagnoseRaw(
                         Severity::Error,
                         static_cast<char const*>(blob->getBufferPointer()));
+                    // For non-c-style types, we will always return true when there
+                    // is a ctor, so that we do not fallback to legacy initializer list logic
+                    // in `_coerceInitializerList()` and produce unrelated errors.
+                    if (outExpr)
+                        *outExpr = CreateErrorExpr(ctorInvokeExpr);
+                    return true;
                 }
                 return false;
             }
@@ -432,16 +459,15 @@ bool SemanticsVisitor::createInvokeExprForSynthesizedCtor(
         // invalid.
         isCStyle = isCStyleType(toType, isVisit);
 
-        // WAR: We currently still has to allow legacy initializer list for array type until we have
-        // more proper solution for array initialization, so if the right hand side is an array
-        // type, we will not report error and fall-back to legacy initializer list logic.
+        // WAR: We currently still have to allow legacy initializer list for array type until we
+        // have a more proper solution for array initialization, so if the right hand side is an
+        // array type, we will not report an error and fall-back to legacy initializer list logic.
         bool isArrayType = as<ArrayExpressionType>(toType) != nullptr;
         if (!isCStyle && !isArrayType)
         {
-            getSink()->diagnose(
-                fromInitializerListExpr->loc,
-                Diagnostics::cannotUseInitializerListForType,
-                toType);
+            diagnoseOnce(Diagnostics::CannotUseInitializerListForType{
+                .type = toType,
+                .initList = fromInitializerListExpr});
         }
 
         return false;
@@ -459,6 +485,12 @@ bool SemanticsVisitor::createInvokeExprForSynthesizedCtor(
     }
 
     DiagnosticSink tempSink(getSourceManager(), nullptr);
+    if (auto parentSink = getSink())
+    {
+        tempSink.setFlags(parentSink->getFlags());
+        tempSink.setDiagnosticColorMode(parentSink->getDiagnosticColorMode());
+        tempSink.setEnableUnicode(parentSink->getEnableUnicode());
+    }
     SemanticsVisitor subVisitor(withSink(&tempSink));
 
     // First make sure the struct is fully checked, otherwise the synthesized constructor may not be
@@ -521,6 +553,7 @@ bool SemanticsVisitor::_readAggregateValueFromInitializerList(
                 arg->type,
                 arg,
                 getSink(),
+                nullptr,
                 nullptr);
         }
         else
@@ -549,7 +582,7 @@ bool SemanticsVisitor::_readAggregateValueFromInitializerList(
         {
             auto isLinkTimeVal =
                 as<TypeCastIntVal>(toElementCount) || as<DeclRefIntVal>(toElementCount) ||
-                as<PolynomialIntVal>(toElementCount) || as<FuncCallIntVal>(toElementType);
+                as<PolynomialIntVal>(toElementCount) || as<FuncCallIntVal>(toElementCount);
             if (isLinkTimeVal)
             {
                 auto defaultConstructExpr = m_astBuilder->create<DefaultConstructExpr>();
@@ -565,10 +598,9 @@ bool SemanticsVisitor::_readAggregateValueFromInitializerList(
             //
             if (outToExpr)
             {
-                getSink()->diagnose(
-                    fromInitializerListExpr,
-                    Diagnostics::cannotUseInitializerListForVectorOfUnknownSize,
-                    toElementCount);
+                getSink()->diagnose(Diagnostics::CannotUseInitializerListForVectorOfUnknownSize{
+                    .elementCount = toElementCount,
+                    .initList = fromInitializerListExpr});
             }
             return false;
         }
@@ -609,10 +641,9 @@ bool SemanticsVisitor::_readAggregateValueFromInitializerList(
             //
             if (outToExpr)
             {
-                getSink()->diagnose(
-                    fromInitializerListExpr,
-                    Diagnostics::cannotUseInitializerListForCoopVectorOfUnknownSize,
-                    toElementCount);
+                getSink()->diagnose(Diagnostics::CannotUseInitializerListForCoopVectorOfUnknownSize{
+                    .elementCount = toElementCount,
+                    .initList = fromInitializerListExpr});
             }
             return false;
         }
@@ -761,10 +792,9 @@ bool SemanticsVisitor::_readAggregateValueFromInitializerList(
             //
             if (outToExpr)
             {
-                getSink()->diagnose(
-                    fromInitializerListExpr,
-                    Diagnostics::cannotUseInitializerListForMatrixOfUnknownSize,
-                    toMatrixType->getRowCount());
+                getSink()->diagnose(Diagnostics::CannotUseInitializerListForMatrixOfUnknownSize{
+                    .rowCount = toMatrixType->getRowCount(),
+                    .initList = fromInitializerListExpr});
             }
             return false;
         }
@@ -875,10 +905,9 @@ bool SemanticsVisitor::_readAggregateValueFromInitializerList(
         //
         if (outToExpr)
         {
-            getSink()->diagnose(
-                fromInitializerListExpr,
-                Diagnostics::cannotUseInitializerListForType,
-                inToType);
+            getSink()->diagnose(Diagnostics::CannotUseInitializerListForType{
+                .type = inToType,
+                .initList = fromInitializerListExpr});
         }
         return false;
     }
@@ -956,24 +985,25 @@ bool SemanticsVisitor::_coerceInitializerList(
     }
 
     // We will fall back to the legacy logic of initialize list.
+    Expr* outInitListExpr = nullptr;
     if (!_readAggregateValueFromInitializerList(
             toType,
-            outToExpr,
+            &outInitListExpr,
             fromInitializerListExpr,
             argIndex))
         return false;
-
     if (argIndex != argCount)
     {
         if (outToExpr)
         {
-            getSink()->diagnose(
-                fromInitializerListExpr,
-                Diagnostics::tooManyInitializers,
-                argIndex,
-                argCount);
+            getSink()->diagnose(Diagnostics::TooManyInitializers{
+                .expected = (int64_t)argIndex,
+                .got = (int64_t)argCount,
+                .initList = fromInitializerListExpr});
         }
     }
+    if (outToExpr)
+        *outToExpr = outInitListExpr;
 
     return true;
 }
@@ -999,7 +1029,10 @@ bool SemanticsVisitor::_failedCoercion(
         {
             if (sink)
             {
-                sink->diagnose(fromExpr->loc, Diagnostics::typeMismatch, toType, fromExpr->type);
+                sink->diagnose(Diagnostics::TypeMismatch{
+                    .expectedType = toType,
+                    .actualType = fromExpr->type,
+                    .expr = fromExpr});
             }
         }
     }
@@ -1089,7 +1122,7 @@ static bool isSigned(Type* t)
     }
 }
 
-int getTypeBitSize(Type* t)
+int getMaximumTypeBitSize(Type* t)
 {
     auto basicType = as<BasicExpressionType>(t);
     if (!basicType)
@@ -1111,11 +1144,7 @@ int getTypeBitSize(Type* t)
         return 64;
     case BaseType::IntPtr:
     case BaseType::UIntPtr:
-#if SLANG_PTR_IS_32
-        return 32;
-#else
         return 64;
-#endif
     default:
         return 0;
     }
@@ -1151,7 +1180,7 @@ ConversionCost SemanticsVisitor::getImplicitConversionCostWithKnownArg(
         auto knownVal = as<IntegerLiteralExpr>(arg);
         if (!knownVal)
             return candidateCost;
-        if (getIntValueBitSize(knownVal->value) <= getTypeBitSize(toType))
+        if (getIntValueBitSize(knownVal->value) <= getMaximumTypeBitSize(toType))
         {
             bool toTypeIsSigned = isSigned(toType);
             bool fromTypeIsSigned = isSigned(knownVal->type);
@@ -1173,16 +1202,25 @@ bool SemanticsVisitor::_coerce(
     QualType fromType,
     Expr* fromExpr,
     DiagnosticSink* sink,
-    ConversionCost* outCost)
+    ConversionCost* outCost,
+    TypeCoercionWitness** outWitnessOfConversion)
 {
+    auto setWitnessOfConversionToBuiltinConversion = [&]()
+    {
+        if (outWitnessOfConversion)
+            *outWitnessOfConversion =
+                getASTBuilder()->getBuiltinTypeCoercionWitness(fromType, toType);
+    };
+
+
     // If we are about to try and coerce an overloaded expression,
     // then we should start by trying to resolve the ambiguous reference
     // based on prioritization of the different candidates.
     //
-    // TODO: A more powerful model would be to try to coerce each
+    // If `fromExpr` is overloaded, we will try to coerce each
     // of the constituent overload candidates, filtering down to
     // those that are coercible, and then disambiguating the result.
-    // Such an approach would let us disambiguate between overloaded
+    // Such an approach lets us disambiguate between overloaded
     // symbols based on their type (e.g., by casting the name of
     // an overloaded function to the type of the overload we mean
     // to reference).
@@ -1190,10 +1228,48 @@ bool SemanticsVisitor::_coerce(
     if (auto fromOverloadedExpr = as<OverloadedExpr>(fromExpr))
     {
         auto resolvedExpr =
-            maybeResolveOverloadedExpr(fromOverloadedExpr, LookupMask::Default, nullptr);
+            maybeResolveOverloadedExpr(fromOverloadedExpr, LookupMask::Default, toType, nullptr);
 
         fromExpr = resolvedExpr;
         fromType = resolvedExpr->type;
+    }
+    else if (auto overloadedExpr2 = as<OverloadedExpr2>(fromExpr))
+    {
+        ShortList<Expr*> coercibleCandidates;
+        for (auto candidate : overloadedExpr2->candidateExprs)
+        {
+            if (canCoerce(toType, candidate->type, candidate))
+                coercibleCandidates.add(candidate);
+        }
+        if (coercibleCandidates.getCount() == 1)
+        {
+            return _coerce(
+                site,
+                toType,
+                outToExpr,
+                coercibleCandidates[0]->type,
+                coercibleCandidates[0],
+                sink,
+                outCost,
+                outWitnessOfConversion);
+        }
+        if (sink)
+        {
+            auto firstCandidate = overloadedExpr2->candidateExprs.getCount() > 0
+                                      ? overloadedExpr2->candidateExprs[0]
+                                      : nullptr;
+            if (auto declCandidate = as<DeclRefExpr>(firstCandidate))
+            {
+                sink->diagnose(Diagnostics::AmbiguousReference{
+                    .name = getText(declCandidate->declRef.getName()),
+                    .location = fromExpr->loc});
+            }
+            else
+            {
+                sink->diagnose(Diagnostics::AmbiguousExpression{.expr = fromExpr});
+            }
+        }
+        return false;
     }
 
     // An important and easy case is when the "to" and "from" types are equal.
@@ -1204,7 +1280,63 @@ bool SemanticsVisitor::_coerce(
             *outToExpr = fromExpr;
         if (outCost)
             *outCost = kConversionCost_None;
+        setWitnessOfConversionToBuiltinConversion();
         return true;
+    }
+
+    // Fallback: Check if types are structurally identical but differ only in
+    // their subtype witness arguments. This can happen when generic specialization
+    // creates types through different inheritance paths
+    // (e.g., int -> __BuiltinIntegerType -> __BuiltinArithmeticType vs
+    // int -> __BuiltinSignedArithmeticType -> __BuiltinArithmeticType).
+    //
+    // We only apply this fallback for DeclRefType with GenericAppDeclRef where:
+    // 1. The base declarations are the same
+    // 2. All non-witness type arguments are equal
+    //
+    if (auto toDeclRefType = as<DeclRefType>(toType))
+    {
+        if (auto fromDeclRefType = as<DeclRefType>(fromType))
+        {
+            auto toGenApp = as<GenericAppDeclRef>(toDeclRefType->getDeclRefBase());
+            auto fromGenApp = as<GenericAppDeclRef>(fromDeclRefType->getDeclRefBase());
+            if (toGenApp && fromGenApp)
+            {
+                // Check if base declarations are the same
+                if (toGenApp->getBase() == fromGenApp->getBase())
+                {
+                    auto toArgs = toGenApp->getArgs();
+                    auto fromArgs = fromGenApp->getArgs();
+                    if (toArgs.getCount() == fromArgs.getCount())
+                    {
+                        bool allNonWitnessArgsEqual = true;
+                        for (Index i = 0; i < toArgs.getCount(); i++)
+                        {
+                            auto toArg = toArgs[i];
+                            auto fromArg = fromArgs[i];
+                            // Skip witness arguments (SubtypeWitness)
+                            if (as<SubtypeWitness>(toArg) && as<SubtypeWitness>(fromArg))
+                                continue;
+                            // Non-witness arguments must be equal
+                            if (!toArg->equals(fromArg))
+                            {
+                                allNonWitnessArgsEqual = false;
+                                break;
+                            }
+                        }
+                        if (allNonWitnessArgsEqual)
+                        {
+                            if (outToExpr)
+                                *outToExpr = fromExpr;
+                            if (outCost)
+                                *outCost = kConversionCost_None;
+                            setWitnessOfConversionToBuiltinConversion();
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // Assume string literals are convertible to any string type.
@@ -1214,6 +1346,7 @@ bool SemanticsVisitor::_coerce(
             *outToExpr = fromExpr;
         if (outCost)
             *outCost = kConversionCost_None;
+        setWitnessOfConversionToBuiltinConversion();
         return true;
     }
 
@@ -1355,6 +1488,7 @@ bool SemanticsVisitor::_coerce(
             {
                 *outCost = kConversionCost_None;
             }
+            setWitnessOfConversionToBuiltinConversion();
 
             return true;
         }
@@ -1415,7 +1549,7 @@ bool SemanticsVisitor::_coerce(
         }
     }
 
-    // matrix type with different layouts are convertible
+    // matrix types with different layouts are convertible
     if (auto fromMatrixType = as<MatrixExpressionType>(fromType))
     {
         if (auto toMatrixType = as<MatrixExpressionType>(toType))
@@ -1430,13 +1564,25 @@ bool SemanticsVisitor::_coerce(
                 }
                 if (outToExpr)
                 {
-                    *outToExpr = fromExpr;
+                    auto castExpr = getASTBuilder()->create<BuiltinCastExpr>();
+                    castExpr->type = toType;
+                    castExpr->loc = fromExpr->loc;
+                    castExpr->base = fromExpr;
+                    *outToExpr = castExpr;
                 }
                 return true;
             }
         }
     }
 
+    // We allow a value of a `struct` type to be coerced to a function
+    // type if the `struct` provides an appropriate method for calling
+    // instances of that type.
+    //
+    // TODO(tfoley): This can and should be opened up to work for any
+    // type (or at least any nominal type) that supports the required
+    // operation.
+    //
     if (auto toFuncType = as<FuncType>(toType))
     {
         if (auto fromLambdaType = isDeclRefTypeOf<StructDecl>(fromType))
@@ -1487,6 +1633,16 @@ bool SemanticsVisitor::_coerce(
         // Is toType and fromType the same via some type equality witness?
         // If so there is no need to do any conversion.
         //
+        // Note that this is a somewhat messy case to have, since we *already*
+        // have a check for type equality above this point. For this code to
+        // execute we would need to have a case where the `To` and `From` types
+        // are considered distinct by `Type::equals` but `tryGetSubtypeWitness`
+        // is still able to produce a witness for the equality of the two types.
+        //
+        // TODO(tfoley): Try to set things up so that we can have an invariant
+        // that two types count as equal for `Type::equals` if and only if a
+        // type equality witness for those types can be dervied.
+        //
         if (isTypeEqualityWitness(fromIsToWitness))
         {
             if (outToExpr)
@@ -1508,30 +1664,63 @@ bool SemanticsVisitor::_coerce(
         return _failedCoercion(toType, outToExpr, fromExpr, sink);
     }
 
-    // We allow implicit conversion of a parameter group type like
-    // `ConstantBuffer<X>` or `ParameterBlock<X>` to its element
-    // type `X`.
+    // If the type that we are converting from is a parameter group type
+    // (something like `ConstantBuffer<X>` or `ParameterBlock<X>`) and we
+    // are converting to some type `Y`, then we want to allow for a multi-step
+    // conversion where we first implicitly dereference the parameter group
+    // to get an `X`, and then convert the resulting `X` to a `Y`.
+    //
+    // An important special case of the above is when `X == Y`, in which
+    // case we are just converting, e.g., a `ConstantBuffer<X>` to an `X`.
+    //
+    // TODO(tfoley): When this conditional detects a parameter group type
+    // it funnels the coercion logic into only considering conversions that
+    // involve an automatic dereference. We need to ensure that any other
+    // kinds of conversion that could apply to a parameter group are considered
+    // earlier in this function, or else they will never actually be considered.
+    // Notably, with this logic in place it is impossible for there to be any
+    // conversion operations from a parameter-group type defined in code
+    // (e.g., a constructor for a `DescriptorHandle`-like type that takes
+    // a `ConstantBufer<T>` parameter will never be considered as part of conversion
+    // logic, because we will first extract the `T` and then try to convert *that*).
     //
     if (auto fromParameterGroupType = as<ParameterGroupType>(fromType))
     {
         auto fromElementType = fromParameterGroupType->getElementType();
 
-        // If we convert, e.g., `ConstantBuffer<A> to `A`, we will allow
-        // subsequent conversion of `A` to `B` if such a conversion
-        // is possible.
-        //
-        ConversionCost subCost = kConversionCost_None;
-
         DerefExpr* derefExpr = nullptr;
         if (outToExpr)
         {
+            // TODO(tfoley): The logic here effectively assumes that any
+            // parameter-group type is read-only, because we are not
+            // setting the `isLeftValue` flag of the `QualType` based
+            // on the type of the container. That is, a `StorageBuffer<X>`
+            // and a `ConstantBuffer<X>` would both derive the `QualType`
+            // of the dereferenced expression from `X` alone, and ignore
+            // that one of these should yield an l-value and the other
+            // shouldn't.
+            //
+            // In practice, we should have a centralized function that
+            // handles dereferenencing of any `Expr`, and computes the
+            // correct type for the result, so that the logic here can
+            // exactly mirror other cases of implicit dereference.
+            //
             derefExpr = m_astBuilder->create<DerefExpr>();
             derefExpr->base = fromExpr;
             derefExpr->type = QualType(fromElementType);
             derefExpr->checked = true;
         }
 
-        if (!_coerce(site, toType, outToExpr, fromElementType, derefExpr, sink, &subCost))
+        ConversionCost subCost = kConversionCost_None;
+        if (!_coerce(
+                site,
+                toType,
+                outToExpr,
+                fromElementType,
+                derefExpr,
+                sink,
+                &subCost,
+                outWitnessOfConversion))
         {
             return false;
         }
@@ -1541,40 +1730,74 @@ bool SemanticsVisitor::_coerce(
         return true;
     }
 
-    if (auto refType = as<RefTypeBase>(toType))
+    // Because (for various bad reasons) we currently support an explicit
+    // `Ref<T>` type (used to define some of our core-module functions),
+    // we have to account for the case where an expression of type `T`
+    // is being coerced to a `Ref<T>`.
+    //
+    if (auto refType = as<ExplicitRefType>(toType))
     {
+        // TODO(tfoley): This logic is deeply and fundamentally incorrect.
+        // It presumes that if an expression of type `T` can coerce to
+        // type `U` then it can also coerce to a *reference* to `U`.
+        // That means that because we support, say, implicit coercion of
+        // an `int` to a `float`, this logic will support implicit coercion
+        // of an `int` l-value to a `Ref<float>`!!!!
+        //
         ConversionCost cost;
         if (!canCoerce(refType->getValueType(), fromType, fromExpr, &cost))
             return false;
-        if (as<RefType>(toType) && !fromExpr->type.isLeftValue)
-            return false;
-        ConversionCost subCost = kConversionCost_GetRef;
 
-        MakeRefExpr* refExpr = nullptr;
+        // Depending on whether the result of the coercion would be an l-value
+        // or not, we may need to restrict the source to be an l-value.
+        //
+        // TODO(tfoley): Here we are again hijacking the `QualType` constructor
+        // to do the direct work. It's still not clear where this logic should
+        // live. In the longer run, I'm hopeful that we will get rid of
+        // the explicit `Ref` type entirely (since it was a design mistake to
+        // begin with), and thus not have to deal with the miserable mess that
+        // it pushes back on various parts of the compiler.
+        //
+        auto qualRefType = QualType(refType);
+        if (qualRefType.isLeftValue && !fromExpr->type.isLeftValue)
+        {
+            // The result type would be an l-value, but the source isn't,
+            // so there is no way to support the conversion.
+            //
+            return false;
+        }
+
+        ConversionCost subCost = kConversionCost_GetRef;
+        if (outCost)
+            *outCost = subCost;
+
         if (outToExpr)
         {
-            refExpr = m_astBuilder->create<MakeRefExpr>();
+            auto refExpr = m_astBuilder->create<MakeRefExpr>();
             refExpr->base = fromExpr;
-            refExpr->type = QualType(refType);
-            refExpr->type.isLeftValue = false;
+            refExpr->type = qualRefType;
             refExpr->checked = true;
             *outToExpr = refExpr;
         }
-        if (outCost)
-            *outCost = subCost;
+
         return true;
     }
 
+    // TODO(tfoley): I was told that explicit `Ref` types should not
+    // be seen by most of the compiler because they would be automatically
+    // eliminated via `maybeOpenRef()` before other code needs to deal
+    // with them... but that doesn't seem to be the case given how much
+    // code here in type coercion is having to account for the possibility
+    // of `Ref` types.
 
-    // Allow implicit dereferencing a reference type.
-    if (auto fromRefType = as<RefTypeBase>(fromType))
+    // If we find ourselves in a situation where we need to coerce an
+    // expression of type `Ref<T>`, we will first unwrap the reference
+    // to get an expression of type `T` and then coerce *that*.
+    //
+    if (auto fromRefType = as<ExplicitRefType>(fromType))
     {
         auto fromValueType = fromRefType->getValueType();
 
-        // If we convert, e.g., `ConstantBuffer<A> to `A`, we will allow
-        // subsequent conversion of `A` to `B` if such a conversion
-        // is possible.
-        //
         ConversionCost subCost = kConversionCost_None;
 
         Expr* openRefExpr = nullptr;
@@ -1583,10 +1806,38 @@ bool SemanticsVisitor::_coerce(
             openRefExpr = maybeOpenRef(fromExpr);
         }
 
-        if (!_coerce(site, toType, outToExpr, fromValueType, openRefExpr, sink, &subCost))
+        if (!_coerce(
+                site,
+                toType,
+                outToExpr,
+                fromValueType,
+                openRefExpr,
+                sink,
+                &subCost,
+                outWitnessOfConversion))
         {
             return false;
         }
+
+        //
+        // TODO(tfoley): This logic treats the implicit dereferencing
+        // of a `Ref<T>` as an additional conversion cost, so that
+        // a function with an explicit `Ref<T>` parameter would end up
+        // being preferred over one with just a `T`.
+        //
+        // Making that distinction and introducing this cost seems to have
+        // very little benefit, and risks causing developer confusion,
+        // because for the most part references are invisible to the user
+        // (intentionally).
+        //
+        // We don't want to support explicit `Ref<T>` types in parameter
+        // positions anyway (people can use either a `ref` parameter or
+        // an explicit `Ptr<T>`), so the whole thing is moot.
+        //
+        // For that matter, we probably should just remove explicit
+        // `Ref<T>` types from the language, since they were never
+        // intended to be there in the first place.
+        //
 
         if (outCost)
             *outCost = subCost + kConversionCost_ImplicitDereference;
@@ -1633,6 +1884,11 @@ bool SemanticsVisitor::_coerce(
         }
         overloadContext.bestCandidateStorage = cachedMethod->conversionFuncOverloadCandidate;
         overloadContext.bestCandidate = &overloadContext.bestCandidateStorage;
+        if (outWitnessOfConversion)
+            *outWitnessOfConversion = getASTBuilder()->getDeclRefTypeCoercionWitness(
+                fromType,
+                toType,
+                overloadContext.bestCandidate->item.declRef);
         if (!outToExpr)
         {
             // If we are not requesting to create an expression, we can return early.
@@ -1695,6 +1951,8 @@ bool SemanticsVisitor::_coerce(
             }
         }
 
+        bool result = true;
+
         // Conceptually, we want to treat the conversion as
         // possible, but report it as ambiguous if we actually
         // need to reify the result as an expression.
@@ -1703,10 +1961,19 @@ bool SemanticsVisitor::_coerce(
         {
             if (sink)
             {
-                sink->diagnose(fromExpr, Diagnostics::ambiguousConversion, fromType, toType);
+                sink->diagnose(Diagnostics::AmbiguousConversion{
+                    .fromType = fromType.type,
+                    .toType = toType,
+                    .expr = fromExpr});
+                for (auto candidate : overloadContext.bestCandidates)
+                {
+                    sink->diagnose(
+                        Diagnostics::SeeDeclarationOf{.decl = candidate.item.declRef.getDecl()});
+                }
             }
 
             *outToExpr = CreateErrorExpr(fromExpr);
+            result = false;
         }
 
         if (!cachedMethod)
@@ -1716,9 +1983,14 @@ bool SemanticsVisitor::_coerce(
             getShared()->cacheImplicitCastMethod(implicitCastKey, method);
         }
 
+        if (outWitnessOfConversion)
+            *outWitnessOfConversion = getASTBuilder()->getDeclRefTypeCoercionWitness(
+                fromType,
+                toType,
+                method.conversionFuncOverloadCandidate.item.declRef);
         if (outCost)
             *outCost = bestCost;
-        return true;
+        return result;
     }
     else if (overloadContext.bestCandidate)
     {
@@ -1759,12 +2031,14 @@ bool SemanticsVisitor::_coerce(
             {
                 if (sink)
                 {
-                    sink->diagnose(fromExpr, Diagnostics::typeMismatch, toType, fromType);
-                    sink->diagnoseWithoutSourceView(
-                        fromExpr,
-                        Diagnostics::noteExplicitConversionPossible,
-                        fromType,
-                        toType);
+                    sink->diagnose(Diagnostics::TypeMismatch{
+                        .expectedType = toType,
+                        .actualType = fromType,
+                        .expr = fromExpr});
+                    sink->diagnose(Diagnostics::NoteExplicitConversionPossible{
+                        .fromType = fromType.type,
+                        .toType = toType,
+                        .location = fromExpr->loc});
                 }
             }
             else if (cost >= kConversionCost_Default)
@@ -1791,11 +2065,10 @@ bool SemanticsVisitor::_coerce(
                 }
                 if (shouldEmitGeneralWarning && sink)
                 {
-                    sink->diagnose(
-                        fromExpr,
-                        Diagnostics::unrecommendedImplicitConversion,
-                        fromType,
-                        toType);
+                    sink->diagnose(Diagnostics::UnrecommendedImplicitConversion{
+                        .fromType = fromType.type,
+                        .toType = toType,
+                        .expr = fromExpr});
                 }
             }
 
@@ -1806,7 +2079,7 @@ bool SemanticsVisitor::_coerce(
                 if (builtinConversionKind == kBuiltinConversion_FloatToDouble)
                 {
                     if (!as<FloatingPointLiteralExpr>(fromExpr))
-                        sink->diagnose(fromExpr, Diagnostics::implicitConversionToDouble);
+                        sink->diagnose(Diagnostics::ImplicitConversionToDouble{.expr = fromExpr});
                 }
             }
         }
@@ -1864,9 +2137,18 @@ bool SemanticsVisitor::_coerce(
             castExpr->arguments.add(args[0]);
         }
         if (!cachedMethod)
-            getShared()->cacheImplicitCastMethod(
-                implicitCastKey,
-                ImplicitCastMethod{*overloadContext.bestCandidate, cost});
+        {
+            // We can only cache the method if it is a public, otherwise we may not be able to
+            // use this method depending on where we are performing the coercion.
+            if (overloadContext.bestCandidate->item.declRef &&
+                getDeclVisibility(overloadContext.bestCandidate->item.declRef.getDecl()) ==
+                    DeclVisibility::Public)
+            {
+                getShared()->cacheImplicitCastMethod(
+                    implicitCastKey,
+                    ImplicitCastMethod{*overloadContext.bestCandidate, cost});
+            }
+        }
         return true;
     }
     if (!cachedMethod)
@@ -1933,8 +2215,8 @@ bool SemanticsVisitor::tryCoerceLambdaToFuncType(
     Index paramId = 0;
     for (auto param : invokeFunc->getParameters())
     {
-        auto paramType = getParamTypeWithDirectionWrapper(m_astBuilder, param);
-        auto toParamType = toFuncType->getParamType(paramId);
+        auto paramType = getParamTypeWithModeWrapper(m_astBuilder, param);
+        auto toParamType = toFuncType->getParamTypeWithModeWrapper(paramId);
         if (!paramType->equals(toParamType))
         {
             return false;
@@ -2017,7 +2299,7 @@ bool SemanticsVisitor::canCoerce(
     // for basic types such as scalars and vectors.
     //
 
-    bool shouldAddToCache = false;
+    bool shouldAddToGlobalCache = false;
     ConversionCost cost;
     TypeCheckingCache* typeCheckingCache = getLinkage()->getTypeCheckingCache();
 
@@ -2034,8 +2316,25 @@ bool SemanticsVisitor::canCoerce(
             return cost != kConversionCost_Impossible;
         }
         else
-            shouldAddToCache = true;
+            shouldAddToGlobalCache = true;
     }
+
+    // If this type pair isn't covered by the global cache, use
+    // the cache that is local to the module.
+    if (getShared()->m_typeConversionCostCache.tryGetValue(TypePair{toType, fromType.type}, cost))
+    {
+        if (outCost)
+            *outCost = cost;
+        return cost != kConversionCost_Impossible;
+    }
+
+
+    // Store "impossible" to conversion cost cache to prevent infinite recursion in case
+    // checking for coercion between toType and fromType requires checking itself again via
+    // extensions/overloads.
+    getShared()->m_typeConversionCostCache.add(
+        TypePair{toType, fromType.type},
+        kConversionCost_Impossible);
 
     // If there was no suitable entry in the cache,
     // then we fall back to the general-purpose
@@ -2046,16 +2345,29 @@ bool SemanticsVisitor::canCoerce(
     // which suppresses emission of any diagnostics
     // during the coercion process.
     //
-    bool rs = _coerce(CoercionSite::General, toType, nullptr, fromType, fromExpr, getSink(), &cost);
+    bool rs = _coerce(
+        CoercionSite::General,
+        toType,
+        nullptr,
+        fromType,
+        fromExpr,
+        getSink(),
+        &cost,
+        nullptr);
 
     if (outCost)
         *outCost = cost;
 
-    if (shouldAddToCache)
+    if (!rs)
+        cost = kConversionCost_Impossible;
+    if (shouldAddToGlobalCache)
     {
-        if (!rs)
-            cost = kConversionCost_Impossible;
         typeCheckingCache->conversionCostCache[cacheKey] = cost;
+        getShared()->m_typeConversionCostCache.remove(TypePair{toType, fromType.type});
+    }
+    else
+    {
+        getShared()->m_typeConversionCostCache[TypePair{toType, fromType.type}] = cost;
     }
 
     return rs;
@@ -2110,12 +2422,19 @@ Expr* SemanticsVisitor::coerce(
     DiagnosticSink* sink)
 {
     Expr* expr = nullptr;
-    if (!_coerce(site, toType, &expr, fromExpr->type, fromExpr, sink, nullptr))
+    if (!_coerce(site, toType, &expr, fromExpr->type, fromExpr, sink, nullptr, nullptr))
     {
         // Note(tfoley): We don't call `CreateErrorExpr` here, because that would
         // clobber the type on `fromExpr`, and an invariant here is that coercion
         // really shouldn't *change* the expression that is passed in, but should
         // introduce new AST nodes to coerce its value to a different type...
+        //
+        // TODO(tfoley): Based on the comment above it seems like my past self
+        // wrote this code, but looking at it now, I'm unsure why we want to return
+        // an expression with an error type when we have the `toType` that is
+        // expected *right there*. It would be good to investigate whether changing
+        // this to return an expression of the expected type would Just Work.
+        //
         return CreateImplicitCastExpr(m_astBuilder->getErrorType(), fromExpr);
     }
 

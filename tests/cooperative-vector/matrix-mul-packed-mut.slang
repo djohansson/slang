@@ -1,6 +1,6 @@
-//DISABLE_TEST(compute):COMPARE_COMPUTE(filecheck-buffer=CHECK):-vk -render-feature cooperative-vector -output-using-type
+//TEST(compute):COMPARE_COMPUTE(filecheck-buffer=CHECK):-vk -render-feature cooperative-vector -output-using-type
 //TEST(compute):COMPARE_COMPUTE(filecheck-buffer=CHECK):-cpu -output-using-type
-//Test(compute):COMPARE_COMPUTE(filecheck-buffer=CHECK):-dx12 -render-feature cooperative-vector -dx12-experimental -use-dxil -output-using-type -profile cs_6_9 -Xslang... -Xdxc -Vd -X.
+//Test(compute):COMPARE_COMPUTE(filecheck-buffer=CHECK):-dx12 -render-feature cooperative-vector -dx12-experimental -output-using-type -profile cs_6_9 -Xslang... -Xdxc -Vd -X.
 
 // CHECK: type: int32_t
 // CHECK-NEXT: 31
@@ -21,7 +21,11 @@ ByteAddressBuffer matrix;
 [numthreads(1, 1, 1)]
 void computeMain()
 {
-    let vec = coopVecLoad<1, int32_t>(input);
+    // Expected to fail with Vulkan 1.4.313.0 or below due to a bug in the VVL
+    // The VVL incorrectly reports that the result type in the following command is `VK_COMPONENT_TYPE_UINT32_KHR`.
+    // Tracking the issue in github #7715.
+
+    let vec = coopVecLoad<1, uint32_t>(input);
     var result = CoopVec<int32_t, 4>(1);
     result.matMulAccumPacked(
         vec,
@@ -36,5 +40,5 @@ void computeMain()
     );
 
     for(int i = 0; i < result.getCount(); ++i)
-        outputBuffer[i] = result[i];;
+        outputBuffer[i] = result[i];
 }

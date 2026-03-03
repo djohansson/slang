@@ -99,16 +99,18 @@ if(NOT SLANG_USE_SYSTEM_LZ4)
 endif()
 
 # Vulkan headers
-if(NOT SLANG_USE_SYSTEM_VULKAN_HEADERS)
-    if(NOT SLANG_OVERRIDE_VULKAN_HEADERS_PATH)
-        add_subdirectory(vulkan EXCLUDE_FROM_ALL ${system})
-    else()
-        add_subdirectory(
-            ${SLANG_OVERRIDE_VULKAN_HEADERS_PATH}/vulkan
-            vulkan
-            EXCLUDE_FROM_ALL
-            ${system}
-        )
+if(NOT TARGET Vulkan::Headers)
+    if(NOT SLANG_USE_SYSTEM_VULKAN_HEADERS)
+        if(NOT SLANG_OVERRIDE_VULKAN_HEADERS_PATH)
+            add_subdirectory(vulkan EXCLUDE_FROM_ALL ${system})
+        else()
+            add_subdirectory(
+                ${SLANG_OVERRIDE_VULKAN_HEADERS_PATH}/vulkan
+                vulkan
+                EXCLUDE_FROM_ALL
+                ${system}
+            )
+        endif()
     endif()
 endif()
 
@@ -120,50 +122,129 @@ target_include_directories(
 )
 
 # SPIRV-Headers
-if(NOT SLANG_USE_SYSTEM_SPIRV_HEADERS)
-    if(NOT SLANG_OVERRIDE_SPIRV_HEADERS_PATH)
-        add_subdirectory(spirv-headers EXCLUDE_FROM_ALL ${system})
-    else()
+# Avoid using ${system} intentionally in `add_subdirectory`, because if we do, it will end up using
+# spirv.h installed in the system directory on MacOS.
+if(NOT TARGET SPIRV-Headers)
+    if(SLANG_USE_SYSTEM_SPIRV_HEADERS)
+        if(SLANG_OVERRIDE_SPIRV_HEADERS_PATH)
+            message(
+                WARNING
+                "SLANG_OVERRIDE_SPIRV_HEADERS_PATH does nothing when SLANG_USE_SPIRV_HEADERS is set"
+            )
+        endif()
+    elseif(SLANG_OVERRIDE_SPIRV_HEADERS_PATH)
         add_subdirectory(
             ${SLANG_OVERRIDE_SPIRV_HEADERS_PATH}/spirv-headers
             spirv-headers
             EXCLUDE_FROM_ALL
-            ${system}
         )
+    else()
+        add_subdirectory(spirv-headers EXCLUDE_FROM_ALL)
     endif()
 endif()
 
 if(SLANG_ENABLE_SLANG_GLSLANG)
-    # SPIRV-Tools
-    if(NOT SLANG_USE_SYSTEM_SPIRV_TOOLS)
+    # When using spirv headers via find_package, SPIRV-Headers_SOURCE_DIR is not set
+    # SPIRV-Tools requires that variable, as it uses it to detect if SPIRV-Headers is provided by the consumer.
+    # Fake a source build by setting it here. Ideally SPIRV-Tools should not depend on _SOURCE_DIR
+    if(${SLANG_USE_SYSTEM_SPIRV_HEADERS})
+        get_target_property(
+            SPIRV-Headers_SOURCE_DIR
+            SPIRV-Headers::SPIRV-Headers
+            INTERFACE_INCLUDE_DIRECTORIES
+        )
+        cmake_path(
+            GET
+            SPIRV-Headers_SOURCE_DIR
+            PARENT_PATH SPIRV-Headers_SOURCE_DIR
+        )
+    endif()
+
+    if(NOT ${SLANG_USE_SYSTEM_SPIRV_TOOLS})
+        # SPIRV-Tools
         set(SPIRV_TOOLS_BUILD_STATIC ON)
         set(SPIRV_WERROR OFF)
         set(SPIRV_SKIP_TESTS ON)
+
+        # Enable mimalloc for SPIRV-Tools to improve compilation performance
+        # Based on SPIRV-Tools PR #6267: https://github.com/KhronosGroup/SPIRV-Tools/pull/6267
+        if(SLANG_ENABLE_SPIRV_TOOLS_MIMALLOC)
+            if(NOT SLANG_OVERRIDE_MIMALLOC_PATH)
+                # Place mimalloc in slang/external instead of spirv-tools/external for better organization
+                set(MIMALLOC_PATH "${CMAKE_CURRENT_SOURCE_DIR}/mimalloc")
+            else()
+                set(MIMALLOC_PATH "${SLANG_OVERRIDE_MIMALLOC_PATH}/mimalloc")
+            endif()
+
+            # Download mimalloc if it's not available
+            if(NOT EXISTS "${MIMALLOC_PATH}/CMakeLists.txt")
+                message(
+                    STATUS
+                    "mimalloc not found at ${MIMALLOC_PATH} - downloading..."
+                )
+                execute_process(
+                    COMMAND
+                        ${GIT_EXECUTABLE} clone --depth 1 --branch v2.1.7
+                        https://github.com/microsoft/mimalloc.git
+                        "${MIMALLOC_PATH}"
+                    RESULT_VARIABLE git_result
+                    OUTPUT_QUIET
+                    ERROR_QUIET
+                )
+                if(git_result EQUAL 0)
+                    # Point SPIRV-Tools to our mimalloc location
+                    set(mimalloc_SOURCE_DIR "${MIMALLOC_PATH}")
+                    set(SPIRV_TOOLS_USE_MIMALLOC ON)
+                    set(SPIRV_TOOLS_USE_MIMALLOC_IN_STATIC_BUILD ON)
+                    # set(MI_INSTALL_TOPLEVEL OFF)
+                    message(
+                        STATUS
+                        "Successfully downloaded and enabled mimalloc for SPIRV-Tools at ${MIMALLOC_PATH}"
+                    )
+                else()
+                    message(
+                        WARNING
+                        "Failed to download mimalloc. Building SPIRV-Tools without mimalloc support."
+                    )
+                endif()
+            endif()
+
+            # Check if mimalloc is available now
+            if(EXISTS "${MIMALLOC_PATH}/CMakeLists.txt")
+                # Point SPIRV-Tools to our mimalloc location
+                set(mimalloc_SOURCE_DIR "${MIMALLOC_PATH}")
+                set(SPIRV_TOOLS_USE_MIMALLOC ON)
+                # Also enable mimalloc in static builds for better performance
+                set(SPIRV_TOOLS_USE_MIMALLOC_IN_STATIC_BUILD ON)
+                # Disable mimalloc installation to avoid install target conflicts
+                # set(MI_INSTALL_TOPLEVEL OFF)
+                message(
+                    STATUS
+                    "Enabling mimalloc for SPIRV-Tools (including static builds) from ${MIMALLOC_PATH}"
+                )
+            endif()
+        endif()
+
         # Tools
         if(NOT SLANG_OVERRIDE_SPIRV_TOOLS_PATH)
-            add_subdirectory(spirv-tools EXCLUDE_FROM_ALL ${system})
+            add_subdirectory(spirv-tools EXCLUDE_FROM_ALL)
         else()
             add_subdirectory(
                 ${SLANG_OVERRIDE_SPIRV_TOOLS_PATH}/spirv-tools
                 spirv-tools
                 EXCLUDE_FROM_ALL
-                ${system}
             )
         endif()
     endif()
 
-    # glslang
-    if (NOT SLANG_USE_SYSTEM_GLSLANG)
+    if(NOT ${SLANG_USE_SYSTEM_GLSLANG})
+        # glslang
         set(SKIP_GLSLANG_INSTALL ON)
         set(ENABLE_OPT ON)
         set(ENABLE_PCH OFF)
+        set(ALLOW_EXTERNAL_SPIRV_TOOLS ${SLANG_USE_SYSTEM_SPIRV_TOOLS})
         if(NOT SLANG_OVERRIDE_GLSLANG_PATH)
             add_subdirectory(glslang EXCLUDE_FROM_ALL ${system})
-            target_include_directories(
-                glslang
-                ${system}
-                INTERFACE "${CMAKE_CURRENT_LIST_DIR}"
-            )
         else()
             add_subdirectory(
                 ${SLANG_OVERRIDE_GLSLANG_PATH}/glslang
@@ -175,32 +256,37 @@ if(SLANG_ENABLE_SLANG_GLSLANG)
     endif()
 endif()
 
-# imgui
-if (NOT SLANG_USE_SYSTEM_IMGUI)
-    add_library(imgui INTERFACE)
-    if(NOT SLANG_OVERRIDE_IMGUI_PATH)
-        target_include_directories(
-            imgui
-            ${system}
-            INTERFACE "${CMAKE_CURRENT_LIST_DIR}/imgui"
-        )
-    else()
-        target_include_directories(
-            imgui
-            ${system}
-            INTERFACE "${SLANG_OVERRIDE_IMGUI_PATH}/imgui"
-        )
+if(
+    SLANG_ENABLE_GFX
+    OR (SLANG_ENABLE_SLANG_RHI AND (SLANG_ENABLE_TESTS OR SLANG_ENABLE_EXAMPLES))
+)
+    # imgui
+    if (NOT SLANG_USE_SYSTEM_IMGUI)
+        add_library(imgui INTERFACE)
+        if(NOT SLANG_OVERRIDE_IMGUI_PATH)
+            target_include_directories(
+                imgui
+                ${system}
+                INTERFACE "${CMAKE_CURRENT_LIST_DIR}/imgui"
+            )
+        else()
+            target_include_directories(
+                imgui
+                ${system}
+                INTERFACE "${SLANG_OVERRIDE_IMGUI_PATH}/imgui"
+            )
+        endif()
     endif()
-endif()
 
-# stb
-if (NOT SLANG_USE_SYSTEM_STB)
-    add_library(stb INTERFACE)
-    target_include_directories(
-        stb
-        ${system}
-        INTERFACE "${CMAKE_CURRENT_LIST_DIR}/stb"
-    )
+    # stb
+    if (NOT SLANG_USE_SYSTEM_STB)
+            add_library(stb INTERFACE)
+            target_include_directories(
+                stb
+                ${system}
+                INTERFACE "${CMAKE_CURRENT_LIST_DIR}/stb"
+            )
+    endif()
 endif()
 
 # slang-rhi

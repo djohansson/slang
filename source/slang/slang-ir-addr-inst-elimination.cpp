@@ -2,6 +2,7 @@
 
 #include "slang-ir-insts.h"
 #include "slang-ir-util.h"
+#include "slang-rich-diagnostics.h"
 
 namespace Slang
 {
@@ -98,7 +99,7 @@ struct AddressInstEliminationContext
         auto call = as<IRCall>(use->getUser());
 
         // Don't change the use if addr is a non mutable address.
-        if (as<IRConstRefType>(getRootAddr(addr)->getDataType()))
+        if (as<IRBorrowInParamType>(getRootAddr(addr)->getDataType()))
         {
             return;
         }
@@ -126,16 +127,19 @@ struct AddressInstEliminationContext
         {
             for (auto inst : block->getChildren())
             {
-                if (as<IRConstRefType>(getRootAddr(inst)->getDataType()))
+                if (as<IRBorrowInParamType>(getRootAddr(inst)->getDataType()))
                     continue;
                 if (auto ptrType = as<IRPtrTypeBase>(inst->getDataType()))
                 {
                     auto valType = unwrapAttributedType(ptrType->getValueType());
-                    if (!getResolvedInstForDecorations(valType)
-                             ->findDecoration<IRNonCopyableTypeDecoration>())
-                    {
-                        workList.add(inst);
-                    }
+                    if (getResolvedInstForDecorations(valType)
+                            ->findDecoration<IRNonCopyableTypeDecoration>())
+                        continue;
+
+                    if (ptrType->getAddressSpace() == AddressSpace::UserPointer)
+                        continue;
+
+                    workList.add(inst);
                 }
             }
         }
@@ -177,9 +181,9 @@ struct AddressInstEliminationContext
                 case kIROp_GetOffsetPtr:
                     break;
                 default:
-                    sink->diagnose(
-                        use->getUser()->sourceLoc,
-                        Diagnostics::unsupportedUseOfLValueForAutoDiff);
+                    sink->diagnose(Diagnostics::UnsupportedUseOfLValueForAutoDiff{
+                        .location = use->getUser()->sourceLoc,
+                    });
                     break;
                 }
                 use = nextUse;

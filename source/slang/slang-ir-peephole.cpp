@@ -5,6 +5,7 @@
 #include "slang-ir-layout.h"
 #include "slang-ir-sccp.h"
 #include "slang-ir-util.h"
+#include "slang-target-program.h"
 
 namespace Slang
 {
@@ -256,7 +257,7 @@ struct PeepholeContext : InstPassBase
     {
         if (as<IRGlobalValueWithCode>(inst))
         {
-            if (auto fpModeDecor = inst->findDecoration<IRFloatingModeOverrideDecoration>())
+            if (auto fpModeDecor = inst->findDecoration<IRFloatingPointModeOverrideDecoration>())
                 floatingPointMode = fpModeDecor->getFloatingPointMode();
         }
 
@@ -276,8 +277,50 @@ struct PeepholeContext : InstPassBase
                 else
                     baseType = inst->getOperand(0)->getDataType();
 
+                // Special handling for DescriptorHandleType - its size/alignment is
+                // target-dependent
+                if (as<IRDescriptorHandleType>(baseType))
+                {
+                    bool useUint64 = targetProgram->getTargetReq()->getTargetCaps().implies(
+                        CapabilityAtom::spvBindlessTextureNV);
+
+                    IRBuilder builder(module);
+                    IRBuilderSourceLocRAII srcLocRAII(&builder, inst->sourceLoc);
+                    builder.setInsertBefore(inst);
+
+                    // Get the underlying type based on capability:
+                    // - With spvBindlessTextureNV: uint64_t
+                    // - Without: uint2
+                    IRType* underlyingType;
+                    if (useUint64)
+                    {
+                        underlyingType = builder.getUInt64Type();
+                    }
+                    else
+                    {
+                        auto uintType = builder.getUIntType();
+                        underlyingType = builder.getVectorType(uintType, 2);
+                    }
+
+                    IRSizeAndAlignment sizeAlign;
+                    if (SLANG_FAILED(getNaturalSizeAndAlignment(
+                            targetProgram->getTargetReq(),
+                            underlyingType,
+                            &sizeAlign)))
+                        break;
+
+                    IRIntegerValue value =
+                        (inst->getOp() == kIROp_AlignOf) ? sizeAlign.alignment : sizeAlign.size;
+
+                    auto resultVal = builder.getIntValue(inst->getDataType(), value);
+                    inst->replaceUsesWith(resultVal);
+                    maybeRemoveOldInst(inst);
+                    changed = true;
+                    break;
+                }
+
                 if (SLANG_FAILED(getNaturalSizeAndAlignment(
-                        targetProgram->getOptionSet(),
+                        targetProgram->getTargetReq(),
                         baseType,
                         &sizeAlignment)))
                     break;
@@ -863,7 +906,7 @@ struct PeepholeContext : InstPassBase
                 }
             }
             break;
-        case kIROp_LookupWitness:
+        case kIROp_LookupWitnessMethod:
             {
                 if (inst->getOperand(0)->getOp() == kIROp_WitnessTable)
                 {
@@ -920,6 +963,73 @@ struct PeepholeContext : InstPassBase
                     inst->replaceUsesWith(newCast);
                     maybeRemoveOldInst(inst);
                     changed = true;
+                }
+                else
+                {
+                    // Handle common BuiltinCast cases that need to be lowered before emit.
+                    // In particular, legalization for tessellation-factor builtins may require
+                    // reshaping between vector and array representations (e.g. float4 <->
+                    // float[4]).
+                    auto val = inst->getOperand(0);
+                    auto fromType = val->getDataType();
+                    auto toType = inst->getFullType();
+
+                    // vector -> array
+                    if (auto fromVec = as<IRVectorType>(fromType))
+                    {
+                        if (auto toArr = as<IRArrayTypeBase>(toType))
+                        {
+                            if (isTypeEqual(fromVec->getElementType(), toArr->getElementType()))
+                            {
+                                auto fromCountLit = as<IRIntLit>(fromVec->getElementCount());
+                                auto toCountLit = as<IRIntLit>(toArr->getElementCount());
+                                if (fromCountLit && toCountLit &&
+                                    fromCountLit->getValue() == toCountLit->getValue())
+                                {
+                                    List<IRInst*> elems;
+                                    auto count = (UInt)fromCountLit->getValue();
+                                    elems.setCount((Index)count);
+                                    for (UInt i = 0; i < count; ++i)
+                                    {
+                                        elems[(Index)i] = builder.emitElementExtract(val, i);
+                                    }
+                                    auto newInst =
+                                        builder.emitMakeArray(toType, count, elems.getBuffer());
+                                    inst->replaceUsesWith(newInst);
+                                    maybeRemoveOldInst(inst);
+                                    changed = true;
+                                }
+                            }
+                        }
+                    }
+                    // array -> vector
+                    else if (auto fromArr = as<IRArrayTypeBase>(fromType))
+                    {
+                        if (auto toVec = as<IRVectorType>(toType))
+                        {
+                            if (isTypeEqual(fromArr->getElementType(), toVec->getElementType()))
+                            {
+                                auto fromCountLit = as<IRIntLit>(fromArr->getElementCount());
+                                auto toCountLit = as<IRIntLit>(toVec->getElementCount());
+                                if (fromCountLit && toCountLit &&
+                                    fromCountLit->getValue() == toCountLit->getValue())
+                                {
+                                    List<IRInst*> elems;
+                                    auto count = (UInt)fromCountLit->getValue();
+                                    elems.setCount((Index)count);
+                                    for (UInt i = 0; i < count; ++i)
+                                    {
+                                        elems[(Index)i] = builder.emitElementExtract(val, i);
+                                    }
+                                    auto newInst =
+                                        builder.emitMakeVector(toType, count, elems.getBuffer());
+                                    inst->replaceUsesWith(newInst);
+                                    maybeRemoveOldInst(inst);
+                                    changed = true;
+                                }
+                            }
+                        }
+                    }
                 }
             }
             break;
@@ -1041,7 +1151,7 @@ struct PeepholeContext : InstPassBase
                         continue;
                     SLANG_ASSERT(terminator->getArgCount() > paramIndex);
                     auto arg = terminator->getArg(paramIndex);
-                    if (arg->getOp() == kIROp_undefined)
+                    if (as<IRUndefined>(arg))
                         continue;
                     if (argValue == nullptr)
                         argValue = arg;
@@ -1090,7 +1200,7 @@ struct PeepholeContext : InstPassBase
                 }
             }
             break;
-        case kIROp_swizzle:
+        case kIROp_Swizzle:
             {
                 // If we see a swizzle(scalar), we replace it with makeVectorFromScalar.
                 if (as<IRBasicType>(inst->getOperand(0)->getDataType()))
@@ -1199,7 +1309,7 @@ struct PeepholeContext : InstPassBase
                     auto type = inst->getOperand(0)->getDataType();
                     IRSizeAndAlignment sizeAlignment;
                     const auto res = getNaturalSizeAndAlignment(
-                        targetProgram->getOptionSet(),
+                        targetProgram->getTargetReq(),
                         type,
                         &sizeAlignment);
                     if (!SLANG_SUCCEEDED(res))
@@ -1251,10 +1361,10 @@ struct PeepholeContext : InstPassBase
                         result = type->getOp() == kIROp_HalfType;
                         break;
                     case kIROp_IsUnsignedInt:
-                        result = isIntegralType(type) && !getIntTypeInfo(type).isSigned;
+                        result = isIntegralType(type) && !getIntTypeSigned(type);
                         break;
                     case kIROp_IsSignedInt:
-                        result = isIntegralType(type) && getIntTypeInfo(type).isSigned;
+                        result = isIntegralType(type) && getIntTypeSigned(type);
                         break;
                     case kIROp_IsVector:
                         result = as<IRVectorType>(type);
@@ -1266,16 +1376,55 @@ struct PeepholeContext : InstPassBase
                 }
                 break;
             }
+        case kIROp_IsCoopFloat:
+            {
+                auto type = inst->getOperand(0)->getDataType();
+                if (auto vectorType = as<IRVectorType>(type))
+                    type = vectorType->getElementType();
+                if (auto matType = as<IRMatrixType>(type))
+                    type = matType->getElementType();
+                if (isConcreteType(type))
+                {
+                    bool result = false;
+                    if (isFloatingType(type))
+                    {
+                        result = true;
+                    }
+                    else
+                    {
+                        switch (type->getOp())
+                        {
+                        case kIROp_FloatE5M2Type:
+                        case kIROp_FloatE4M3Type:
+                        case kIROp_BFloat16Type:
+                            result = true;
+                            break;
+                        }
+                    }
+                    IRBuilder builder(module);
+                    IRBuilderSourceLocRAII srcLocRAII(&builder, inst->sourceLoc);
+                    builder.setInsertBefore(inst);
+
+                    inst->replaceUsesWith(builder.getBoolValue(result));
+                    maybeRemoveOldInst(inst);
+                    changed = true;
+                }
+                break;
+            }
         case kIROp_Load:
             {
-                // Load from undef is undef.
-                if (as<IRLoad>(inst)->getPtr()->getOp() == kIROp_undefined)
+                // An attempt to load from an undefined pointer value
+                // is undefined behavior and the resulting value is poison
+                // (the value should typically contaminate instructions that
+                // use it, rendering them as poisonous).
+                //
+                if (as<IRUndefined>(as<IRLoad>(inst)->getPtr()))
                 {
                     IRBuilder builder(module);
                     IRBuilderSourceLocRAII srcLocRAII(&builder, inst->sourceLoc);
 
                     builder.setInsertBefore(inst);
-                    auto undef = builder.emitUndefined(inst->getDataType());
+                    auto undef = builder.emitPoison(inst->getDataType());
                     inst->replaceUsesWith(undef);
                     maybeRemoveOldInst(inst);
                     changed = true;
@@ -1284,8 +1433,17 @@ struct PeepholeContext : InstPassBase
             }
         case kIROp_Store:
             {
-                // Store undef is no-op.
-                if (as<IRStore>(inst)->getVal()->getOp() == kIROp_undefined)
+                // An attempt to store to an undefined pointer value is
+                // undefined behavior (just like a load), so we can conveniently
+                // decide to implement that behavior as a no-op.
+                //
+                // TODO: While it is not the responsibility of a pass like this
+                // to diagnose errors (that is the front-end's job), it might
+                // be best to replace an invalid `store` like this with an
+                // instruction that represents a "panic" or similar exceptional
+                // situation.
+                //
+                if (as<IRUndefined>(as<IRStore>(inst)->getVal()))
                 {
                     maybeRemoveOldInst(inst);
                     changed = true;
@@ -1294,8 +1452,16 @@ struct PeepholeContext : InstPassBase
             }
         case kIROp_DebugValue:
             {
-                // Update debug value with undef is no-op.
-                if (as<IRDebugValue>(inst)->getValue()->getOp() == kIROp_undefined)
+                // Attempting to update the debug value of a variable with an
+                // undefined value will be treated as a no-op (meaning that the
+                // contents of the variable, as perceived by the user, will not
+                // change).
+                //
+                // TODO: We should probably validate that this is a reasonable
+                // behavior. In many cases a debugger user might like to have an
+                // indication of when the contents of their variable are undefined.
+                //
+                if (as<IRUndefined>(as<IRDebugValue>(inst)->getValue()))
                 {
                     maybeRemoveOldInst(inst);
                     changed = true;
@@ -1309,7 +1475,11 @@ struct PeepholeContext : InstPassBase
 
     bool isConcreteType(IRType* type)
     {
-        return type->parent->getOp() == kIROp_Module && !as<IRGlobalGenericParam>(type);
+        // The associatedtype is represented as a LookupWitnessMethod, so we will need to check the
+        // type after the lookupWitnessMethod is fully specialized. This is to make something like
+        // this to work: `if (IFoo.AssociatedType is int)`
+        return type->parent->getOp() == kIROp_ModuleInst && !as<IRGlobalGenericParam>(type) &&
+               !as<IRLookupWitnessMethod>(type);
     }
 
     bool processFunc(IRInst* func)
@@ -1390,7 +1560,7 @@ bool peepholeOptimizeGlobalScope(TargetProgram* target, IRModule* module)
 
 bool tryReplaceInstUsesWithSimplifiedValue(TargetProgram* target, IRModule* module, IRInst* inst)
 {
-    if (inst != tryConstantFoldInst(module, inst))
+    if (inst != tryConstantFoldInst(module, target, inst))
         return true;
 
     PeepholeContext context = PeepholeContext(inst->getModule());

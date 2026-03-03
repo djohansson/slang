@@ -1,4 +1,5 @@
 //TEST:SIMPLE(filecheck=CHECK): -target hlsl -line-directive-mode none
+//TEST:SIMPLE(filecheck=CHECK): -target cuda -line-directive-mode none
 
 //TEST_INPUT:ubuffer(data=[0 0 0 0], stride=4):out,name=outputBuffer
 RWStructuredBuffer<float> outputBuffer;
@@ -12,9 +13,8 @@ float get_thread_5_value(float v, uint group_thread_id)
     if(group_thread_id == 5)
     {
         s_shared = detach(v);
-        // CHECK: tests/autodiff/warn-on-prefer-recompute-side-effects.slang(10): warning 42050: get_thread_5_value has [PreferRecompute] and may have side effects. side effects may execute multiple times. use [PreferRecompute(SideEffectBehavior.Allow)], or mark function with [__NoSideEffect]
-        // CHECK: float get_thread_5_value(float v, uint group_thread_id)
-        // CHECK:       ^~~~~~~~~~~~~~~~~~
+        // CHECK: warning[E42050]: [PreferRecompute] on function with side effects
+        // CHECK: get_thread_5_value has [PreferRecompute] and may have side effects. side effects may execute multiple times. use [PreferRecompute(SideEffectBehavior.Allow)], or mark function with [__NoSideEffect]
     }
     GroupMemoryBarrierWithGroupSync();
     return s_shared;

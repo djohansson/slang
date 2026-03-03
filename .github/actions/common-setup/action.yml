@@ -13,6 +13,9 @@ inputs:
     required: true
   build-llvm:
     required: true
+  use-cached-llvm:
+    default: true
+    required: false
 runs:
   using: composite
   steps:
@@ -25,8 +28,19 @@ runs:
 
     - name: Set up MSVC dev tools on Windows
       uses: ilammy/msvc-dev-cmd@v1
+
+    - name: Install dependencies (Linux only)
+      if: inputs.os == 'linux'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libx11-dev
+
+    - name: Setup Node.js (Linux only)
+      if: inputs.os == 'linux'
+      uses: actions/setup-node@v4
       with:
-        sdk: "10.0.19041.0"
+        node-version: "20.x"
 
     - shell: bash
       run: |
@@ -79,26 +93,17 @@ runs:
         echo "bin_dir=$bin_dir" >> "$GITHUB_ENV"
         echo "lib_dir=$lib_dir" >> "$GITHUB_ENV"
 
-    # Try to restore an LLVM install, and build it otherwise
-    - uses: actions/cache/restore@v4
-      id: cache-llvm
-      if: inputs.build-llvm == 'true'
+    # Setup LLVM from GCS (or build if missing)
+    - name: Setup LLVM from GCS
+      if: inputs.build-llvm == 'true' && inputs.use-cached-llvm == 'true'
+      uses: ./.github/actions/setup-llvm-from-gcs
       with:
-        path: ${{ github.workspace }}/build/llvm-project-install
-        # Use os*compiler*platform in lieu of an ABI key here, which is what we really want
-        key: llvm-${{ inputs.os }}-${{ inputs.compiler }}-${{ inputs.platform }}-${{ hashFiles('external/build-llvm.sh') }}
-    - name: Build LLVM
-      if: inputs.build-llvm == 'true' && steps.cache-llvm.outputs.cache-hit != 'true'
-      shell: bash
-      run: |
-        ./external/build-llvm.sh \
-          --install-prefix "${{github.workspace}}/build/llvm-project-install" \
-          --repo "https://${{github.token}}@github.com/llvm/llvm-project"
-    - uses: actions/cache/save@v4
-      if: inputs.build-llvm == 'true' && steps.cache-llvm.outputs.cache-hit != 'true'
-      with:
-        path: ${{ github.workspace }}/build/llvm-project-install
-        key: ${{ steps.cache-llvm.outputs.cache-primary-key }}
+        os: ${{ inputs.os }}
+        compiler: ${{ inputs.compiler }}
+        platform: ${{ inputs.platform }}
+        llvm-hash: ${{ hashFiles('external/build-llvm.sh') }}
+        build-if-missing: "true"
+        github-token: ${{ github.token }}
 
     - name: Set environment variable for CMake
       shell: bash
@@ -107,24 +112,6 @@ runs:
           echo "LLVM_DIR=${{ github.workspace }}/build/llvm-project-install" >> "$GITHUB_ENV"
           echo "Clang_DIR=${{ github.workspace }}/build/llvm-project-install" >> "$GITHUB_ENV"
         fi
-
-    # Install swiftshader
-    - uses: robinraju/release-downloader@v1.11
-      continue-on-error: true
-      with:
-        latest: true
-        repository: "shader-slang/swiftshader"
-        out-file-path: "swiftshader"
-        extract: true
-        fileName: "vk_swiftshader_${{inputs.os}}_${{inputs.platform}}.zip"
-
-    - name: Install SwiftShader
-      shell: bash
-      run: |
-        case "${{inputs.os}}" in
-          windows*) echo "${{github.workspace}}/swiftshader/" >> "$GITHUB_PATH";;
-          *) echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH:+${LD_LIBRARY_PATH}:}${{github.workspace}}/swiftshader" >> "$GITHUB_ENV";;
-        esac
 
     # Put spirv-tools in path
     - shell: bash
@@ -135,3 +122,6 @@ runs:
           windows*) echo "${{github.workspace}}/external/slang-binaries/spirv-tools/windows-$win_platform/bin" >> "$GITHUB_PATH";;
           linux*) echo "${{github.workspace}}/external/slang-binaries/spirv-tools/$(uname -m)-linux/bin" >> "$GITHUB_PATH";;
         esac
+
+      # Note: ccache for Windows self-hosted has been replaced by sccache
+      # sccache is set up in ci-slang-build.yml for all platforms

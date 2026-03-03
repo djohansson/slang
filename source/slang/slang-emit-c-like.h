@@ -228,6 +228,46 @@ public:
     /// Get the diagnostic sink
     DiagnosticSink* getSink() { return m_codeGenContext->getSink(); }
 
+    /// Diagnose a diagnostic only once per diagnostic ID and all parameters
+    template<typename... Args>
+    void diagnoseOnce(SourceLoc loc, DiagnosticInfo const& diagnostic, Args&&... args)
+    {
+        // For diagnostics with parameters, we'll use all parameters to create a unique key
+        // This prevents duplicate diagnostics while allowing different parameter combinations
+        if constexpr (sizeof...(args) > 0)
+        {
+            String key = String(diagnostic.id);
+            ((key = key + "|" + String(args)), ...); // Fold expression to append all args
+            if (!m_reportedDiagnosticKeys.add(key))
+                return;
+        }
+        else
+        {
+            // For diagnostics without parameters, just use the ID
+            if (!m_reportedDiagnosticIds.add(diagnostic.id))
+                return;
+        }
+
+        // Report the diagnostic
+        getSink()->diagnose(loc, diagnostic, std::forward<Args>(args)...);
+    }
+
+    /// Diagnose a rich diagnostic only once per unique key (diagnostic ID + serialized content).
+    template<typename D>
+    void diagnoseOnce(D const& diagnostic)
+    {
+        auto genericDiag = diagnostic.toGenericDiagnostic();
+        StringBuilder keyBuilder;
+        keyBuilder << D::getInfo()->id;
+        keyBuilder << "|" << genericDiag.primarySpan.range.begin.getRaw();
+        // Use the span message for uniqueness since it contains interpolated values
+        keyBuilder << "|" << genericDiag.primarySpan.message;
+        String key = keyBuilder.produceString();
+        if (!m_reportedDiagnosticKeys.add(key))
+            return; // Already reported
+        getSink()->diagnose(diagnostic);
+    }
+
     /// Get the code gen target
     CodeGenTarget getTarget() { return m_target; }
     /// Get the source style
@@ -516,6 +556,7 @@ public:
     static IRWaveSizeDecoration* getComputeWaveSize(IRFunc* func, Int* outWaveSize);
 
 protected:
+    virtual bool shouldEmitOnlyHeader() { return false; }
     virtual void emitGlobalParamDefaultVal(IRGlobalParam* inst) { SLANG_UNUSED(inst); }
     virtual void emitPostDeclarationAttributesForType(IRInst* type) { SLANG_UNUSED(type); }
     virtual String getTargetBuiltinVarName(IRInst* inst, IRTargetBuiltinVarName builtinName);
@@ -614,6 +655,11 @@ protected:
     virtual void emitIfDecorationsImpl(IRIfElse* ifInst) { SLANG_UNUSED(ifInst); }
     virtual void emitSwitchDecorationsImpl(IRSwitch* switchInst) { SLANG_UNUSED(switchInst); }
     virtual void emitSwitchCaseSelectorsImpl(const SwitchRegion::Case* currentCase, bool isDefault);
+
+    /// Returns true if this target supports fall-through in switch statements.
+    /// Targets like HLSL (FXC) and WGSL don't support fall-through.
+    /// This is used by the restructure pass to decide whether to preserve fall-through.
+    virtual bool supportsSwitchFallThrough() { return true; }
 
     virtual void emitFuncDecorationImpl(IRDecoration* decoration) { SLANG_UNUSED(decoration); }
     virtual void emitLivenessImpl(IRInst* inst);
@@ -742,11 +788,15 @@ protected:
     // Rename entry point if target doesn't allow the name (e.g., 'main')
     virtual String maybeMakeEntryPointNameValid(String name, DiagnosticSink* sink);
 
-    // Indicates if we are emiting for DXC cooperative vector POC.
-    bool isCoopvecPoc = false;
-
     // Indicates if we are emiting for Optix cooperative vector.
     bool isOptixCoopVec = false;
+
+    // Set of diagnostic IDs that have already been reported to prevent duplicates
+    HashSet<int> m_reportedDiagnosticIds;
+
+    // Set of diagnostic keys (ID + all parameters) that have already been reported to prevent
+    // duplicates
+    HashSet<String> m_reportedDiagnosticKeys;
 };
 
 } // namespace Slang

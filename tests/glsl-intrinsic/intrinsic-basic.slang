@@ -5,6 +5,7 @@
 
 //TEST(compute, vulkan):COMPARE_COMPUTE(filecheck-buffer=BUF):-vk -compute -entry computeMain -allow-glsl -output-using-type -emit-spirv-via-glsl
 //TEST(compute, vulkan):COMPARE_COMPUTE(filecheck-buffer=BUF):-vk -compute -entry computeMain -allow-glsl -output-using-type -emit-spirv-directly
+//TEST(compute):COMPARE_COMPUTE(filecheck-buffer=BUF):-llvm -compute -entry computeMain -allow-glsl -output-using-type -Xslang -DTARGET_LLVM
 
 //TEST_INPUT:ubuffer(data=[0 1 -1], stride=4):name=inputBuffer
 buffer MyBlockName1
@@ -56,7 +57,7 @@ bool Test_ScalarType()
     const mat3 identity3x3 = mat3(vec3(1,0,0),vec3(0,1,0),vec3(0,0,1));
     const mat4 identity4x4 = mat4(vec4(1,0,0,0),vec4(0,1,0,0),vec4(0,0,1,0),vec4(0,0,0,1));
 
-    // CHECK_SPIR-LABEL: OpAccessChain {{.*}} %inputBuffer
+    // CHECK_SPIR-LABEL: Op{{.*}}AccessChain {{.*}} %inputBuffer
     const int zero = inputBuffer.data[0];
     const int one = inputBuffer.data[1];
     const int negaOne = inputBuffer.data[2];
@@ -462,9 +463,11 @@ bool Test_ScalarType()
 
         // CHECK_GLSL-COUNT-3: inverse(
         // CHECK_SPIR-COUNT-3: MatrixInverse{{ }}
+#if !defined(TARGET_LLVM)
         && equals(identity2x2, inverse(identity2x2))
         && equals(identity3x3, inverse(identity3x3))
         && equals(identity4x4, inverse(identity4x4))
+#endif
 
         // 8.8. Integer Functions
 
@@ -539,7 +542,7 @@ bool Test_VectorType()
 
     constexpr const float epsilon = 0.000001;
 
-    // CHECK_SPIR-LABEL: OpAccessChain {{.*}} %inputBuffer
+    // CHECK_SPIR-LABEL: Op{{.*}}AccessChain {{.*}} %inputBuffer
     const int zero = inputBuffer.data[0];
     const int one = inputBuffer.data[1];
     const int negaOne = inputBuffer.data[2];
@@ -1106,7 +1109,7 @@ bool Test_VectorType()
         ;
 
     // CHECK_GLSL-LABEL: bool Test_VectorType_1
-    // CHECK_SPIR-LABEL: OpAccessChain {{.*}} %inputBuffer
+    // CHECK_SPIR-LABEL: Op{{.*}}AccessChain {{.*}} %inputBuffer
 }
 
 [numthreads(4, 1, 1)]

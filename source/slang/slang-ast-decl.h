@@ -3,8 +3,10 @@
 #pragma once
 
 #include "slang-ast-base.h"
-#include "slang-ast-decl.h.fiddle"
 #include "slang-fossil.h"
+
+//
+#include "slang-ast-decl.h.fiddle"
 
 FIDDLE()
 namespace Slang
@@ -246,29 +248,6 @@ class ContainerDecl : public Decl
     // examples of how to interact with the Slang AST.
     //
 
-    /// Invalidate the acceleration structures used for declaration lookup,
-    /// because the code is about to replace `unscopedEnumAttr` with `transparentModifier`
-    /// as part of semantic checking of an `EnumDecl` nested under this `ContainerDecl`.
-    ///
-    /// Cannot be expressed in terms of the rest of the public API because the
-    /// existing assumption has been that any needed `TransparentModifier`s would
-    /// be manifestly obvious just from the syntax being parsed, so that they would
-    /// already be in place on parsed ASTs. the `UnscopedEnumAttribute` is a `TransparentModifier`
-    /// in all but name, but the two don't share a common base class such that code
-    /// could check for them together.
-    ///
-    /// TODO: In the long run, the obvious fix is to eliminate `UnscopedEnumAttribute`,
-    /// becuase it only exists to enable legacy code to be expressed in Slang, rather than
-    /// representing anything we want/intend to support long-term.
-    ///
-    /// TODO: In the even *longer* run, we should eliminate `TransparentModifier` as well,
-    /// because it only exists to support legacy `cbuffer` declarations and similar syntax,
-    /// and those should be deprecated over time.
-    ///
-    void _invalidateLookupAcceleratorsBecauseUnscopedEnumAttributeWillBeTurnedIntoTransparentModifier(
-        UnscopedEnumAttribute* unscopedEnumAttr,
-        TransparentModifier* transparentModifier);
-
     /// Remove a constructor declaration from the direct member declarations of this container.
     ///
     /// This operation is seemingly used when a default constructor declaration has been synthesized
@@ -398,6 +377,7 @@ enum class TypeTag
     Incomplete = 2,
     LinkTimeSized = 4,
     Opaque = 8,
+    NonAddressable = 16,
 };
 
 // Declaration of a type that represents some sort of aggregate
@@ -407,8 +387,16 @@ class AggTypeDecl : public AggTypeDeclBase
     FIDDLE(...)
     FIDDLE() TypeTag typeTags = TypeTag::None;
 
-    // Used if this type declaration is a wrapper, i.e. struct FooWrapper:IFoo = Foo;
-    TypeExp wrappedType;
+    // When user defines an agg type in the syntax of
+    // `struct FooAlias : IFoo = Foo;`
+    // The user is defining a link-time type alias. In contrast
+    // to an ordinary typealias, a link-time alias is not folded in
+    // the front-end, and resolved during linking.
+    // `aliasedType` is used to store the alised type (in this case `Foo`)
+    // when the agg type decl is declared in the link-time alias syntax.
+    //
+    FIDDLE() TypeExp aliasedType;
+
     bool hasBody = true;
 
     void unionTagsWith(TypeTag other);
@@ -527,6 +515,13 @@ class InheritanceDecl : public TypeConstraintDecl
     // this inheritance declaration.
     FIDDLE() RefPtr<WitnessTable> witnessTable;
 
+    // If the inheritance decl is in a link-time type declaration
+    // (e.g. `export struct Foo : IFoo = FooImpl;`), then we will
+    // store the witness that `FooImpl:IFoo` here.
+    // TODO: If we made `WitnessTable` a `Val`, we should be able
+    // to unify these two cases.
+    FIDDLE() Witness* witnessVal = nullptr;
+
     // Overrides should be public so base classes can access
     const TypeExp& _getSupOverride() const { return base; }
 };
@@ -637,7 +632,7 @@ FIDDLE(abstract)
 class FunctionDeclBase : public CallableDecl
 {
     FIDDLE(...)
-    FIDDLE() Stmt* body = nullptr;
+    Stmt* body = nullptr;
 };
 
 // A constructor/initializer to create instances of a type
@@ -707,6 +702,30 @@ FIDDLE()
 class RefAccessorDecl : public AccessorDecl
 {
     FIDDLE(...)
+};
+
+/// A semantic declaration that defines valid types and stages for a system value semantic.
+/// Used to validate `: SV_*` annotations on shader parameters.
+FIDDLE()
+class SemanticDecl : public ContainerDecl
+{
+    FIDDLE(...)
+};
+
+/// A typed getter accessor for a semantic declaration: "get : <type>;"
+FIDDLE()
+class SemanticGetterDecl : public Decl
+{
+    FIDDLE(...)
+    FIDDLE() TypeExp type;
+};
+
+/// A typed setter accessor for a semantic declaration: "set : <type>;"
+FIDDLE()
+class SemanticSetterDecl : public Decl
+{
+    FIDDLE(...)
+    FIDDLE() TypeExp type;
 };
 
 FIDDLE()
@@ -865,6 +884,13 @@ class GenericDecl : public ContainerDecl
     FIDDLE(...)
     // The decl that is genericized...
     FIDDLE() Decl* inner = nullptr;
+
+    /// A cached list of arguments that can be used when forming
+    /// a reference to the inner declaration with "default
+    /// substitutions" (for each generic parameter, the coresponding
+    /// argument will be a reference to the parameter itself).
+    ///
+    List<Val*> _cachedArgsForDefaultSubstitution;
 };
 
 FIDDLE()
@@ -962,7 +988,8 @@ class SyntaxDecl : public Decl
 {
     FIDDLE(...)
     // What type of syntax node will be produced when parsing with this keyword?
-    FIDDLE() SyntaxClass<NodeBase> syntaxClass;
+    FIDDLE()
+    SyntaxClass<NodeBase> syntaxClass;
 
     // Callback to invoke in order to parse syntax with this keyword.
     SyntaxParseCallback parseCallback = nullptr;
@@ -991,7 +1018,7 @@ class DerivativeRequirementDecl : public FunctionDeclBase
     FIDDLE() Decl* originalRequirementDecl = nullptr;
 
     // Type to use for 'ThisType'
-    FIDDLE() Type* diffThisType;
+    FIDDLE() Type* diffThisType = nullptr;
 };
 
 // A reference to a synthesized decl representing a differentiable function requirement, this decl
@@ -1027,5 +1054,9 @@ void addSiblingScopeForContainerDecl(
     ContainerDecl* dest,
     ContainerDecl* source);
 void addSiblingScopeForContainerDecl(ASTBuilder* builder, Scope* destScope, ContainerDecl* source);
+
+// Cast `decl` to a valid `ContainerDecl*` if its members will become global scope symbols after
+// lowering to IR. This currently includes: `NamespaceDecl`, `ModuleDecl` and `FileDecl`.
+ContainerDecl* isStaticScopeDecl(Decl* decl);
 
 } // namespace Slang

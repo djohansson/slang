@@ -102,7 +102,7 @@ public:
 
         IRSizeAndAlignment sizeAlignment = {};
         getNaturalSizeAndAlignment(
-            codeGenContext->getTargetProgram()->getOptionSet(),
+            codeGenContext->getTargetReq(),
             inst->getDataType(),
             &sizeAlignment);
         operand = allocReg(funcBuilder, sizeAlignment.size, sizeAlignment.alignment);
@@ -174,7 +174,7 @@ public:
         // Align constantSection.
         IRSizeAndAlignment sizeAlignment;
         getNaturalSizeAndAlignment(
-            codeGenContext->getTargetProgram()->getOptionSet(),
+            codeGenContext->getTargetReq(),
             inst->getDataType(),
             &sizeAlignment);
         alignConstSection(sizeAlignment.alignment);
@@ -245,6 +245,17 @@ public:
         if (auto constantInst = as<IRConstant>(inst))
         {
             operand = addConstantValue(constantInst);
+            mapInstToOperand[inst] = operand;
+        }
+        else if (auto constantVector = as<IRMakeVector>(inst))
+        {
+            SLANG_ASSERT(constantVector->getOperandCount() > 0);
+            operand = ensureInst(constantVector->getOperand(0));
+            for (UInt i = 1; i < constantVector->getOperandCount(); i++)
+            {
+                ensureInst(constantVector->getOperand(i));
+            }
+            operand.size *= (uint32_t)constantVector->getOperandCount();
             mapInstToOperand[inst] = operand;
         }
         else
@@ -356,9 +367,9 @@ public:
         case kIROp_UInt64Type:
         case kIROp_UIntPtrType:
         case kIROp_PtrType:
-        case kIROp_OutType:
-        case kIROp_InOutType:
-        case kIROp_RefType:
+        case kIROp_OutParamType:
+        case kIROp_BorrowInOutParamType:
+        case kIROp_RefParamType:
         case kIROp_NativePtrType:
             extCode.scalarType = kSlangByteCodeScalarTypeUnsignedInt;
             extCode.scalarBitWidth = 3;
@@ -481,8 +492,12 @@ public:
     {
         switch (inst->getOp())
         {
-        case kIROp_undefined:
+        case kIROp_Poison:
+        case kIROp_LoadFromUninitializedMemory:
             {
+                // We basically handle an undefined value by allocating a
+                // temporary and then not initializing it.
+                //
                 ensureWorkingsetMemory(funcBuilder, inst);
             }
             break;
@@ -494,7 +509,7 @@ public:
                     funcBuilder.parameterOffsets.add(operand.offset);
                     IRSizeAndAlignment sizeAlignment = {};
                     getNaturalSizeAndAlignment(
-                        codeGenContext->getTargetProgram()->getOptionSet(),
+                        codeGenContext->getTargetReq(),
                         inst->getDataType(),
                         &sizeAlignment);
                     funcBuilder.parameterSize =
@@ -507,10 +522,7 @@ public:
                 IRBuilder builder(inst);
                 auto type = tryGetPointedToType(&builder, inst->getDataType());
                 IRSizeAndAlignment sizeAlignment = {};
-                getNaturalSizeAndAlignment(
-                    codeGenContext->getTargetProgram()->getOptionSet(),
-                    type,
-                    &sizeAlignment);
+                getNaturalSizeAndAlignment(codeGenContext->getTargetReq(), type, &sizeAlignment);
                 auto varStorage = allocReg(
                     funcBuilder,
                     (size_t)sizeAlignment.size,
@@ -526,7 +538,7 @@ public:
             {
                 IRSizeAndAlignment sizeAlignment = {};
                 getNaturalSizeAndAlignment(
-                    codeGenContext->getTargetProgram()->getOptionSet(),
+                    codeGenContext->getTargetReq(),
                     inst->getDataType(),
                     &sizeAlignment);
                 writeInst(
@@ -541,7 +553,7 @@ public:
             {
                 IRSizeAndAlignment sizeAlignment = {};
                 getNaturalSizeAndAlignment(
-                    codeGenContext->getTargetProgram()->getOptionSet(),
+                    codeGenContext->getTargetReq(),
                     inst->getOperand(1)->getDataType(),
                     &sizeAlignment);
                 writeInst(
@@ -575,7 +587,7 @@ public:
                 auto opInfo = translateArithmeticOp(inst);
                 IRSizeAndAlignment sizeAlignment = {};
                 getNaturalSizeAndAlignment(
-                    codeGenContext->getTargetProgram()->getOptionSet(),
+                    codeGenContext->getTargetReq(),
                     inst->getDataType(),
                     &sizeAlignment);
                 writeInst(
@@ -594,7 +606,7 @@ public:
                 auto opInfo = translateArithmeticOp(inst);
                 IRSizeAndAlignment sizeAlignment = {};
                 getNaturalSizeAndAlignment(
-                    codeGenContext->getTargetProgram()->getOptionSet(),
+                    codeGenContext->getTargetReq(),
                     inst->getDataType(),
                     &sizeAlignment);
                 writeInst(
@@ -605,8 +617,8 @@ public:
                     ensureInst(inst->getOperand(0)));
             }
             break;
-        case kIROp_unconditionalBranch:
-        case kIROp_loop:
+        case kIROp_UnconditionalBranch:
+        case kIROp_Loop:
             {
                 // Write phi arguments into param registers.
                 auto branch = as<IRUnconditionalBranch>(inst);
@@ -627,7 +639,7 @@ public:
                     auto paramReg = ensureWorkingsetMemory(funcBuilder, param);
                     IRSizeAndAlignment sizeAlignment = {};
                     getNaturalSizeAndAlignment(
-                        codeGenContext->getTargetProgram()->getOptionSet(),
+                        codeGenContext->getTargetReq(),
                         param->getDataType(),
                         &sizeAlignment);
                     writeInst(
@@ -646,7 +658,7 @@ public:
                 relocations.add(entry);
             }
             break;
-        case kIROp_ifElse:
+        case kIROp_IfElse:
             {
                 VMOperand relocOperand = {};
                 writeInst(
@@ -704,7 +716,7 @@ public:
                 }
                 IRSizeAndAlignment sizeAlignment = {};
                 getNaturalSizeAndAlignment(
-                    codeGenContext->getTargetProgram()->getOptionSet(),
+                    codeGenContext->getTargetReq(),
                     inst->getDataType(),
                     &sizeAlignment);
                 writeInst(
@@ -722,7 +734,7 @@ public:
                 {
                     IRSizeAndAlignment sizeAlignment = {};
                     getNaturalSizeAndAlignment(
-                        codeGenContext->getTargetProgram()->getOptionSet(),
+                        codeGenContext->getTargetReq(),
                         returnInst->getVal()->getDataType(),
                         &sizeAlignment);
                     writeInst(
@@ -746,7 +758,7 @@ public:
                 auto elementType = tryGetPointedToType(&builder, getElemInst->getDataType());
                 IRSizeAndAlignment sizeAlignment = {};
                 getNaturalSizeAndAlignment(
-                    codeGenContext->getTargetProgram()->getOptionSet(),
+                    codeGenContext->getTargetReq(),
                     elementType,
                     &sizeAlignment);
                 auto stride = sizeAlignment.getStride();
@@ -772,10 +784,7 @@ public:
                     as<IRStructType>(tryGetPointedToType(&builder, base->getDataType()));
                 IRIntegerValue offset = 0;
                 auto field = findStructField(structType, fieldKey);
-                getNaturalOffset(
-                    codeGenContext->getTargetProgram()->getOptionSet(),
-                    field,
-                    &offset);
+                getNaturalOffset(codeGenContext->getTargetReq(), field, &offset);
 
                 writeInst(
                     funcBuilder,
@@ -795,7 +804,7 @@ public:
                 IRBuilder builder(inst);
                 auto elementType = tryGetPointedToType(&builder, getOffsetPtrInst->getDataType());
                 getNaturalSizeAndAlignment(
-                    codeGenContext->getTargetProgram()->getOptionSet(),
+                    codeGenContext->getTargetReq(),
                     elementType,
                     &sizeAlignment);
                 writeInst(
@@ -816,10 +825,7 @@ public:
                 auto structType = as<IRStructType>(base->getDataType());
                 IRIntegerValue offset = 0;
                 auto field = findStructField(structType, fieldKey);
-                getNaturalOffset(
-                    codeGenContext->getTargetProgram()->getOptionSet(),
-                    field,
-                    &offset);
+                getNaturalOffset(codeGenContext->getTargetReq(), field, &offset);
 
                 auto baseOperand = ensureInst(base);
                 baseOperand.offset += (uint32_t)offset;
@@ -834,7 +840,7 @@ public:
                 auto elementType = getElemInst->getDataType();
                 IRSizeAndAlignment sizeAlignment = {};
                 getNaturalSizeAndAlignment(
-                    codeGenContext->getTargetProgram()->getOptionSet(),
+                    codeGenContext->getTargetReq(),
                     elementType,
                     &sizeAlignment);
                 auto stride = sizeAlignment.getStride();
@@ -868,7 +874,7 @@ public:
         case kIROp_FloatCast:
             emitCast(funcBuilder, VMOp::Cast, inst);
             break;
-        case kIROp_swizzle:
+        case kIROp_Swizzle:
             {
                 auto swizzleInst = as<IRSwizzle>(inst);
                 auto base = swizzleInst->getBase();
@@ -899,7 +905,7 @@ public:
                 auto elementType = arrayType->getElementType();
                 IRSizeAndAlignment sizeAlignment = {};
                 getNaturalSizeAndAlignment(
-                    codeGenContext->getTargetProgram()->getOptionSet(),
+                    codeGenContext->getTargetReq(),
                     elementType,
                     &sizeAlignment);
                 auto stride = (uint32_t)sizeAlignment.getStride();
@@ -923,7 +929,7 @@ public:
                 auto elementType = arrayType->getElementType();
                 IRSizeAndAlignment sizeAlignment = {};
                 getNaturalSizeAndAlignment(
-                    codeGenContext->getTargetProgram()->getOptionSet(),
+                    codeGenContext->getTargetReq(),
                     elementType,
                     &sizeAlignment);
                 auto stride = (uint32_t)sizeAlignment.getStride();
@@ -953,13 +959,10 @@ public:
                 {
                     auto field = fields[i];
                     IRIntegerValue offset = 0;
-                    getNaturalOffset(
-                        codeGenContext->getTargetProgram()->getOptionSet(),
-                        field,
-                        &offset);
+                    getNaturalOffset(codeGenContext->getTargetReq(), field, &offset);
                     IRSizeAndAlignment sizeAlignment = {};
                     getNaturalSizeAndAlignment(
-                        codeGenContext->getTargetProgram()->getOptionSet(),
+                        codeGenContext->getTargetReq(),
                         field->getFieldType(),
                         &sizeAlignment);
                     VMOperand elementOperand = result;
@@ -982,7 +985,7 @@ public:
                     VMOperand elementOperand = result;
                     IRSizeAndAlignment sizeAlignment = {};
                     getNaturalSizeAndAlignment(
-                        codeGenContext->getTargetProgram()->getOptionSet(),
+                        codeGenContext->getTargetReq(),
                         inst->getOperand(i)->getDataType(),
                         &sizeAlignment);
                     writeInst(
@@ -1001,7 +1004,7 @@ public:
                 auto vectorType = as<IRVectorType>(inst->getDataType());
                 IRSizeAndAlignment sizeAlignment = {};
                 getNaturalSizeAndAlignment(
-                    codeGenContext->getTargetProgram()->getOptionSet(),
+                    codeGenContext->getTargetReq(),
                     vectorType->getElementType(),
                     &sizeAlignment);
                 auto stride = (uint32_t)sizeAlignment.getStride();
@@ -1024,7 +1027,7 @@ public:
                 auto matrixType = as<IRMatrixType>(inst->getDataType());
                 IRSizeAndAlignment sizeAlignment = {};
                 getNaturalSizeAndAlignment(
-                    codeGenContext->getTargetProgram()->getOptionSet(),
+                    codeGenContext->getTargetReq(),
                     matrixType->getElementType(),
                     &sizeAlignment);
                 auto stride = (uint32_t)sizeAlignment.getStride();
@@ -1068,6 +1071,11 @@ public:
         }
     }
 
+    bool isUnreachableBlock(IRBlock* block)
+    {
+        return as<IRUnreachable>(block->getTerminator()) != nullptr;
+    }
+
     void emitFunction(IRFunc* func)
     {
         VMByteCodeFunctionBuilder funcBuilder;
@@ -1075,7 +1083,7 @@ public:
 
         IRSizeAndAlignment sizeAlignment = {};
         getNaturalSizeAndAlignment(
-            codeGenContext->getTargetProgram()->getOptionSet(),
+            codeGenContext->getTargetReq(),
             func->getResultType(),
             &sizeAlignment);
         funcBuilder.resultSize = (uint32_t)sizeAlignment.getStride();
@@ -1085,6 +1093,9 @@ public:
 
         for (auto block : func->getBlocks())
         {
+            if (isUnreachableBlock(block))
+                continue;
+
             mapBlockToByteOffset[block] = funcBuilder.code.getCount();
 
             for (auto inst : block->getChildren())

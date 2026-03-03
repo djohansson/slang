@@ -59,20 +59,33 @@ static void emitReflectionTypeLayoutJSON(PrettyWriter& writer, slang::TypeLayout
 static void emitReflectionTypeJSON(PrettyWriter& writer, slang::TypeReflection* type);
 static slang::ShaderReflection* g_inProgramLayout = nullptr;
 
+static void emitReflectionSize(PrettyWriter& writer, size_t size)
+{
+    size == SLANG_UNBOUNDED_SIZE ? writer << "\"unbounded\""
+    : size == SLANG_UNKNOWN_SIZE ? writer << "\"unknown\""
+                                 : writer << (uint64_t)size;
+}
+
 static void emitReflectionVarBindingInfoJSON(
     PrettyWriter& writer,
     SlangParameterCategory category,
     SlangUInt index,
     SlangUInt count,
+    SlangUInt stride,
     SlangUInt space = 0)
 {
     if (category == SLANG_PARAMETER_CATEGORY_UNIFORM)
     {
         writer << "\"kind\": \"uniform\"";
         writer << ", ";
-        writer << "\"offset\": " << index;
+        writer << "\"offset\": ";
+        emitReflectionSize(writer, index);
         writer << ", ";
-        writer << "\"size\": " << count;
+        writer << "\"size\": ";
+        emitReflectionSize(writer, count);
+        writer << ", ";
+        writer << "\"elementStride\": ";
+        emitReflectionSize(writer, stride);
     }
     else
     {
@@ -97,35 +110,38 @@ static void emitReflectionVarBindingInfoJSON(
             CASE(REGISTER_SPACE, registerSpace);
             CASE(SUB_ELEMENT_REGISTER_SPACE, subElementRegisterSpace);
             CASE(GENERIC, generic);
+            CASE(RAY_PAYLOAD, rayPayload);
+            CASE(HIT_ATTRIBUTES, hitAttributes);
+            CASE(CALLABLE_PAYLOAD, callablePayload);
+            CASE(SHADER_RECORD, shaderRecord);
+            CASE(EXISTENTIAL_TYPE_PARAM, existentialTypeParam);
+            CASE(EXISTENTIAL_OBJECT_PARAM, existentialObjectParam);
+            CASE(SUBPASS, inputAttachmentIndex);
             CASE(METAL_ARGUMENT_BUFFER_ELEMENT, metalArgumentBufferElement);
+            CASE(METAL_ATTRIBUTE, metalAttribute);
+            CASE(METAL_PAYLOAD, metalPayload);
 #undef CASE
 
         default:
             writer << "unknown";
-            assert(!"unhandled case");
+            SLANG_ASSERT(!"unhandled case");
             break;
         }
         writer << "\"";
         if (space && category != SLANG_PARAMETER_CATEGORY_REGISTER_SPACE)
         {
             writer << ", ";
-            writer << "\"space\": " << space;
+            writer << "\"space\": ";
+            emitReflectionSize(writer, space);
         }
         writer << ", ";
         writer << "\"index\": ";
-        writer << index;
+        emitReflectionSize(writer, index);
         if (count != 1)
         {
             writer << ", ";
             writer << "\"count\": ";
-            if (count == SLANG_UNBOUNDED_SIZE)
-            {
-                writer << "\"unbounded\"";
-            }
-            else
-            {
-                writer << count;
-            }
+            emitReflectionSize(writer, count);
         }
     }
 }
@@ -161,6 +177,12 @@ static void emitReflectionVarBindingInfoJSON(
         case SLANG_STAGE_COMPUTE:
             stageName = "compute";
             break;
+        case SLANG_STAGE_MESH:
+            stageName = "mesh";
+            break;
+        case SLANG_STAGE_AMPLIFICATION:
+            stageName = "amplification";
+            break;
 
         default:
             break;
@@ -191,6 +213,7 @@ static void emitReflectionVarBindingInfoJSON(
             auto index = var->getOffset(category);
             auto space = var->getBindingSpace(category);
             auto count = typeLayout->getSize(category);
+            auto elementStride = typeLayout->getElementStride(category);
 
             // Query the paramater usage for the specified entry point.
             // Note: both `request` and `entryPointIndex` may be invalid here, but that should just
@@ -210,7 +233,7 @@ static void emitReflectionVarBindingInfoJSON(
 
             writer << "{";
 
-            emitReflectionVarBindingInfoJSON(writer, category, index, count, space);
+            emitReflectionVarBindingInfoJSON(writer, category, index, count, elementStride, space);
 
             if (usedAvailable)
             {
@@ -407,11 +430,12 @@ static void emitReflectionVarLayoutJSON(PrettyWriter& writer, slang::VariableLay
         emitReflectionTypeLayoutJSON(writer, var->getTypeLayout());
     }
 
-    emitReflectionModifierInfoJSON(writer, var->getVariable());
+    if (auto variable = var->getVariable())
+    {
+        emitReflectionModifierInfoJSON(writer, variable);
+    }
 
     emitReflectionVarBindingInfoJSON(writer, var);
-
-    emitUserAttributes(writer, var->getVariable());
     writer.dedent();
     writer << "\n}";
 }
@@ -423,7 +447,7 @@ static void emitReflectionScalarTypeInfoJSON(PrettyWriter& writer, SlangScalarTy
     {
     default:
         writer << "unknown";
-        assert(!"unhandled case");
+        SLANG_ASSERT(!"unhandled case");
         break;
 #define CASE(TAG, ID)                                                          \
     case static_cast<SlangScalarType>(slang::TypeReflection::ScalarType::TAG): \
@@ -463,7 +487,7 @@ static void emitReflectionResourceTypeBaseInfoJSON(
     {
     default:
         writer << "unknown";
-        assert(!"unhandled case");
+        SLANG_ASSERT(!"unhandled case");
         break;
 
 #define CASE(SHAPE, NAME)             \
@@ -478,6 +502,7 @@ static void emitReflectionResourceTypeBaseInfoJSON(
         CASE(STRUCTURED_BUFFER, structuredBuffer);
         CASE(BYTE_ADDRESS_BUFFER, byteAddressBuffer);
         CASE(ACCELERATION_STRUCTURE, accelerationStructure);
+        CASE(TEXTURE_SUBPASS, subpassInput);
 #undef CASE
     }
     writer << "\"";
@@ -496,6 +521,11 @@ static void emitReflectionResourceTypeBaseInfoJSON(
         writer.maybeComma();
         writer << "\"feedback\": true";
     }
+    if (shape & SLANG_TEXTURE_COMBINED_FLAG)
+    {
+        writer.maybeComma();
+        writer << "\"combined\": true";
+    }
 
     if (access != SLANG_RESOURCE_ACCESS_READ)
     {
@@ -505,7 +535,7 @@ static void emitReflectionResourceTypeBaseInfoJSON(
         {
         default:
             writer << "unknown";
-            assert(!"unhandled case");
+            SLANG_ASSERT(!"unhandled case");
             break;
 
         case SLANG_RESOURCE_ACCESS_READ:
@@ -532,7 +562,6 @@ static void emitReflectionResourceTypeBaseInfoJSON(
         writer << "\"";
     }
 }
-
 
 static void emitReflectionTypeInfoJSON(PrettyWriter& writer, slang::TypeReflection* type)
 {
@@ -563,6 +592,7 @@ static void emitReflectionTypeInfoJSON(PrettyWriter& writer, slang::TypeReflecti
             case SLANG_TEXTURE_2D:
             case SLANG_TEXTURE_3D:
             case SLANG_TEXTURE_CUBE:
+            case SLANG_TEXTURE_SUBPASS:
                 if (auto resultType = type->getResourceResultType())
                 {
                     writer.maybeComma();
@@ -618,7 +648,7 @@ static void emitReflectionTypeInfoJSON(PrettyWriter& writer, slang::TypeReflecti
         writer << "\"kind\": \"vector\"";
         writer.maybeComma();
         writer << "\"elementCount\": ";
-        writer << int(type->getElementCount());
+        emitReflectionSize(writer, type->getElementCount());
         writer.maybeComma();
         writer << "\"elementType\": ";
         emitReflectionTypeJSON(writer, type->getElementType());
@@ -645,7 +675,7 @@ static void emitReflectionTypeInfoJSON(PrettyWriter& writer, slang::TypeReflecti
             writer << "\"kind\": \"array\"";
             writer.maybeComma();
             writer << "\"elementCount\": ";
-            writer << int(arrayType->getElementCount());
+            emitReflectionSize(writer, arrayType->getElementCount());
             writer.maybeComma();
             writer << "\"elementType\": ";
             emitReflectionTypeJSON(writer, arrayType->getElementType());
@@ -705,8 +735,22 @@ static void emitReflectionTypeInfoJSON(PrettyWriter& writer, slang::TypeReflecti
         writer.maybeComma();
         writer << "\"kind\": \"DynamicResource\"";
         break;
+    case slang::TypeReflection::Kind::MeshOutput:
+        writer.maybeComma();
+        writer << "\"kind\": \"MeshOutput\"";
+        break;
+    case slang::TypeReflection::Kind::Specialized:
+        writer.maybeComma();
+        writer << "\"kind\": \"Specialized\"";
+        break;
+    case slang::TypeReflection::Kind::None:
+        writer.maybeComma();
+        writer << "\"kind\": \"None\"";
+        break;
     default:
-        assert(!"unhandled case");
+        SLANG_ASSERT(!"Unhandled type kind");
+        writer.maybeComma();
+        writer << "\"kind\": \"Unknown\"";
         break;
     }
     emitUserAttributes(writer, type);
@@ -833,7 +877,7 @@ static void emitReflectionTypeLayoutInfoJSON(
 
             writer.maybeComma();
             writer << "\"elementCount\": ";
-            writer << int(arrayTypeLayout->getElementCount());
+            emitReflectionSize(writer, arrayTypeLayout->getElementCount());
 
             writer.maybeComma();
             writer << "\"elementType\": ";
@@ -843,7 +887,9 @@ static void emitReflectionTypeLayoutInfoJSON(
             {
                 writer.maybeComma();
                 writer << "\"uniformStride\": ";
-                writer << int(arrayTypeLayout->getElementStride(SLANG_PARAMETER_CATEGORY_UNIFORM));
+                emitReflectionSize(
+                    writer,
+                    arrayTypeLayout->getElementStride(SLANG_PARAMETER_CATEGORY_UNIFORM));
             }
         }
         break;
@@ -878,6 +924,10 @@ static void emitReflectionTypeLayoutInfoJSON(
 
     case slang::TypeReflection::Kind::ConstantBuffer:
         emitReflectionParameterGroupTypeLayoutInfoJSON(writer, typeLayout, "constantBuffer");
+        break;
+
+    case slang::TypeReflection::Kind::OutputStream:
+        emitReflectionParameterGroupTypeLayoutInfoJSON(writer, typeLayout, "outputStream");
         break;
 
     case slang::TypeReflection::Kind::ParameterBlock:
@@ -1003,7 +1053,10 @@ static void emitReflectionParamJSON(PrettyWriter& writer, slang::VariableLayoutR
         emitReflectionNameInfoJSON(writer, name);
     }
 
-    emitReflectionModifierInfoJSON(writer, param->getVariable());
+    if (auto var = param->getVariable())
+    {
+        emitReflectionModifierInfoJSON(writer, var);
+    }
 
     emitReflectionVarBindingInfoJSON(writer, param);
 
@@ -1099,6 +1152,12 @@ static void emitReflectionEntryPointJSON(
         break;
     case SLANG_STAGE_COMPUTE:
         writer << ",\n\"stage\": \"compute\"";
+        break;
+    case SLANG_STAGE_MESH:
+        writer << ",\n\"stage\": \"mesh\"";
+        break;
+    case SLANG_STAGE_AMPLIFICATION:
+        writer << ",\n\"stage\": \"amplification\"";
         break;
     default:
         break;
@@ -1259,6 +1318,13 @@ static void emitReflectionJSON(
             writer.dedent();
             writer << "\n}\n";
         }
+    }
+
+    // Emit the bindless space index
+    auto bindlessSpaceIndex = programReflection->getBindlessSpaceIndex();
+    if (bindlessSpaceIndex >= 0)
+    {
+        writer << ",\n\"bindlessSpaceIndex\": " << bindlessSpaceIndex;
     }
 
     writer.dedent();

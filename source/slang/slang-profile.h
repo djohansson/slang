@@ -20,6 +20,7 @@ enum class SourceLanguage : SlangSourceLanguageIntegral
     SPIRV = SLANG_SOURCE_LANGUAGE_SPIRV,
     Metal = SLANG_SOURCE_LANGUAGE_METAL,
     WGSL = SLANG_SOURCE_LANGUAGE_WGSL,
+    LLVM = SLANG_SOURCE_LANGUAGE_LLVM,
     CountOf = SLANG_SOURCE_LANGUAGE_COUNT_OF,
 };
 
@@ -129,6 +130,8 @@ UnownedStringSlice getStageText(Stage stage);
 
 Stage getStageFromAtom(CapabilityAtom atom);
 CapabilityAtom getAtomFromStage(Stage stage);
+
+String getHLSLProfileName(Profile profile);
 
 } // namespace Slang
 

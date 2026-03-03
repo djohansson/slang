@@ -3,6 +3,7 @@
 
 #include "slang-ast-base.h"
 #include "slang-ast-expr.h"
+#include "slang-ast-print.h"
 #include "slang-ast-type.h"
 #include "slang-check-impl.h"
 
@@ -11,9 +12,27 @@ namespace Slang
 QualType::QualType(Type* type)
     : type(type), isLeftValue(false)
 {
-    if (as<RefType>(type))
+    if (auto refType = as<ExplicitRefType>(type))
     {
-        isLeftValue = true;
+        if (auto optAccessQualifier = refType->tryGetAccessQualifierValue())
+        {
+            auto accessQualifier = *optAccessQualifier;
+            switch (accessQualifier)
+            {
+            case AccessQualifier::ReadWrite:
+                isLeftValue = true;
+                break;
+
+            case AccessQualifier::Read:
+            case AccessQualifier::Immutable:
+                isLeftValue = false;
+                break;
+
+            default:
+                SLANG_UNEXPECTED("unhandled access qualifier");
+                break;
+            }
+        }
     }
 }
 
@@ -71,23 +90,23 @@ UnownedStringSlice getHigherOrderOperatorName(HigherOrderInvokeExpr* expr)
     return UnownedStringSlice();
 }
 
-void printDiagnosticArg(StringBuilder& sb, ParameterDirection direction)
+void printDiagnosticArg(StringBuilder& sb, ParamPassingMode direction)
 {
     switch (direction)
     {
-    case kParameterDirection_In:
+    case ParamPassingMode::In:
         sb << "in";
         break;
-    case kParameterDirection_Out:
+    case ParamPassingMode::Out:
         sb << "out";
         break;
-    case kParameterDirection_Ref:
+    case ParamPassingMode::Ref:
         sb << "ref";
         break;
-    case kParameterDirection_InOut:
+    case ParamPassingMode::BorrowInOut:
         sb << "inout";
         break;
-    case kParameterDirection_ConstRef:
+    case ParamPassingMode::BorrowIn:
         sb << "constref";
         break;
     default:
@@ -95,5 +114,19 @@ void printDiagnosticArg(StringBuilder& sb, ParameterDirection direction)
         break;
     }
 }
+
+String SpecializationArg::toString()
+{
+    if (val)
+        return val->toString();
+    else if (expr)
+    {
+        ASTPrinter printer(getCurrentASTBuilder());
+        printer.addExpr(expr);
+        return printer.getString();
+    }
+    return String();
+}
+
 
 } // namespace Slang

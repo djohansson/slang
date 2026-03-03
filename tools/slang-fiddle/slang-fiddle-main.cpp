@@ -42,12 +42,12 @@ public:
 struct App
 {
 public:
-    App(SourceManager& sourceManager, DiagnosticSink& sink, RootNamePool& rootNamePool)
-        : sourceManager(sourceManager), sink(sink), rootNamePool(rootNamePool)
+    App(SourceManager& sourceManager, DiagnosticSink& sink, NamePool& namePool)
+        : sourceManager(sourceManager), sink(sink), namePool(namePool)
     {
     }
 
-    RootNamePool& rootNamePool;
+    NamePool& namePool;
     SourceManager& sourceManager;
     DiagnosticSink& sink;
 
@@ -61,7 +61,7 @@ public:
         return fiddle::parseSourceUnit(
             inputSourceView,
             logicalModule,
-            &rootNamePool,
+            &namePool,
             &sink,
             &sourceManager,
             outputFileName);
@@ -409,7 +409,7 @@ int main(int argc, char const* const* argv)
 
     ComPtr<ISlangWriter> writer(new FileWriter(stderr, WriterFlag::AutoFlush));
 
-    RootNamePool rootNamePool;
+    NamePool namePool;
 
     SourceManager sourceManager;
     sourceManager.initialize(nullptr, nullptr);
@@ -425,15 +425,18 @@ int main(int argc, char const* const* argv)
     }
     fprintf(stderr, "\n");
 
-    char buffer[1024];
-    GetCurrentDirectoryA(sizeof(buffer), buffer);
-    fprintf(stderr, "cwd: %s\n", buffer);
+    wchar_t wideBuffer[1024];
+    GetCurrentDirectoryW(sizeof(wideBuffer) / sizeof(wideBuffer[0]), wideBuffer);
+
+    // Convert to UTF-8 using String::fromWString
+    String currentDir = String::fromWString(wideBuffer);
+    fprintf(stderr, "cwd: %s\n", currentDir.getBuffer());
     return 1;
 #endif
 
     try
     {
-        App app(sourceManager, sink, rootNamePool);
+        App app(sourceManager, sink, namePool);
         app.execute(argc, argv);
     }
     catch (...)

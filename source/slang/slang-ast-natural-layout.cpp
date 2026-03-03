@@ -41,6 +41,11 @@ NaturalSize NaturalSize::operator*(Count count) const
     {
         return makeEmpty();
     }
+    if (baseType == BaseType::IntPtr || baseType == BaseType::UIntPtr)
+    {
+        // We don't know the size of the pointer at the AST level.
+        return makeInvalid();
+    }
     else
     {
         // In "natural" layout the alignment of a base type is always the same
@@ -133,10 +138,19 @@ NaturalSize ASTNaturalLayoutContext::_calcSizeImpl(Type* type)
     {
         return NaturalSize::makeFromBaseType(basicType->getBaseType());
     }
+    else if (as<BFloat16Type>(type))
+    {
+        return NaturalSize::make(2, 2);
+    }
+    else if (as<Fp8Type>(type))
+    {
+        return NaturalSize::make(1, 1);
+    }
     else if (as<PtrTypeBase>(type) || as<NullPtrType>(type))
     {
-        // We assume 64 bits/8 bytes across the board
-        return NaturalSize::makeFromBaseType(BaseType::UInt64);
+        // We can't know the size of pointer types at the AST level, as it is
+        // determined by the target that is not yet known.
+        return NaturalSize::makeInvalid();
     }
     else if (auto arrayType = as<ArrayExpressionType>(type))
     {
@@ -174,12 +188,41 @@ NaturalSize ASTNaturalLayoutContext::_calcSizeImpl(Type* type)
     }
     else if (auto optionalType = as<OptionalType>(type))
     {
-        if (isNullableType(optionalType->getValueType()))
+        // Sometimes a type `T` has an unused bit pattern that
+        // can be used to represent the null/absent optional value,
+        // and for such types the size of an `Optional<T>` can be
+        // the same as a `T`, by making use of that unused pattern.
+        //
+        if (doesTypeHaveAnUnusedBitPatternThatCanBeUsedForOptionalRepresentation(
+                optionalType->getValueType()))
             return calcSize(optionalType->getValueType());
+
+        // For all other types, an `Optional<T>` is laid out more-or-less
+        // as a tuple of a `bool` and a `T`.
+        //
+        // TODO(tfoley): This appears to be the exact *opposite* of how
+        // we should be laying out optionals if we want to be at all
+        // efficient about space. For various targets and layout modes
+        // (with natural layout currently being one of them), a type
+        // can have "tail padding," when its size is not a multiple of
+        // its alignment. In such cases laying things out as `(T, bool)`
+        // can both end up takign advantage of the tail padding of `T`
+        // when present *or* for types `T` that don't include tail
+        // padding in their layout, but have an alignment N > 1
+        // the `(T, bool)` order will then *create* N-1 bytes of tail
+        // padding (that can possibly be exploited elsewhere).
+        //
         NaturalSize size = NaturalSize::makeEmpty();
         size.append(calcSize(m_astBuilder->getBoolType()));
         size.append(calcSize(optionalType->getValueType()));
         return size;
+    }
+    else if (as<DescriptorHandleType>(type))
+    {
+        // DescriptorHandleType has target-dependent size/alignment.
+        // Return invalid so that sizeof/alignof gets lowered to IR instructions
+        // which can be resolved later with target information.
+        return NaturalSize::makeInvalid();
     }
     else if (auto declRefType = as<DeclRefType>(type))
     {

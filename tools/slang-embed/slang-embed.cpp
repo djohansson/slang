@@ -197,10 +197,9 @@ struct App
 
         for (auto line : lineReader)
         {
-            auto trimedLine = line.trimStart();
-            if (trimedLine.startsWith("#include"))
+            auto fileName = getIncludedFileName(line);
+            if (fileName.getLength())
             {
-                auto fileName = Slang::StringUtil::getAtInSplit(trimedLine, ' ', 1);
                 bool isSystemInclude = false;
 
                 // Handle both quoted and angle-bracket includes
@@ -324,6 +323,23 @@ struct App
         }
     }
 
+    static Slang::UnownedStringSlice getIncludedFileName(Slang::UnownedStringSlice line)
+    {
+        auto trimmedLine = line.trimStart();
+        if (!trimmedLine.startsWith("#"))
+        {
+            return Slang::UnownedStringSlice();
+        }
+        auto preprocessorLine = trimmedLine.tail(sizeof("#") - 1).trimStart();
+        if (!preprocessorLine.startsWith("include"))
+        {
+            return Slang::UnownedStringSlice();
+        }
+        auto includeLine = preprocessorLine.tail(sizeof("include") - 1).trimStart();
+
+        return Slang::StringUtil::getAtInSplit(includeLine, ' ', 0);
+    }
+
     void processInputFile()
     {
         // Note: Eventually we might support multiple input files in a
@@ -339,7 +355,8 @@ struct App
         if (!outputPath)
             outputPath = defaultOutputPath;
 
-        FILE* outputFile = fopen(outputPath, "w");
+        FILE* outputFile = nullptr;
+        fopen_s(&outputFile, outputPath, "w");
         ScopedFile outputFileCleanup(outputFile);
         if (!outputFile)
         {

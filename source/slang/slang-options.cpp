@@ -25,6 +25,7 @@
 #include "slang-hlsl-to-vulkan-layout-options.h"
 #include "slang-profile.h"
 #include "slang-repro.h"
+#include "slang-rich-diagnostics.h"
 #include "slang-serialize-ir.h"
 #include "slang.h"
 
@@ -45,6 +46,9 @@ struct Option
     const char* name;
     const char* usage = nullptr;
     const char* description = nullptr;
+    const char* displayName = nullptr;
+    const CommandOptions::InputLink* links = nullptr;
+    Count linkCount = 0;
 };
 
 enum class ValueCategory
@@ -100,8 +104,14 @@ static void _addOptions(const ConstArrayView<Option>& options, CommandOptions& c
 {
     for (auto& opt : options)
     {
-        cmdOptions
-            .add(opt.name, opt.usage, opt.description, CommandOptions::UserValue(opt.optionKind));
+        cmdOptions.add(
+            opt.name,
+            opt.usage,
+            opt.description,
+            CommandOptions::UserValue(opt.optionKind),
+            opt.displayName,
+            opt.links,
+            opt.linkCount);
     }
 }
 
@@ -282,7 +292,8 @@ void initCommandOptions(CommandOptions& options)
 
         for (auto name : names)
         {
-            if (name.startsWith("__") || name.startsWith("spirv_1_") || name.startsWith("_"))
+            if (name.startsWith("__") || name.startsWith("spirv_1_") || name.startsWith("_") ||
+                name == "Invalid")
             {
                 continue;
             }
@@ -325,14 +336,18 @@ void initCommandOptions(CommandOptions& options)
             {"tesc", "glsl (hull)"},
             {"tese", "glsl (domain)"},
             {"comp", "glsl (compute)"},
+            {"mesh", "glsl (mesh)"},
+            {"task", "glsl (amplification)"},
             {"slang", nullptr},
             {"spv", "SPIR-V"},
             {"spv-asm", "SPIR-V assembly"},
             {"c", nullptr},
             {"cpp,c++,cxx", "C++"},
+            {"hpp", "C++ Header"},
             {"exe", "executable"},
             {"dll,so", "sharedlibrary/dll"},
             {"cu", "CUDA"},
+            {"cuh", "CUDA Header"},
             {"ptx", "PTX"},
             {"obj,o", "object-code"},
             {"zip", "container"},
@@ -341,6 +356,24 @@ void initCommandOptions(CommandOptions& options)
         };
         options.addValues(pairs, SLANG_COUNT_OF(pairs));
     }
+
+    /* !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! help-category !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! */
+
+    {
+        options.addCategory(
+            CategoryKind::Value,
+            "help-category",
+            "Available help categories for the -h option");
+
+        // Add all existing categories as valid help category values
+        const auto& categories = options.getCategories();
+        for (Index categoryIndex = 0; categoryIndex < categories.getCount(); ++categoryIndex)
+        {
+            const auto& category = categories[categoryIndex];
+            options.addValue(category.name, category.description);
+        }
+    }
+
 
     /* !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! General !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! */
 
@@ -495,11 +528,20 @@ void initCommandOptions(CommandOptions& options)
          "-report-perf-benchmark",
          nullptr,
          "Reports compiler performance benchmark results."},
+        {OptionKind::ReportDetailedPerfBenchmark,
+         "-report-detailed-perf-benchmark",
+         nullptr,
+         "Reports compiler performance benchmark results for each intermediate pass (implies "
+         "-report-perf-benchmark)."},
         {OptionKind::ReportCheckpointIntermediates,
          "-report-checkpoint-intermediates",
          nullptr,
          "Reports information about checkpoint contexts used for reverse-mode automatic "
          "differentiation."},
+        {OptionKind::ReportDynamicDispatchSites,
+         "-report-dynamic-dispatch-sites",
+         nullptr,
+         "Reports information about dynamic dispatch sites for interface calls."},
         {OptionKind::SkipSPIRVValidation,
          "-skip-spirv-validation",
          nullptr,
@@ -545,8 +587,13 @@ void initCommandOptions(CommandOptions& options)
          "Include additional type conformance during linking for dynamic dispatch."},
         {OptionKind::EmitReflectionJSON,
          "-reflection-json",
-         "reflection-json <path>",
-         "Emit reflection data in JSON format to a file."}};
+         "-reflection-json <path>",
+         "Emit reflection data in JSON format to a file."},
+        {OptionKind::UseMSVCStyleBitfieldPacking,
+         "-msvc-style-bitfield-packing",
+         nullptr,
+         "Pack bitfields according to MSVC rules (msb first, new field when underlying type size "
+         "changes) rather than gcc-style (lsb first)"}};
 
     _addOptions(makeConstArrayView(generalOpts), options);
 
@@ -566,6 +613,21 @@ void initCommandOptions(CommandOptions& options)
         // remove last ,
         vkShiftNames.reduceLength(vkShiftNames.getLength() - 1);
     }
+
+    static const CommandOptions::InputLink kVulkanBindShiftLinks[] = {
+        {"DXC description",
+         "https://github.com/Microsoft/DirectXShaderCompiler/blob/main/docs/"
+         "SPIR-V.rst#implicit-binding-number-assignment"},
+        {"GLSL wiki",
+         "https://github.com/KhronosGroup/glslang/wiki/"
+         "HLSL-FAQ#auto-mapped-binding-numbers"},
+    };
+
+    static const CommandOptions::InputLink kVulkanBindGlobalsLinks[] = {
+        {"DXC description",
+         "https://github.com/Microsoft/DirectXShaderCompiler/blob/main/docs/"
+         "SPIR-V.rst#implicit-binding-number-assignment"},
+    };
 
     const Option targetOpts[] = {
         {OptionKind::Capability,
@@ -637,6 +699,12 @@ void initCommandOptions(CommandOptions& options)
          "-fvk-use-dx-layout",
          nullptr,
          "Pack members using FXCs member packing rules when targeting GLSL or SPIRV."},
+        {OptionKind::ForceCLayout,
+         "-fvk-use-c-layout",
+         nullptr,
+         "Make data accessed through ConstantBuffer, ParameterBlock, StructuredBuffer, "
+         "ByteAddressBuffer and general pointers follow the C/C++ structure layout rules "
+         "when targeting SPIRV."},
         {OptionKind::VulkanBindShift,
          vkShiftNames.getBuffer(),
          "-fvk-<vulkan-shift>-shift <N> <space>",
@@ -647,22 +715,18 @@ void initCommandOptions(CommandOptions& options)
          "shift the "
          "inferred binding numbers for more than one space, provide more than one such option. "
          "If more than one such option is provided for the same space, the last one takes effect. "
-         "If you need to shift the inferred binding numbers for all sets, use 'all' as <space>. "
-         "\n"
-         "* [DXC "
-         "description](https://github.com/Microsoft/DirectXShaderCompiler/blob/main/docs/"
-         "SPIR-V.rst#implicit-binding-number-assignment)\n"
-         "* [GLSL "
-         "wiki](https://github.com/KhronosGroup/glslang/wiki/"
-         "HLSL-FAQ#auto-mapped-binding-numbers)\n"},
+         "If you need to shift the inferred binding numbers for all sets, use 'all' as <space>.",
+         "-fvk-<vulkan-shift>-shift",
+         kVulkanBindShiftLinks,
+         SLANG_COUNT_OF(kVulkanBindShiftLinks)},
         {OptionKind::VulkanBindGlobals,
          "-fvk-bind-globals",
          "-fvk-bind-globals <N> <descriptor-set>",
          "Places the $Globals cbuffer at descriptor set <descriptor-set> and binding <N>.\n"
-         "It lets you specify the descriptor for the source at a certain register.\n"
-         "* [DXC "
-         "description](https://github.com/Microsoft/DirectXShaderCompiler/blob/main/docs/"
-         "SPIR-V.rst#implicit-binding-number-assignment)\n"},
+         "It lets you specify the descriptor for the source at a certain register.",
+         nullptr,
+         kVulkanBindGlobalsLinks,
+         SLANG_COUNT_OF(kVulkanBindGlobalsLinks)},
         {OptionKind::VulkanInvertY,
          "-fvk-invert-y",
          nullptr,
@@ -708,10 +772,43 @@ void initCommandOptions(CommandOptions& options)
          "-bindless-space-index",
          "-bindless-space-index <index>",
          "Specify the space index for the system defined global bindless resource array."},
+        {OptionKind::SPIRVResourceHeapStride,
+         "-spirv-resource-heap-stride",
+         "-spirv-resource-heap-stride <stride>",
+         "Specify the byte stride for the resource descriptor heap when generating SPIRV with "
+         "spvDescriptorHeapEXT. Defaults to 0, which will use OpConstantSizeOfEXT(ResourceType)."},
+        {OptionKind::SPIRVSamplerHeapStride,
+         "-spirv-sampler-heap-stride",
+         "-spirv-sampler-heap-stride <stride>",
+         "Specify the byte stride for the sampler descriptor heap when generating SPIRV with "
+         "spvDescriptorHeapEXT. Defaults to 0, which will use OpConstantSizeOfEXT(OpTypeSampler)."},
         {OptionKind::EmitSeparateDebug,
          "-separate-debug-info",
          nullptr,
-         "Emit debug data to a separate file, and strip it from the main output file."}};
+         "Emit debug data to a separate file, and strip it from the main output file."},
+        {OptionKind::EmitCPUViaCPP,
+         "-emit-cpu-via-cpp",
+         nullptr,
+         "Generate CPU targets using C++ (default)"},
+        {OptionKind::EmitCPUViaLLVM,
+         "-emit-cpu-via-llvm",
+         nullptr,
+         "Generate CPU targets using LLVM"},
+        {OptionKind::LLVMTargetTriple,
+         "-llvm-target-triple",
+         "-llvm-target-triple <target triple>",
+         "Sets the target triple for the LLVM target, enabling cross "
+         "compilation. The default value is the host platform."},
+        {OptionKind::LLVMCPU,
+         "-llvm-cpu",
+         "-llvm-cpu <cpu name>",
+         "Sets the target CPU for the LLVM target, enabling the extensions and "
+         "features of that CPU. The default value is \"generic\"."},
+        {OptionKind::LLVMFeatures,
+         "-llvm-features",
+         "-llvm-features <a1,+enable,-disable,...>",
+         "Sets a comma-separates list of architecture-specific features for the LLVM targets."},
+    };
 
     _addOptions(makeConstArrayView(targetOpts), options);
 
@@ -736,7 +833,8 @@ void initCommandOptions(CommandOptions& options)
             "-<compiler>-path <path>",
             "Specify path to a downstream <compiler> "
             "executable or library.\n",
-            UserValue(OptionKind::CompilerPath));
+            UserValue(OptionKind::CompilerPath),
+            "-<compiler>-path");
     }
 
     const Option downstreamOpts[] = {
@@ -811,12 +909,12 @@ void initCommandOptions(CommandOptions& options)
         {OptionKind::DumpIntermediatePrefix,
          "-dump-intermediate-prefix",
          "-dump-intermediate-prefix <prefix>",
-         "File name prefix for -dump-intermediates outputs, default is 'slang-dump-'"},
+         "File name prefix for -dump-intermediates outputs, default is no prefix"},
         {OptionKind::DumpIntermediates,
          "-dump-intermediates",
          nullptr,
          "Dump intermediate outputs for debugging."},
-        {OptionKind::DumpIr, "-dump-ir", nullptr, "Dump the IR for debugging."},
+        {OptionKind::DumpIr, "-dump-ir", nullptr, "Dump the IR after every pass for debugging."},
         {OptionKind::DumpIrIds,
          "-dump-ir-ids",
          nullptr,
@@ -838,7 +936,22 @@ void initCommandOptions(CommandOptions& options)
          nullptr,
          "[REMOVED] Serialize the IR between front-end and back-end."},
         {OptionKind::SkipCodeGen, "-skip-codegen", nullptr, "Skip the code generation phase."},
-        {OptionKind::ValidateIr, "-validate-ir", nullptr, "Validate the IR between the phases."},
+        {OptionKind::ValidateIr,
+         "-validate-ir",
+         nullptr,
+         "Validate the IR after select intermediate passes."},
+        {OptionKind::ValidateIRDetailed,
+         "-validate-ir-detailed",
+         nullptr,
+         "Perform debug validation on IR after each intermediate pass."},
+        {OptionKind::DumpIRBefore,
+         "-dump-ir-before",
+         "-dump-ir-before <pass-names>",
+         "Dump IR before specified pass, may be specified more than once"},
+        {OptionKind::DumpIRAfter,
+         "-dump-ir-after",
+         "-dump-ir-after <pass-names>",
+         "Dump IR after specified pass, may be specified more than once"},
         {OptionKind::VerbosePaths,
          "-verbose-paths",
          nullptr,
@@ -848,7 +961,15 @@ void initCommandOptions(CommandOptions& options)
          "-verify-debug-serial-ir",
          nullptr,
          "Verify IR in the front-end."},
-        {OptionKind::DumpModule, "-dump-module", nullptr, "Disassemble and print the module IR."}};
+        {OptionKind::DumpModule, "-dump-module", nullptr, "Disassemble and print the module IR."},
+        {OptionKind::GetModuleInfo,
+         "-get-module-info",
+         nullptr,
+         "Print the name and version of a serialized IR Module"},
+        {OptionKind::GetSupportedModuleVersions,
+         "-get-supported-module-versions",
+         nullptr,
+         "Print the minimum and maximum module versions this compiler supports"}};
     _addOptions(makeConstArrayView(debuggingOpts), options);
 
     /* !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! Experimental !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! */
@@ -894,6 +1015,22 @@ void initCommandOptions(CommandOptions& options)
          "-embed-downstream-ir",
          nullptr,
          "Embed downstream IR into emitted slang IR"},
+        {OptionKind::ExperimentalFeature,
+         "-experimental-feature",
+         nullptr,
+         "Enable experimental features (loading builtin neural module)"},
+        {OptionKind::EnableRichDiagnostics,
+         "-enable-experimental-rich-diagnostics",
+         nullptr,
+         "Enable experimental rich diagnostics with enhanced formatting and details"},
+        {OptionKind::EnableMachineReadableDiagnostics,
+         "-enable-machine-readable-diagnostics",
+         nullptr,
+         "Enable machine-readable diagnostic output in tab-separated format"},
+        {OptionKind::DiagnosticColor,
+         "-diagnostic-color",
+         "-diagnostic-color <always|never|auto>",
+         "Control colored diagnostic output (auto uses color if stderr is a tty)"},
     };
     _addOptions(makeConstArrayView(experimentalOpts), options);
 
@@ -945,6 +1082,10 @@ void initCommandOptions(CommandOptions& options)
          "-loop-inversion",
          nullptr,
          "Enable loop inversion in the code-gen optimization. Default is off"},
+        {OptionKind::GenerateWholeProgram,
+         "-whole-program",
+         nullptr,
+         "Generate code for all entry points in a single output (library mode)."},
     };
     _addOptions(makeConstArrayView(internalOpts), options);
 
@@ -1167,6 +1308,8 @@ struct OptionsParser
 
     SlangResult _expectValue(ValueCategory valueCategory, CommandOptions::UserValue& outValue);
     SlangResult _expectInt(const CommandLineArg& arg, Int& outInt);
+    SlangResult _expectUInt(const CommandLineArg& arg, Int& outInt);
+
 
     template<typename T>
     SlangResult _expectValue(T& ioValue)
@@ -1305,11 +1448,14 @@ void OptionsParser::addInputForeignShaderPath(
     };
 
     static const Entry entries[] = {
+        {".vert", Profile::GLSL_Vertex},
         {".frag", Profile::GLSL_Fragment},
         {".geom", Profile::GLSL_Geometry},
         {".tesc", Profile::GLSL_TessControl},
         {".tese", Profile::GLSL_TessEval},
-        {".comp", Profile::GLSL_Compute}};
+        {".comp", Profile::GLSL_Compute},
+        {".mesh", Profile::GLSL_Mesh},
+        {".task", Profile::GLSL_Task}};
 
     for (Index i = 0; i < SLANG_COUNT_OF(entries); ++i)
     {
@@ -1402,10 +1548,7 @@ SlangResult OptionsParser::addInputPath(char const* inPath, SourceLanguage langO
     }
     if (sourceLanguage == SLANG_SOURCE_LANGUAGE_UNKNOWN)
     {
-        m_requestImpl->getSink()->diagnose(
-            SourceLoc(),
-            Diagnostics::cannotDeduceSourceLanguage,
-            inPath);
+        m_requestImpl->getSink()->diagnose(Diagnostics::CannotDeduceSourceLanguage{.path = inPath});
         return SLANG_FAIL;
     }
 
@@ -1693,7 +1836,7 @@ void OptionsParser::_appendMinimalUsage(StringBuilder& out)
 
 SlangResult OptionsParser::_getValue(
     ValueCategory valueCategory,
-    const CommandLineArg& arg,
+    [[maybe_unused]] const CommandLineArg& arg,
     const UnownedStringSlice& name,
     CommandOptions::UserValue& outValue)
 {
@@ -1715,7 +1858,7 @@ SlangResult OptionsParser::_getValue(
         StringBuilder buf;
         StringUtil::join(names.getBuffer(), names.getCount(), toSlice(", "), buf);
 
-        m_sink->diagnose(arg.loc, Diagnostics::unknownCommandLineValue, buf);
+        m_sink->diagnose(Diagnostics::UnknownCommandLineValue{.validValues = buf});
         return SLANG_FAIL;
     }
 
@@ -1733,7 +1876,7 @@ SlangResult OptionsParser::_getValue(
 
 SlangResult OptionsParser::_getValue(
     const ConstArrayView<ValueCategory>& valueCategories,
-    const CommandLineArg& arg,
+    [[maybe_unused]] const CommandLineArg& arg,
     const UnownedStringSlice& name,
     ValueCategory& outCat,
     CommandOptions::UserValue& outValue)
@@ -1769,7 +1912,7 @@ SlangResult OptionsParser::_getValue(
     StringBuilder buf;
     StringUtil::join(names.getBuffer(), names.getCount(), toSlice(", "), buf);
 
-    m_sink->diagnose(arg.loc, Diagnostics::unknownCommandLineValue, buf);
+    m_sink->diagnose(Diagnostics::UnknownCommandLineValue{.validValues = buf});
     return SLANG_FAIL;
 }
 
@@ -1792,7 +1935,25 @@ SlangResult OptionsParser::_expectInt(const CommandLineArg& initArg, Int& outInt
 
     if (SLANG_FAILED(StringUtil::parseInt(arg.value.getUnownedSlice(), outInt)))
     {
-        m_sink->diagnose(arg.loc, Diagnostics::expectingAnInteger);
+        m_sink->diagnose(Diagnostics::ExpectingAnInteger{
+            .value = initArg.value,
+            .location = arg.loc,
+        });
+        return SLANG_FAIL;
+    }
+    return SLANG_OK;
+}
+
+SlangResult OptionsParser::_expectUInt(const CommandLineArg& initArg, Int& outInt)
+{
+    SLANG_RETURN_ON_FAIL(_expectInt(initArg, outInt));
+    if (outInt < 0)
+    {
+        m_sink->diagnose(Diagnostics::ExpectingAUnsignedInteger{
+            .value = initArg.value,
+            .parsedValue = outInt,
+            .location = initArg.loc,
+        });
         return SLANG_FAIL;
     }
     return SLANG_OK;
@@ -1804,11 +1965,12 @@ SlangResult createArtifactFromReferencedModule(
     DiagnosticSink* sink,
     IArtifact** outArtifact)
 {
+    SLANG_UNUSED(loc);
     auto desc = ArtifactDescUtil::getDescFromPath(path.getUnownedSlice());
 
     if (desc.kind == ArtifactKind::Unknown)
     {
-        sink->diagnose(loc, Diagnostics::unknownLibraryKind, Path::getPathExt(path));
+        sink->diagnose(Diagnostics::UnknownLibraryKind{.kind = Path::getPathExt(path)});
         return SLANG_FAIL;
     }
 
@@ -1826,7 +1988,7 @@ SlangResult createArtifactFromReferencedModule(
 
     if (!ArtifactDescUtil::isLinkable(desc))
     {
-        sink->diagnose(loc, Diagnostics::kindNotLinkable, Path::getPathExt(path));
+        sink->diagnose(Diagnostics::KindNotLinkable{.kind = Path::getPathExt(path)});
         return SLANG_FAIL;
     }
 
@@ -1857,7 +2019,7 @@ SlangResult createArtifactFromReferencedModule(
             nullptr);
         if (!fileRep->exists())
         {
-            sink->diagnose(loc, Diagnostics::libraryDoesNotExist, path);
+            sink->diagnose(Diagnostics::LibraryDoesNotExist{.path = path});
             return SLANG_FAIL;
         }
     }
@@ -1922,7 +2084,8 @@ SlangResult OptionsParser::_parseReproFileSystem(const CommandLineArg& arg)
         const Result res = ReproUtil::loadState(reproName.value, m_sink, buffer);
         if (SLANG_FAILED(res))
         {
-            m_sink->diagnose(reproName.loc, Diagnostics::unableToReadFile, reproName.value);
+            m_sink->diagnose(
+                Diagnostics::UnableToReadFile{.path = reproName.value, .location = reproName.loc});
             return res;
         }
     }
@@ -1972,11 +2135,17 @@ SlangResult OptionsParser::_parseHelp(const CommandLineArg& arg)
     {
         auto catArg = m_reader.getArgAndAdvance();
 
-        categoryIndex =
-            m_cmdOptions->findCategoryByCaseInsensitiveName(catArg.value.getUnownedSlice());
+        categoryIndex = m_cmdOptions->findCategoryByName(catArg.value.getUnownedSlice());
+
         if (categoryIndex < 0)
         {
-            m_sink->diagnose(catArg.loc, Diagnostics::unknownHelpCategory);
+            categoryIndex =
+                m_cmdOptions->findCategoryByCaseInsensitiveName(catArg.value.getUnownedSlice());
+        }
+
+        if (categoryIndex < 0)
+        {
+            m_sink->diagnose(Diagnostics::UnknownHelpCategory{});
             return SLANG_FAIL;
         }
     }
@@ -2018,7 +2187,9 @@ SlangResult OptionsParser::_parseHelp(const CommandLineArg& arg)
         writer->appendDescriptionForCategory(m_cmdOptions, categoryIndex);
     }
 
-    m_sink->diagnoseRaw(Severity::Note, buf.getBuffer());
+    // Write help text to stdout
+    FileWriter stdoutWriter(stdout, WriterFlag::IsUnowned);
+    stdoutWriter.write(buf.getBuffer(), buf.getLength());
 
     return SLANG_OK;
 }
@@ -2032,7 +2203,8 @@ SlangResult OptionsParser::_parseLoadRepro(const CommandLineArg& arg)
 
     if (SLANG_FAILED(_loadRepro(reproName.value, m_sink, m_requestImpl)))
     {
-        m_sink->diagnose(reproName.loc, Diagnostics::unableToReadFile, reproName.value);
+        m_sink->diagnose(
+            Diagnostics::UnableToReadFile{.path = reproName.value, .location = reproName.loc});
         return SLANG_FAIL;
     }
 
@@ -2103,7 +2275,8 @@ SlangResult OptionsParser::_parseProfile(const CommandLineArg& arg)
     SlangProfileID profileID = SlangProfileID(Slang::Profile::lookUp(profileName).raw);
     if (profileID == SLANG_PROFILE_UNKNOWN)
     {
-        m_sink->diagnose(operand.loc, Diagnostics::unknownProfile, profileName);
+        m_sink->diagnose(
+            Diagnostics::UnknownProfile{.profile = profileName, .location = operand.loc});
         return SLANG_FAIL;
     }
     else
@@ -2128,7 +2301,8 @@ SlangResult OptionsParser::_parseProfile(const CommandLineArg& arg)
         CapabilityName atom = findCapabilityName(atomName);
         if (atom == CapabilityName::Invalid)
         {
-            m_sink->diagnose(operand.loc, Diagnostics::unknownProfile, atomName);
+            m_sink->diagnose(
+                Diagnostics::UnknownProfile{.profile = atomName, .location = operand.loc});
             return SLANG_FAIL;
         }
 
@@ -2182,7 +2356,8 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
 
         if (optionIndex < 0)
         {
-            m_sink->diagnose(arg.loc, Diagnostics::unknownCommandLineOption, argValue);
+            m_sink->diagnose(
+                Diagnostics::UnknownCommandLineOption{.option = argValue, .location = arg.loc});
             _outputMinimalUsage();
             return SLANG_FAIL;
         }
@@ -2202,6 +2377,7 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
         case OptionKind::ReportDownstreamTime:
         case OptionKind::ReportPerfBenchmark:
         case OptionKind::ReportCheckpointIntermediates:
+        case OptionKind::ReportDynamicDispatchSites:
         case OptionKind::SkipSPIRVValidation:
         case OptionKind::DisableSpecialization:
         case OptionKind::DisableDynamicDispatch:
@@ -2209,6 +2385,7 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
         case OptionKind::SkipCodeGen:
         case OptionKind::ParameterBlocksUseRegisterSpaces:
         case OptionKind::ValidateIr:
+        case OptionKind::ValidateIRDetailed:
         case OptionKind::DumpIr:
         case OptionKind::VulkanInvertY:
         case OptionKind::VulkanUseDxPositionW:
@@ -2231,14 +2408,67 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
         case OptionKind::LoopInversion:
         case OptionKind::UnscopedEnum:
         case OptionKind::PreserveParameters:
+        case OptionKind::UseMSVCStyleBitfieldPacking:
+        case OptionKind::ExperimentalFeature:
             linkage->m_optionSet.set(optionKind, true);
             break;
+        case OptionKind::EnableRichDiagnostics:
+            linkage->m_optionSet.set(optionKind, true);
+            // Update the sink and all ancestor sinks so diagnostics emitted during option
+            // parsing are properly formatted
+            for (DiagnosticSink* sink = m_sink; sink; sink = sink->getParentSink())
+                sink->setFlag(DiagnosticSink::Flag::AlwaysGenerateRichDiagnostics);
+            break;
+        case OptionKind::ReportDetailedPerfBenchmark:
+            linkage->m_optionSet.set(optionKind, true);
+            // -report-detailed-perf-benchmark implies -report-perf-benchmark
+            linkage->m_optionSet.set(OptionKind::ReportPerfBenchmark, true);
+            break;
+        case OptionKind::EnableMachineReadableDiagnostics:
+            linkage->m_optionSet.set(optionKind, true);
+            // -enable-machine-readable-diagnostics implies -enable-experimental-rich-diagnostics
+            linkage->m_optionSet.set(OptionKind::EnableRichDiagnostics, true);
+            // Update the sink and all ancestor sinks so diagnostics emitted during option
+            // parsing are properly formatted
+            for (DiagnosticSink* sink = m_sink; sink; sink = sink->getParentSink())
+            {
+                sink->setFlag(DiagnosticSink::Flag::AlwaysGenerateRichDiagnostics);
+                sink->setFlag(DiagnosticSink::Flag::MachineReadableDiagnostics);
+            }
+            break;
+        case OptionKind::DiagnosticColor:
+            {
+                CommandLineArg colorArg;
+                SLANG_RETURN_ON_FAIL(m_reader.expectArg(colorArg));
+                SlangDiagnosticColor colorValue = SLANG_DIAGNOSTIC_COLOR_AUTO;
+                if (colorArg.value == "always")
+                    colorValue = SLANG_DIAGNOSTIC_COLOR_ALWAYS;
+                else if (colorArg.value == "never")
+                    colorValue = SLANG_DIAGNOSTIC_COLOR_NEVER;
+                else if (colorArg.value == "auto")
+                    colorValue = SLANG_DIAGNOSTIC_COLOR_AUTO;
+                else
+                {
+                    m_sink->diagnose(
+                        Diagnostics::UnknownCommandLineValue{.validValues = "always, never, auto"});
+                    return SLANG_FAIL;
+                }
+                linkage->m_optionSet.set(optionKind, (int)colorValue);
+                // Update the sink and all ancestor sinks so colors work correctly
+                for (DiagnosticSink* sink = m_sink; sink; sink = sink->getParentSink())
+                    sink->setDiagnosticColorMode(colorValue);
+                break;
+            }
         case OptionKind::MatrixLayoutRow:
         case OptionKind::MatrixLayoutColumn:
             linkage->m_optionSet.setMatrixLayoutMode(
                 (optionKind == OptionKind::MatrixLayoutRow)
                     ? MatrixLayoutMode::kMatrixLayoutMode_RowMajor
                     : MatrixLayoutMode::kMatrixLayoutMode_ColumnMajor);
+            break;
+        case OptionKind::ZeroInitialize:
+            // Zero-initialize is now enabled by default, but accept the option for compatibility
+            linkage->m_optionSet.set(optionKind, true);
             break;
         case OptionKind::NoCodeGen:
             linkage->m_optionSet.set(OptionKind::SkipCodeGen, true);
@@ -2254,11 +2484,6 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
                 SLANG_RETURN_ON_FAIL(File::readAllBytes(fileName.value, contents));
                 SLANG_RETURN_ON_FAIL(
                     m_session->loadCoreModule(contents.getData(), contents.getSizeInBytes()));
-
-                // Ensure that the linkage's AST builder is up-to-date.
-                linkage->getASTBuilder()->m_cachedNodes =
-                    asInternal(m_session)->getGlobalASTBuilder()->m_cachedNodes;
-
                 break;
             }
         case OptionKind::CompileCoreModule:
@@ -2353,9 +2578,7 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
                     if (SLANG_FAILED(res))
                     {
                         m_sink->diagnose(
-                            reproName.loc,
-                            Diagnostics::unableExtractReproToDirectory,
-                            reproName.value);
+                            Diagnostics::UnableToExtractReproToDirectory{.path = reproName.value});
                         return res;
                     }
                 }
@@ -2367,6 +2590,22 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
                 SLANG_RETURN_ON_FAIL(m_reader.expectArg(moduleName));
 
                 m_compileRequest->setDefaultModuleName(moduleName.value.getBuffer());
+                break;
+            }
+        case OptionKind::DumpIRBefore:
+            {
+                CommandLineArg passNames;
+                SLANG_RETURN_ON_FAIL(m_reader.expectArg(passNames));
+
+                linkage->m_optionSet.add(CompilerOptionName::DumpIRBefore, passNames.value);
+                break;
+            }
+        case OptionKind::DumpIRAfter:
+            {
+                CommandLineArg passNames;
+                SLANG_RETURN_ON_FAIL(m_reader.expectArg(passNames));
+
+                linkage->m_optionSet.add(CompilerOptionName::DumpIRAfter, passNames.value);
                 break;
             }
         case OptionKind::LoadRepro:
@@ -2489,10 +2728,9 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
 
                 if (format == CodeGenTarget::Unknown)
                 {
-                    m_sink->diagnose(
-                        name.loc,
-                        Diagnostics::unknownCodeGenerationTarget,
-                        name.value);
+                    m_sink->diagnose(Diagnostics::UnknownCodeGenerationTarget{
+                        .target = name.value,
+                        .location = name.loc});
                     return SLANG_FAIL;
                 }
 
@@ -2576,7 +2814,9 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
                     CapabilityName atom = findCapabilityName(atomName);
                     if (atom == CapabilityName::Invalid)
                     {
-                        m_sink->diagnose(operand.loc, Diagnostics::unknownProfile, atomName);
+                        m_sink->diagnose(Diagnostics::UnknownProfile{
+                            .profile = atomName,
+                            .location = operand.loc});
                         return SLANG_FAIL;
                     }
 
@@ -2593,7 +2833,9 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
                     TypeTextUtil::findLanguageVersion(name.value.getUnownedSlice());
                 if (stdRevision == SLANG_LANGUAGE_VERSION_UNKNOWN)
                 {
-                    m_sink->diagnose(name.loc, Diagnostics::unknownLanguageVersion, name.value);
+                    m_sink->diagnose(Diagnostics::UnknownLanguageVersion{
+                        .version = name.value,
+                        .location = name.loc});
                     return SLANG_FAIL;
                 }
                 else
@@ -2610,7 +2852,8 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
                 Stage stage = findStageByName(name.value);
                 if (stage == Stage::Unknown)
                 {
-                    m_sink->diagnose(name.loc, Diagnostics::unknownStage, name.value);
+                    m_sink->diagnose(
+                        Diagnostics::UnknownStage{.stageName = name.value, .location = name.loc});
                     return SLANG_FAIL;
                 }
                 else
@@ -2627,6 +2870,16 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
         case OptionKind::ForceDXLayout:
             {
                 getCurrentTarget()->optionSet.add(CompilerOptionName::ForceDXLayout, true);
+                break;
+            }
+        case OptionKind::ForceCLayout:
+            {
+                getCurrentTarget()->optionSet.add(CompilerOptionName::ForceCLayout, true);
+                break;
+            }
+        case OptionKind::GenerateWholeProgram:
+            {
+                getCurrentTarget()->optionSet.add(CompilerOptionName::GenerateWholeProgram, true);
                 break;
             }
         case OptionKind::EnableEffectAnnotations:
@@ -2678,7 +2931,9 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
 
                 if (sourceLanguage == SourceLanguage::Unknown)
                 {
-                    m_sink->diagnose(name.loc, Diagnostics::unknownSourceLanguage, name.value);
+                    m_sink->diagnose(Diagnostics::UnknownSourceLanguage{
+                        .language = name.value,
+                        .location = name.loc});
                     return SLANG_FAIL;
                 }
                 else
@@ -2702,7 +2957,9 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
                 if (SLANG_FAILED(
                         TypeTextUtil::findPassThrough(name.value.getUnownedSlice(), passThrough)))
                 {
-                    m_sink->diagnose(name.loc, Diagnostics::unknownPassThroughTarget, name.value);
+                    m_sink->diagnose(Diagnostics::UnknownPassThroughTarget{
+                        .target = name.value,
+                        .location = name.loc});
                     return SLANG_FAIL;
                 }
 
@@ -2805,9 +3062,7 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
                 }
                 else
                 {
-                    m_sink->diagnose(
-                        dependencyPath.loc,
-                        Diagnostics::duplicateDependencyOutputPaths);
+                    m_sink->diagnose(Diagnostics::DuplicateDependencyOutputPaths{});
                     return SLANG_FAIL;
                 }
                 break;
@@ -2888,7 +3143,9 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
             break;
         case OptionKind::Version:
             {
-                m_sink->diagnoseRaw(Severity::Note, m_session->getBuildTagString());
+                StringBuilder versionStr;
+                versionStr << m_session->getBuildTagString() << "\n";
+                m_sink->diagnoseRaw(Severity::Note, versionStr.getUnownedSlice());
                 break;
             }
         case OptionKind::HelpStyle:
@@ -2936,10 +3193,9 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
                     TypeTextUtil::findSourceLanguage(sourceLanguageArg.value.getUnownedSlice());
                 if (sourceLanguage == SLANG_SOURCE_LANGUAGE_UNKNOWN)
                 {
-                    m_sink->diagnose(
-                        sourceLanguageArg.loc,
-                        Diagnostics::unknownSourceLanguage,
-                        sourceLanguageArg.value);
+                    m_sink->diagnose(Diagnostics::UnknownSourceLanguage{
+                        .language = sourceLanguageArg.value,
+                        .location = sourceLanguageArg.loc});
                     return SLANG_FAIL;
                 }
 
@@ -2948,20 +3204,17 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
                         compilerArg.value.getUnownedSlice(),
                         compiler)))
                 {
-                    m_sink->diagnose(
-                        compilerArg.loc,
-                        Diagnostics::unknownPassThroughTarget,
-                        compilerArg.value);
+                    m_sink->diagnose(Diagnostics::UnknownPassThroughTarget{
+                        .target = compilerArg.value,
+                        .location = compilerArg.loc});
                     return SLANG_FAIL;
                 }
 
                 if (SLANG_FAILED(m_session->setDefaultDownstreamCompiler(sourceLanguage, compiler)))
                 {
-                    m_sink->diagnose(
-                        arg.loc,
-                        Diagnostics::unableToSetDefaultDownstreamCompiler,
-                        compilerArg.value,
-                        sourceLanguageArg.value);
+                    m_sink->diagnose(Diagnostics::UnableToSetDefaultDownstreamCompiler{
+                        .language = sourceLanguageArg.value,
+                        .compiler = compilerArg.value});
                     return SLANG_FAIL;
                 }
                 break;
@@ -2987,10 +3240,9 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
                     }
                     else
                     {
-                        m_sink->diagnose(
-                            arg.loc,
-                            Diagnostics::unknownDownstreamCompiler,
-                            passThroughSlice);
+                        m_sink->diagnose(Diagnostics::UnknownDownstreamCompiler{
+                            .compiler = passThroughSlice,
+                            .location = arg.loc});
                         return SLANG_FAIL;
                     }
                 }
@@ -3025,7 +3277,7 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
                 if (!SourceEmbedUtil::isSupported(
                         (SlangSourceLanguage)m_requestImpl->m_sourceEmbedLanguage))
                 {
-                    m_sink->diagnose(arg.loc, Diagnostics::unhandledLanguageForSourceEmbedding);
+                    m_sink->diagnose(Diagnostics::UnhandledLanguageForSourceEmbedding{});
                     return SLANG_FAIL;
                 }
 
@@ -3037,10 +3289,12 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
                 break;
             }
         case OptionKind::BindlessSpaceIndex:
+        case OptionKind::SPIRVSamplerHeapStride:
+        case OptionKind::SPIRVResourceHeapStride:
             {
                 Int index = 0;
-                SLANG_RETURN_ON_FAIL(_expectInt(arg, index));
-                linkage->m_optionSet.add(OptionKind::BindlessSpaceIndex, (int)index);
+                SLANG_RETURN_ON_FAIL(_expectUInt(arg, index));
+                linkage->m_optionSet.add(optionKind, (int)index);
                 break;
             }
         case OptionKind::DumpModule:
@@ -3063,7 +3317,8 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
                         FileAccess::Read,
                         FileShare::None)))
                 {
-                    m_sink->diagnose(arg.loc, Diagnostics::cannotOpenFile, fileName.value);
+                    m_sink->diagnose(
+                        Diagnostics::CannotOpenFile{.path = fileName.value, .location = arg.loc});
                     return SLANG_FAIL;
                 }
 
@@ -3100,7 +3355,9 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
                     ComPtr<slang::IBlob> disassemblyBlob;
                     if (SLANG_FAILED(module->disassemble(disassemblyBlob.writeRef())))
                     {
-                        m_sink->diagnose(arg.loc, Diagnostics::cannotDisassemble, fileName.value);
+                        m_sink->diagnose(Diagnostics::CannotDisassemble{
+                            .target = fileName.value,
+                            .location = arg.loc});
                         return SLANG_FAIL;
                     }
                     else
@@ -3125,25 +3382,135 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
 
                 break;
             }
+        case OptionKind::GetModuleInfo:
+            {
+                CommandLineArg fileName;
+                SLANG_RETURN_ON_FAIL(m_reader.expectArg(fileName));
+                auto desc = slang::SessionDesc();
+                ComPtr<slang::ISession> session;
+                m_session->createSession(desc, session.writeRef());
+                ComPtr<slang::IBlob> diagnostics;
+
+                FileStream file;
+                if (SLANG_FAILED(file.init(
+                        fileName.value,
+                        FileMode::Open,
+                        FileAccess::Read,
+                        FileShare::None)))
+                {
+                    m_sink->diagnose(
+                        Diagnostics::CannotOpenFile{.path = fileName.value, .location = arg.loc});
+                    return SLANG_FAIL;
+                }
+
+                List<uint8_t> buffer;
+                file.seek(SeekOrigin::End, 0);
+                const Int64 size = file.getPosition();
+                buffer.setCount(size + 1);
+                file.seek(SeekOrigin::Start, 0);
+                SLANG_RETURN_ON_FAIL(file.readExactly(buffer.getBuffer(), (size_t)size));
+                buffer[size] = 0;
+                file.close();
+
+                ComPtr<slang::IModule> module;
+                // Load buffer as an IR blob
+                ComPtr<slang::IBlob> blob;
+                blob = RawBlob::create(buffer.getBuffer(), size);
+
+                const char* moduleName = nullptr;
+                const char* moduleCompilerVersion = nullptr;
+                SlangInt moduleVersion = ~0;
+                SLANG_RETURN_ON_FAIL(session->loadModuleInfoFromIRBlob(
+                    blob,
+                    moduleVersion,
+                    moduleCompilerVersion,
+                    moduleName));
+
+                char infoBuffer[512];
+                snprintf(
+                    infoBuffer,
+                    sizeof(infoBuffer),
+                    "Module Name: %s\n"
+                    "Module Version: %lld\n"
+                    "Compiler Version: %s\n",
+                    moduleName ? moduleName : "null",
+                    static_cast<long long>(moduleVersion),
+                    moduleCompilerVersion ? moduleCompilerVersion : "null");
+
+                m_sink->diagnoseRaw(Severity::Note, infoBuffer);
+
+                break;
+            }
+        case OptionKind::GetSupportedModuleVersions:
+            {
+                char infoBuffer[512];
+                snprintf(
+                    infoBuffer,
+                    sizeof(infoBuffer),
+                    "Minimum supported version: %lu\n"
+                    "Maximum supported version: %lu\n",
+                    (unsigned long)IRModule::k_minSupportedModuleVersion,
+                    (unsigned long)IRModule::k_maxSupportedModuleVersion);
+
+                m_sink->diagnoseRaw(Severity::Note, infoBuffer);
+
+                break;
+            }
         case OptionKind::EmitSeparateDebug:
             {
                 // This will emit a separate debug file, containing all debug info in
                 // a .dbg.spv file. The main output SPIRV will have all debug info stripped.
-                m_compileRequest->setDebugInfoLevel(SLANG_DEBUG_INFO_LEVEL_MAXIMAL);
                 linkage->m_optionSet.set(OptionKind::EmitSeparateDebug, true);
+                break;
+            }
+        case OptionKind::EmitCPUViaCPP:
+        case OptionKind::EmitCPUViaLLVM:
+            {
+                SlangEmitCPUMethod selectMethod = (optionKind == OptionKind::EmitCPUViaCPP)
+                                                      ? SLANG_EMIT_CPU_VIA_CPP
+                                                      : SLANG_EMIT_CPU_VIA_LLVM;
+
+                getCurrentTarget()->optionSet.set(OptionKind::EmitCPUMethod, selectMethod);
+            }
+            break;
+        case OptionKind::LLVMTargetTriple:
+            {
+                CommandLineArg targetTriple;
+                SLANG_RETURN_ON_FAIL(m_reader.expectArg(targetTriple));
+                linkage->m_optionSet.set(CompilerOptionName::LLVMTargetTriple, targetTriple.value);
+                break;
+            }
+        case OptionKind::LLVMCPU:
+            {
+                CommandLineArg cpuName;
+                SLANG_RETURN_ON_FAIL(m_reader.expectArg(cpuName));
+                linkage->m_optionSet.set(CompilerOptionName::LLVMCPU, cpuName.value);
+                break;
+            }
+        case OptionKind::LLVMFeatures:
+            {
+                CommandLineArg features;
+                SLANG_RETURN_ON_FAIL(m_reader.expectArg(features));
+                linkage->m_optionSet.set(CompilerOptionName::LLVMFeatures, features.value);
                 break;
             }
         default:
             {
                 // Hmmm, we looked up and produced a valid enum, but it wasn't handled in the
                 // switch...
-                m_sink->diagnose(arg.loc, Diagnostics::unknownCommandLineOption, argValue);
+                m_sink->diagnose(
+                    Diagnostics::UnknownCommandLineOption{.option = argValue, .location = arg.loc});
 
                 _outputMinimalUsage();
                 return SLANG_FAIL;
             }
         }
     }
+
+    // Apply diagnostic sink settings early so that any diagnostics emitted during
+    // option post-processing (e.g., entry point validation) use the correct settings
+    // such as rich diagnostics and machine-readable output.
+    applySettingsToDiagnosticSink(m_requestImpl->getSink(), m_sink, linkage->m_optionSet);
 
     if (m_compileCoreModule)
     {
@@ -3203,15 +3570,12 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
             {
                 if (m_rawEntryPoints.getCount() == 0)
                 {
-                    m_sink->diagnose(
-                        SourceLoc(),
-                        Diagnostics::stageSpecificationIgnoredBecauseNoEntryPoints);
+                    m_sink->diagnose(Diagnostics::StageSpecificationIgnoredBecauseNoEntryPoints{});
                 }
                 else
                 {
                     m_sink->diagnose(
-                        SourceLoc(),
-                        Diagnostics::stageSpecificationIgnoredBecauseBeforeAllEntryPoints);
+                        Diagnostics::StageSpecificationIgnoredBecauseBeforeAllEntryPoints{});
                 }
             }
         }
@@ -3244,9 +3608,7 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
             }
             if (anyEntryPointWithoutTranslationUnit)
             {
-                m_sink->diagnose(
-                    SourceLoc(),
-                    Diagnostics::entryPointsNeedToBeAssociatedWithTranslationUnits);
+                m_sink->diagnose(Diagnostics::EntryPointsNeedToBeAssociatedWithTranslationUnits{});
                 return SLANG_FAIL;
             }
         }
@@ -3287,17 +3649,13 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
             if (rawEntryPoint.conflictingStagesSet)
             {
                 m_sink->diagnose(
-                    SourceLoc(),
-                    Diagnostics::conflictingStagesForEntryPoint,
-                    rawEntryPoint.name);
+                    Diagnostics::ConflictingStagesForEntryPoint{.entryPoint = rawEntryPoint.name});
             }
             else if (rawEntryPoint.redundantStageSet)
             {
-                m_sink->diagnose(
-                    SourceLoc(),
-                    Diagnostics::sameStageSpecifiedMoreThanOnce,
-                    rawEntryPoint.stage,
-                    rawEntryPoint.name);
+                m_sink->diagnose(Diagnostics::SameStageSpecifiedMoreThanOnce{
+                    .stage = getStageName(rawEntryPoint.stage),
+                    .entryPoint = rawEntryPoint.name});
             }
             else if (rawEntryPoint.translationUnitIndex != -1)
             {
@@ -3311,12 +3669,10 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
                     rawEntryPoint.stage != Stage::Unknown &&
                     rawTranslationUnit.impliedStage != rawEntryPoint.stage)
                 {
-                    m_sink->diagnose(
-                        SourceLoc(),
-                        Diagnostics::explicitStageDoesntMatchImpliedStage,
-                        rawEntryPoint.name,
-                        rawEntryPoint.stage,
-                        rawTranslationUnit.impliedStage);
+                    m_sink->diagnose(Diagnostics::ExplicitStageDoesntMatchImpliedStage{
+                        .entryPoint = rawEntryPoint.name,
+                        .specifiedStage = getStageName(rawEntryPoint.stage),
+                        .impliedStage = getStageName(rawTranslationUnit.impliedStage)});
                 }
             }
         }
@@ -3332,10 +3688,8 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
             {
                 if (rawEntryPoint.stage == Stage::Unknown)
                 {
-                    m_sink->diagnose(
-                        SourceLoc(),
-                        Diagnostics::noStageSpecifiedInPassThroughMode,
-                        rawEntryPoint.name);
+                    m_sink->diagnose(Diagnostics::NoStageSpecifiedInPassThroughMode{
+                        .entryPoint = rawEntryPoint.name});
                 }
             }
         }
@@ -3419,7 +3773,8 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
 
                 if (mapFormatToTargetIndex.containsKey(format))
                 {
-                    m_sink->diagnose(SourceLoc(), Diagnostics::duplicateTargets, format);
+                    m_sink->diagnose(Diagnostics::DuplicateTargets{
+                        .target = TypeTextUtil::getCompileTargetName(SlangCompileTarget(format))});
                 }
                 else
                 {
@@ -3507,15 +3862,12 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
                     // so we didn't try to infer a target, or if the `-profile` option
                     // somehow didn't imply a target.
                     //
-                    m_sink->diagnose(
-                        SourceLoc(),
-                        Diagnostics::profileSpecificationIgnoredBecauseNoTargets);
+                    m_sink->diagnose(Diagnostics::ProfileSpecificationIgnoredBecauseNoTargets{});
                 }
                 else
                 {
                     m_sink->diagnose(
-                        SourceLoc(),
-                        Diagnostics::profileSpecificationIgnoredBecauseBeforeAllTargets);
+                        Diagnostics::ProfileSpecificationIgnoredBecauseBeforeAllTargets{});
                 }
             }
 
@@ -3523,13 +3875,11 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
             {
                 if (m_rawTargets.getCount() == 0)
                 {
-                    m_sink->diagnose(SourceLoc(), Diagnostics::targetFlagsIgnoredBecauseNoTargets);
+                    m_sink->diagnose(Diagnostics::TargetFlagsIgnoredBecauseNoTargets{});
                 }
                 else
                 {
-                    m_sink->diagnose(
-                        SourceLoc(),
-                        Diagnostics::targetFlagsIgnoredBecauseBeforeAllTargets);
+                    m_sink->diagnose(Diagnostics::TargetFlagsIgnoredBecauseBeforeAllTargets{});
                 }
             }
         }
@@ -3537,18 +3887,16 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
         {
             if (rawTarget.conflictingProfilesSet)
             {
-                m_sink->diagnose(
-                    SourceLoc(),
-                    Diagnostics::conflictingProfilesSpecifiedForTarget,
-                    rawTarget.format);
+                m_sink->diagnose(Diagnostics::ConflictingProfilesSpecifiedForTarget{
+                    .target =
+                        TypeTextUtil::getCompileTargetName(SlangCompileTarget(rawTarget.format))});
             }
             else if (rawTarget.redundantProfileSet)
             {
-                m_sink->diagnose(
-                    SourceLoc(),
-                    Diagnostics::sameProfileSpecifiedMoreThanOnce,
-                    rawTarget.optionSet.getProfileVersion(),
-                    rawTarget.format);
+                m_sink->diagnose(Diagnostics::SameProfileSpecifiedMoreThanOnce{
+                    .profile = Profile(rawTarget.optionSet.getProfileVersion()).getName(),
+                    .target =
+                        TypeTextUtil::getCompileTargetName(SlangCompileTarget(rawTarget.format))});
             }
         }
 
@@ -3593,6 +3941,11 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
                 m_compileRequest->setTargetForceDXLayout(targetID, true);
             }
 
+            if (rawTarget.optionSet.shouldUseCLayout())
+            {
+                m_compileRequest->setTargetForceCLayout(targetID, true);
+            }
+
             if (rawTarget.optionSet.getBoolOption(CompilerOptionName::GenerateWholeProgram))
             {
                 m_compileRequest->setTargetGenerateWholeProgram(targetID, true);
@@ -3635,6 +3988,7 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
             (m_rawTargets[0].format == CodeGenTarget::HostCPPSource ||
              m_rawTargets[0].format == CodeGenTarget::PyTorchCppBinding ||
              m_rawTargets[0].format == CodeGenTarget::CUDASource ||
+             m_rawTargets[0].format == CodeGenTarget::CUDAHeader ||
              m_rawTargets[0].format == CodeGenTarget::SPIRV ||
              m_rawTargets[0].format == CodeGenTarget::SPIRVAssembly ||
              m_rawTargets[0].format == CodeGenTarget::Metal ||
@@ -3673,9 +4027,7 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
                     // (it doesn't have a suffix like `.spv` that tells us what to write).
                     //
                     m_sink->diagnose(
-                        SourceLoc(),
-                        Diagnostics::cannotDeduceOutputFormatFromPath,
-                        rawOutput.path);
+                        Diagnostics::CannotDeduceOutputFormatFromPath{.path = rawOutput.path});
                 }
                 else if (mapFormatToTargetIndex.tryGetValue(rawOutput.impliedFormat, targetIndex))
                 {
@@ -3683,11 +4035,10 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
                 }
                 else
                 {
-                    m_sink->diagnose(
-                        SourceLoc(),
-                        Diagnostics::cannotMatchOutputFileToTarget,
-                        rawOutput.path,
-                        rawOutput.impliedFormat);
+                    m_sink->diagnose(Diagnostics::CannotMatchOutputFileToTarget{
+                        .path = rawOutput.path,
+                        .format = TypeTextUtil::getCompileTargetName(
+                            SlangCompileTarget(rawOutput.impliedFormat))});
                 }
             }
 
@@ -3706,8 +4057,10 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
                     switch (outputFormat)
                     {
                     case CodeGenTarget::CPPSource:
+                    case CodeGenTarget::CPPHeader:
                     case CodeGenTarget::PTX:
                     case CodeGenTarget::CUDASource:
+                    case CodeGenTarget::CUDAHeader:
 
                     case CodeGenTarget::HostHostCallable:
                     case CodeGenTarget::ShaderHostCallable:
@@ -3721,6 +4074,10 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
                     case CodeGenTarget::Metal:
                     case CodeGenTarget::WGSL:
                     case CodeGenTarget::HostVM:
+                    case CodeGenTarget::HostObjectCode:
+                    case CodeGenTarget::ShaderObjectCode:
+                    case CodeGenTarget::HostLLVMIR:
+                    case CodeGenTarget::ShaderLLVMIR:
                         rawOutput.isWholeProgram = true;
                         break;
                     case CodeGenTarget::SPIRV:
@@ -3739,10 +4096,8 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
                     default:
                         if (rawOutput.path.getLength() != 0)
                         {
-                            m_sink->diagnose(
-                                SourceLoc(),
-                                Diagnostics::cannotMatchOutputFileToEntryPoint,
-                                rawOutput.path);
+                            m_sink->diagnose(Diagnostics::CannotMatchOutputFileToEntryPoint{
+                                .path = rawOutput.path});
                         }
                         break;
                     }
@@ -3774,10 +4129,9 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
         {
             if (targetInfo->wholeTargetOutputPath != "")
             {
-                m_sink->diagnose(
-                    SourceLoc(),
-                    Diagnostics::duplicateOutputPathsForTarget,
-                    target->getTarget());
+                m_sink->diagnose(Diagnostics::DuplicateOutputPathsForTarget{
+                    .target = TypeTextUtil::getCompileTargetName(
+                        SlangCompileTarget(target->getTarget()))});
             }
             else
             {
@@ -3794,10 +4148,7 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
             Int entryPointID = entryPoint.entryPointID;
             if (entryPointID == -1)
             {
-                m_sink->diagnose(
-                    SourceLoc(),
-                    Diagnostics::entryPointFunctionNotFound,
-                    entryPoint.name);
+                m_sink->diagnose(Diagnostics::EntryPointFunctionNotFound{.name = entryPoint.name});
                 continue;
             }
             auto entryPointReq = m_requestImpl->getFrontEndReq()->getEntryPointReqs()[entryPointID];
@@ -3805,11 +4156,10 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
             // String outputPath;
             if (targetInfo->entryPointOutputPaths.containsKey(entryPointID))
             {
-                m_sink->diagnose(
-                    SourceLoc(),
-                    Diagnostics::duplicateOutputPathsForEntryPointAndTarget,
-                    entryPointReq->getName(),
-                    target->getTarget());
+                m_sink->diagnose(Diagnostics::DuplicateOutputPathsForEntryPointAndTarget{
+                    .entryPoint = entryPointReq->getName(),
+                    .target = TypeTextUtil::getCompileTargetName(
+                        SlangCompileTarget(target->getTarget()))});
             }
             else
             {
@@ -3841,6 +4191,36 @@ SlangResult OptionsParser::_parse(int argc, char const* const* argv)
     }
 
     applySettingsToDiagnosticSink(m_requestImpl->getSink(), m_sink, linkage->m_optionSet);
+
+    // Warn about separate debug info being used with unsupported targets
+    if (linkage->m_optionSet.getBoolOption(CompilerOptionName::EmitSeparateDebug))
+    {
+        // Check all targets to see if any use separate debug info with an unsupported target
+        for (const auto& rawTarget : m_rawTargets)
+        {
+            if (rawTarget.format != CodeGenTarget::SPIRV)
+            {
+                // Get the target name for the warning message
+                UnownedStringSlice targetName =
+                    TypeTextUtil::getCompileTargetName(asExternal(rawTarget.format));
+                m_sink->diagnose(
+                    Diagnostics::SeparateDebugInfoUnsupportedForTarget{.target = targetName});
+            }
+        }
+
+        // Also check the default target if no explicit targets were specified
+        if (m_rawTargets.getCount() == 0)
+        {
+            if (m_defaultTarget.format != CodeGenTarget::SPIRV)
+            {
+                // Get the target name for the warning message
+                UnownedStringSlice targetName =
+                    TypeTextUtil::getCompileTargetName(asExternal(m_defaultTarget.format));
+                m_sink->diagnose(
+                    Diagnostics::SeparateDebugInfoUnsupportedForTarget{.target = targetName});
+            }
+        }
+    }
 
     return (m_sink->getErrorCount() == 0) ? SLANG_OK : SLANG_FAIL;
 }
@@ -3888,6 +4268,9 @@ SlangResult OptionsParser::parse(
         // Leaving allows for diagnostics to be compatible with other Slang diagnostic parsing.
         // parseSink.resetFlag(DiagnosticSink::Flag::HumaneLoc);
         m_parseSink.setFlag(DiagnosticSink::Flag::SourceLocationLine);
+        // Copy color and unicode settings from the request sink
+        m_parseSink.setDiagnosticColorMode(requestSink->getDiagnosticColorMode());
+        m_parseSink.setEnableUnicode(requestSink->getEnableUnicode());
     }
 
     // All diagnostics will also be sent to requestSink

@@ -14,6 +14,8 @@ struct ManglingContext
     }
     ASTBuilder* astBuilder;
     StringBuilder sb;
+    Decl* targetDecl = nullptr; // The decl we are mangling name for.
+    bool isEmittingTarget = false;
 };
 
 void emitRaw(ManglingContext* context, char const* text)
@@ -191,6 +193,7 @@ void emitBaseType(ManglingContext* context, BaseType baseType)
     case BaseType::IntPtr:
         emitRaw(context, "ip");
         break;
+
     default:
         SLANG_UNEXPECTED("unimplemented case in base type mangling");
         break;
@@ -252,7 +255,7 @@ void emitType(ManglingContext* context, Type* type)
         auto n = funcType->getParamCount();
         emit(context, n);
         for (Index i = 0; i < n; ++i)
-            emitType(context, funcType->getParamType(i));
+            emitType(context, funcType->getParamTypeWithModeWrapper(i));
         emitType(context, funcType->getResultType());
         emitType(context, funcType->getErrorType());
     }
@@ -406,6 +409,30 @@ void emitVal(ManglingContext* context, Val* val)
 
 void emitQualifiedName(ManglingContext* context, DeclRef<Decl> declRef, bool includeModuleName)
 {
+    if (declRef.getDecl() == context->targetDecl)
+    {
+        if (!context->isEmittingTarget)
+        {
+            context->isEmittingTarget = true;
+        }
+        else
+        {
+            // We are already in the middle of mangling the target decl,
+            // so we must have run into a cycle.
+            //
+            // For example, this can happen when mangling a struct defined
+            // inline at a parameter-type locataion inside a function.
+            // During mangling that struct, we will mangle the parent function,
+            // but the mangled name of that parent function will contain
+            // parameter types, which means we will attempt to mangle the struct
+            // again.
+            //
+            // In this case we will just skip emitting for the current declRef
+            // to break the cycle.
+            return;
+        }
+    }
+
     bool ignoreName = false;
     if (!includeModuleName)
     {
@@ -643,27 +670,27 @@ void emitQualifiedName(ManglingContext* context, DeclRef<Decl> declRef, bool inc
             // parameter modifier makes big difference in the spirv code generation, for example
             // "out"/"inout" parameter will be passed by pointer. Therefore, we need to
             // distinguish them in the mangled name to avoid name collision.
-            ParameterDirection paramDirection = getParameterDirection(paramDeclRef.getDecl());
+            ParamPassingMode paramDirection = getParamPassingMode(paramDeclRef.getDecl());
             switch (paramDirection)
             {
-            case kParameterDirection_Ref:
+            case ParamPassingMode::Ref:
                 emitRaw(context, "r_");
                 break;
-            case kParameterDirection_ConstRef:
+            case ParamPassingMode::BorrowIn:
                 emitRaw(context, "c_");
                 break;
-            case kParameterDirection_Out:
+            case ParamPassingMode::Out:
                 emitRaw(context, "o_");
                 break;
-            case kParameterDirection_InOut:
+            case ParamPassingMode::BorrowInOut:
                 emitRaw(context, "io_");
                 break;
-            case kParameterDirection_In:
+            case ParamPassingMode::In:
                 emitRaw(context, "i_");
                 break;
             default:
                 StringBuilder errMsg;
-                errMsg << "Unknown parameter direction: " << paramDirection;
+                errMsg << "Unknown parameter direction: " << int(paramDirection);
                 SLANG_ABORT_COMPILATION(errMsg.toString().begin());
                 break;
             }
@@ -726,6 +753,7 @@ void mangleName(ManglingContext* context, DeclRef<Decl> declRef)
     // TODO: catch cases where the declaration should
     // forward to something else? E.g., what if we
     // are asked to mangle the name of a `typedef`?
+    context->targetDecl = declRef.getDecl();
 
     auto decl = declRef.getDecl();
     if (!decl)
@@ -786,6 +814,10 @@ void mangleName(ManglingContext* context, DeclRef<Decl> declRef)
         emitRaw(context, "BwdReq_");
         emitQualifiedName(context, bwdReq->originalRequirementDecl, true);
         return;
+    }
+    else if (as<AttributeDecl>(decl))
+    {
+        emitRaw(context, "A");
     }
     else
     {

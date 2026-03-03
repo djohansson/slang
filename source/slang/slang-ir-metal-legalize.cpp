@@ -7,6 +7,7 @@
 #include "slang-ir-specialize-address-space.h"
 #include "slang-ir-util.h"
 #include "slang-ir.h"
+#include "slang-rich-diagnostics.h"
 
 namespace Slang
 {
@@ -32,10 +33,18 @@ void legalizeImageStoreValue(IRBuilder& builder, IRImageStore* imageStore)
             }
         }
         elementType = valueVectorType->getElementType();
-        auto vectorValue = as<IRMakeVector>(originalValue);
-        for (UInt i = 0; i < vectorValue->getOperandCount(); i++)
+
+        // Extract components using IRElementExtract to handle any vector instruction type
+        if (auto originalElementCount = as<IRIntLit>(valueVectorType->getElementCount()))
         {
-            components.add(vectorValue->getOperand(i));
+            for (UInt i = 0; i < (UInt)originalElementCount->getValue(); i++)
+            {
+                auto elementExtract = builder.emitElementExtract(
+                    elementType,
+                    originalValue,
+                    builder.getIntValue(builder.getIntType(), i));
+                components.add(elementExtract);
+            }
         }
     }
     else
@@ -127,6 +136,16 @@ struct MetalAddressSpaceAssigner : InitialAddressSpaceAssigner
         case kIROp_RWStructuredBufferGetElementPtr:
             outAddressSpace = AddressSpace::Global;
             return true;
+        case kIROp_Load:
+            {
+                auto addrSpace = getAddressSpaceFromVarType(inst->getDataType());
+                if (addrSpace != AddressSpace::Generic)
+                {
+                    outAddressSpace = addrSpace;
+                    return true;
+                }
+            }
+            return false;
         default:
             return false;
         }
@@ -154,7 +173,7 @@ struct MetalAddressSpaceAssigner : InitialAddressSpaceAssigner
         {
             if (ptrType->hasAddressSpace())
                 return ptrType->getAddressSpace();
-            return AddressSpace::Global;
+            return AddressSpace::Generic;
         }
         return AddressSpace::Generic;
     }
@@ -181,7 +200,7 @@ struct MetalAddressSpaceAssigner : InitialAddressSpaceAssigner
     }
 };
 
-static void processInst(IRInst* inst, DiagnosticSink* sink)
+static void processInst(IRInst* inst, TargetProgram* targetProgram, DiagnosticSink* sink)
 {
     switch (inst->getOp())
     {
@@ -204,7 +223,10 @@ static void processInst(IRInst* inst, DiagnosticSink* sink)
     case kIROp_Less:
     case kIROp_Geq:
     case kIROp_Leq:
-        legalizeBinaryOp(inst, sink, CodeGenTarget::Metal);
+        legalizeBinaryOp(inst, sink, targetProgram);
+        break;
+    case kIROp_MeshOutputRef:
+        sink->diagnose(Diagnostics::AssignToRefNotSupported{.location = getDiagnosticPos(inst)});
         break;
     case kIROp_MetalCastToDepthTexture:
         {
@@ -220,12 +242,12 @@ static void processInst(IRInst* inst, DiagnosticSink* sink)
     default:
         for (auto child : inst->getModifiableChildren())
         {
-            processInst(child, sink);
+            processInst(child, targetProgram, sink);
         }
     }
 }
 
-void legalizeIRForMetal(IRModule* module, DiagnosticSink* sink)
+void legalizeIRForMetal(IRModule* module, TargetProgram* targetProgram, DiagnosticSink* sink)
 {
     List<EntryPointInfo> entryPoints;
     for (auto inst : module->getGlobalInsts())
@@ -245,10 +267,13 @@ void legalizeIRForMetal(IRModule* module, DiagnosticSink* sink)
 
     legalizeEntryPointVaryingParamsForMetal(module, sink, entryPoints);
 
+    processInst(module->getModuleInst(), targetProgram, sink);
+}
+
+void specializeAddressSpaceForMetal(IRModule* module)
+{
     MetalAddressSpaceAssigner metalAddressSpaceAssigner;
     specializeAddressSpace(module, &metalAddressSpaceAssigner);
-
-    processInst(module->getModuleInst(), sink);
 }
 
 } // namespace Slang

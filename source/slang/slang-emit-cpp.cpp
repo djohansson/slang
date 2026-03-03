@@ -100,12 +100,8 @@ static const char s_xyzwNames[] = "xyzw";
         return UnownedStringSlice("uint64_t");
     case kIROp_UIntPtrType:
         return UnownedStringSlice("uintptr_t");
-
-        // Not clear just yet how we should handle half... we want all processing as float
-        // probly, but when reading/writing to memory converting
     case kIROp_HalfType:
         return UnownedStringSlice("half");
-
     case kIROp_FloatType:
         return UnownedStringSlice("float");
     case kIROp_DoubleType:
@@ -240,12 +236,6 @@ SlangResult CPPSourceEmitter::calcTypeName(IRType* type, CodeGenTarget target, S
 {
     switch (type->getOp())
     {
-    case kIROp_HalfType:
-        {
-            // Special case half
-            out << getBuiltinTypeName(kIROp_FloatType);
-            return SLANG_OK;
-        }
     case kIROp_VectorType:
         {
             auto vecType = static_cast<IRVectorType*>(type);
@@ -305,8 +295,27 @@ SlangResult CPPSourceEmitter::calcTypeName(IRType* type, CodeGenTarget target, S
         }
     case kIROp_NativePtrType:
     case kIROp_PtrType:
-    case kIROp_ConstRefType:
+    case kIROp_BorrowInParamType:
         {
+            // Special note on `constref` types and why they are not emitted
+            // as a `const` pointer:
+            //
+            // We currently do not propegate/manage "constness" for locals.
+            // This is important since it means that we rely on opimization
+            // passes to remove all temporary pointer-variables created from
+            // our constref, otherwise we will generate invalid code like
+            // `T* var = const_ptr` or `T* var = &const_ptr->member`.
+            //
+            // If emitting `constref` fails due to this error, it is likely
+            // a missing compiler-optimization.
+            //
+            // Additionally, for C++/CUDA, downstream methods are required
+            // to be `const` if we want to use const pointers. This is currently
+            // not handled robustly.
+            //
+            // Due to these cascading issues, we do not emit const and instead
+            // emit as a regular pointer for the time being.
+
             auto elementType = (IRType*)type->getOperand(0);
             SLANG_RETURN_ON_FAIL(calcTypeName(elementType, target, out));
             out << "*";
@@ -480,8 +489,8 @@ void CPPSourceEmitter::useType(IRType* type)
             type = static_cast<IRPtrType*>(type)->getValueType();
             break;
         }
-    case kIROp_RefType:
-    case kIROp_ConstRefType:
+    case kIROp_RefParamType:
+    case kIROp_BorrowInParamType:
         {
             type = static_cast<IRPtrTypeBase*>(type)->getValueType();
             break;
@@ -549,8 +558,7 @@ void CPPSourceEmitter::_emitAccess(
     case 1:
         {
             // Vector, row count is biggest
-            const UnownedStringSlice* elemNames =
-                getVectorElementNames(dimension.elemType, dimension.rowCount);
+            const UnownedStringSlice* elemNames = getVectorElementNames(dimension.rowCount);
             writer->emit(".");
             const int index = (row > col) ? row : col;
             writer->emit(elemNames[index]);
@@ -559,8 +567,7 @@ void CPPSourceEmitter::_emitAccess(
     case 2:
         {
             // Vector cols biggest dimension
-            const UnownedStringSlice* elemNames =
-                getVectorElementNames(dimension.elemType, dimension.colCount);
+            const UnownedStringSlice* elemNames = getVectorElementNames(dimension.colCount);
             writer->emit(".");
             const int index = (row > col) ? row : col;
             writer->emit(elemNames[index]);
@@ -569,8 +576,7 @@ void CPPSourceEmitter::_emitAccess(
     case 3:
         {
             // Matrix
-            const UnownedStringSlice* elemNames =
-                getVectorElementNames(dimension.elemType, dimension.colCount);
+            const UnownedStringSlice* elemNames = getVectorElementNames(dimension.colCount);
 
             writer->emit(".rows[");
             writer->emit(row);
@@ -599,6 +605,7 @@ CPPSourceEmitter::CPPSourceEmitter(const Desc& desc)
 
 void CPPSourceEmitter::emitParamTypeImpl(IRType* type, String const& name)
 {
+    // For use the CPP-specific emitType implementation
     emitType(type, name);
 }
 
@@ -1052,6 +1059,27 @@ void CPPSourceEmitter::emitSimpleValueImpl(IRInst* inst)
     if (inst->getOp() == kIROp_FloatLit)
     {
         IRConstant* constantInst = static_cast<IRConstant*>(inst);
+        bool shouldExplicitTypeCast = false;
+
+        IRType* type = constantInst->getDataType();
+        if (type)
+        {
+            switch (type->getOp())
+            {
+            case kIROp_HalfType:
+            case kIROp_FloatE4M3Type:
+            case kIROp_FloatE5M2Type:
+            case kIROp_BFloat16Type:
+                shouldExplicitTypeCast = true;
+                break;
+            }
+        }
+        if (shouldExplicitTypeCast)
+        {
+            emitType(type);
+            m_writer->emit("(");
+        }
+
         switch (constantInst->getFloatKind())
         {
         case IRConstant::FloatKind::Nan:
@@ -1078,13 +1106,17 @@ void CPPSourceEmitter::emitSimpleValueImpl(IRInst* inst)
 
                 // If the literal is a float, then we need to add 'f' at end, as
                 // without literal suffix the value defaults to double.
-                IRType* type = constantInst->getDataType();
                 if (type && type->getOp() == kIROp_FloatType)
                 {
                     m_writer->emitChar('f');
                 }
                 break;
             }
+        }
+
+        if (shouldExplicitTypeCast)
+        {
+            m_writer->emit(")");
         }
     }
     else
@@ -1131,16 +1163,16 @@ void CPPSourceEmitter::_emitType(IRType* type, DeclaratorInfo* declarator)
             break;
         }
     case kIROp_PtrType:
-    case kIROp_InOutType:
-    case kIROp_OutType:
+    case kIROp_BorrowInOutParamType:
+    case kIROp_OutParamType:
         {
             auto ptrType = cast<IRPtrTypeBase>(type);
             PtrDeclaratorInfo ptrDeclarator(declarator);
             _emitType(ptrType->getValueType(), &ptrDeclarator);
         }
         break;
-    case kIROp_RefType:
-    case kIROp_ConstRefType:
+    case kIROp_RefParamType:
+    case kIROp_BorrowInParamType:
         {
             auto ptrType = cast<IRPtrTypeBase>(type);
             PtrDeclaratorInfo refDeclarator(declarator);
@@ -1152,16 +1184,7 @@ void CPPSourceEmitter::_emitType(IRType* type, DeclaratorInfo* declarator)
             auto arrayType = static_cast<IRArrayType*>(type);
             auto elementType = arrayType->getElementType();
             int elementCount = int(getIntVal(arrayType->getElementCount()));
-            auto nameHint = arrayType->findDecoration<IRNameHintDecoration>();
-            bool isCoopVec = nameHint && (nameHint->getName() == UnownedStringSlice("CoopVec"));
-            if (isCoopVec && isOptixCoopVec)
-            {
-                m_writer->emit("OptixCoopVec<");
-            }
-            else
-            {
-                m_writer->emit("FixedArray<");
-            }
+            m_writer->emit("FixedArray<");
             _emitType(elementType, nullptr);
             m_writer->emit(", ");
             m_writer->emit(elementCount);
@@ -1278,11 +1301,8 @@ void CPPSourceEmitter::emitLoopControlDecorationImpl(IRLoopControlDecoration* de
     }
 }
 
-const UnownedStringSlice* CPPSourceEmitter::getVectorElementNames(
-    BaseType baseType,
-    Index elemCount)
+const UnownedStringSlice* CPPSourceEmitter::getVectorElementNames(Index elemCount)
 {
-    SLANG_UNUSED(baseType);
     SLANG_UNUSED(elemCount);
 
     static const UnownedStringSlice elemNames[] = {
@@ -1298,11 +1318,7 @@ const UnownedStringSlice* CPPSourceEmitter::getVectorElementNames(
 const UnownedStringSlice* CPPSourceEmitter::getVectorElementNames(IRVectorType* vectorType)
 {
     Index elemCount = Index(getIntVal(vectorType->getElementCount()));
-
-    IRType* type = vectorType->getElementType()->getCanonicalType();
-    IRBasicType* basicType = as<IRBasicType>(type);
-    SLANG_ASSERT(basicType);
-    return getVectorElementNames(basicType->getBaseType(), elemCount);
+    return getVectorElementNames(elemCount);
 }
 
 bool CPPSourceEmitter::tryEmitInstStmtImpl(IRInst* inst)
@@ -1561,7 +1577,7 @@ bool CPPSourceEmitter::tryEmitInstExprImpl(IRInst* inst, const EmitOpInfo& inOut
             m_writer->emit("])");
             return true;
         }
-    case kIROp_swizzle:
+    case kIROp_Swizzle:
         {
             // For C++ we don't need to emit a swizzle function
             // For C we need a construction function
@@ -1677,7 +1693,7 @@ bool CPPSourceEmitter::tryEmitInstExprImpl(IRInst* inst, const EmitOpInfo& inOut
             // try doing automatically
             return false;
         }
-    case kIROp_LookupWitness:
+    case kIROp_LookupWitnessMethod:
         {
             emitInstExpr(inst->getOperand(0), inOuterPrec);
             m_writer->emit("->");
@@ -1697,7 +1713,7 @@ bool CPPSourceEmitter::tryEmitInstExprImpl(IRInst* inst, const EmitOpInfo& inOut
             m_writer->emit(")");
             return true;
         }
-    case kIROp_GetAddr:
+    case kIROp_GetAddress:
         {
             // Once we clean up the pointer emitting logic, we can
             // just use GetElementAddress instruction in place of
@@ -1809,7 +1825,7 @@ bool CPPSourceEmitter::tryEmitInstExprImpl(IRInst* inst, const EmitOpInfo& inOut
 
 void CPPSourceEmitter::emitPreModuleImpl()
 {
-    if (m_target == CodeGenTarget::CPPSource)
+    if (m_target == CodeGenTarget::CPPSource || m_target == CodeGenTarget::CPPHeader)
     {
         // TODO(JS): Previously this opened an anonymous scope for all generated functions
         // Unfortunately this is a problem if we are just emitting code that is externally available
@@ -1832,7 +1848,6 @@ void CPPSourceEmitter::emitPreModuleImpl()
     }
     Super::emitPreModuleImpl();
 }
-
 
 void CPPSourceEmitter::emitGlobalInstImpl(IRInst* inst)
 {
@@ -2262,7 +2277,7 @@ void CPPSourceEmitter::emitModuleImpl(IRModule* module, DiagnosticSink* sink)
     // Now that we can have any function available externally (not just entry points)
     // this doesn't work.
 
-    // if (m_target == CodeGenTarget::CPPSource)
+    // if (m_target == CodeGenTarget::CPPSource || m_target == CodeGenTarget::CPPHeader)
     //{
     //  Need to close the anonymous namespace when outputting for C++ kernel.
     // m_writer->emit("} // anonymous\n\n");

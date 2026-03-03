@@ -2,23 +2,56 @@
 
 #include "options.h"
 
+#include "../../source/compiler-core/slang-command-line-args.h"
 #include "../../source/core/slang-list.h"
 #include "../../source/core/slang-render-api-util.h"
 #include "../../source/core/slang-string-util.h"
+#include "../../source/core/slang-type-text-util.h"
 #include "../../source/core/slang-writer.h"
+#include "diagnostics.h"
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
-// #include "../../source/core/slang-downstream-compiler.h"
-
-#include "../../source/compiler-core/slang-command-line-args.h"
-#include "../../source/core/slang-type-text-util.h"
-#include "diagnostics.h"
 
 namespace renderer_test
 {
 using namespace Slang;
+
+// Helper function to check if a feature name is valid
+static bool isValidFeatureName(
+    const UnownedStringSlice& featureName,
+    DiagnosticSink* sink,
+    SourceLoc loc)
+{
+    // WAR: Accept cooperative-matrix-2 sub-features until RHI backend supports them
+    // These features will be gracefully skipped at runtime if hardware doesn't support them
+    if (featureName.startsWith("cooperative-matrix-"))
+    {
+        if (sink)
+        {
+            sink->diagnoseRaw(
+                Severity::Warning,
+                "Using cooperative-matrix-2 feature that is not yet fully supported "
+                "in RHI backend. "
+                "Test will be skipped if hardware doesn't support it.");
+        }
+        return true;
+    }
+#define SLANG_RHI_FEATURES_X(id, name) name,
+    static const char* kValidFeatureNames[] = {SLANG_RHI_FEATURES(SLANG_RHI_FEATURES_X)};
+#undef SLANG_RHI_FEATURES_X
+
+    static const int kFeatureCount = sizeof(kValidFeatureNames) / sizeof(kValidFeatureNames[0]);
+
+    for (int i = 0; i < kFeatureCount; i++)
+    {
+        if (featureName == UnownedStringSlice(kValidFeatureNames[i]))
+        {
+            return true;
+        }
+    }
+    return false;
+}
 
 static rhi::DeviceType _toRenderType(Slang::RenderApiType apiType)
 {
@@ -34,6 +67,7 @@ static rhi::DeviceType _toRenderType(Slang::RenderApiType apiType)
     case RenderApiType::Metal:
         return rhi::DeviceType::Metal;
     case RenderApiType::CPU:
+    case RenderApiType::LLVM:
         return rhi::DeviceType::CPU;
     case RenderApiType::CUDA:
         return rhi::DeviceType::CUDA;
@@ -111,14 +145,23 @@ static rhi::DeviceType _toRenderType(Slang::RenderApiType apiType)
         }
         else if (argValue == "-render-features" || argValue == "-render-feature")
         {
-            String features;
-            SLANG_RETURN_ON_FAIL(reader.expectArg(features));
+            CommandLineArg featuresArg;
+            SLANG_RETURN_ON_FAIL(reader.expectArg(featuresArg));
 
             List<UnownedStringSlice> values;
-            StringUtil::split(features.getUnownedSlice(), ',', values);
+            StringUtil::split(featuresArg.value.getUnownedSlice(), ',', values);
 
             for (const auto& value : values)
             {
+                // Validate that the feature name is recognized
+                if (!isValidFeatureName(value, &sink, featuresArg.loc))
+                {
+                    sink.diagnose(
+                        featuresArg.loc,
+                        RenderTestDiagnostics::invalidRenderFeature,
+                        value);
+                    return SLANG_FAIL;
+                }
                 outOptions.renderFeatures.add(value);
             }
         }
@@ -154,9 +197,9 @@ static rhi::DeviceType _toRenderType(Slang::RenderApiType apiType)
         {
             outOptions.shaderType = ShaderProgramType::GraphicsTaskMeshCompute;
         }
-        else if (argValue == "-use-dxil")
+        else if (argValue == "-use-dxbc")
         {
-            outOptions.useDXIL = true;
+            outOptions.useDXBC = true;
         }
         else if (argValue == "-skip-spirv-validation")
         {
@@ -278,6 +321,16 @@ static rhi::DeviceType _toRenderType(Slang::RenderApiType apiType)
         {
             outOptions.showAdapterInfo = true;
         }
+        else if (argValue == "-ignore-abort-msg")
+        {
+#ifdef _MSC_VER
+            _set_abort_behavior(0, _WRITE_ABORT_MSG);
+#endif
+        }
+        else if (argValue == "-cache-rhi-device")
+        {
+            outOptions.cacheRhiDevice = true;
+        }
         else
         {
             // Lookup
@@ -286,11 +339,14 @@ static rhi::DeviceType _toRenderType(Slang::RenderApiType apiType)
             {
                 // Look up the rendering API if set
                 UnownedStringSlice argName = argSlice.tail(1);
-                DeviceType deviceType = _toRenderType(RenderApiUtil::findApiTypeByName(argName));
+                RenderApiType renderApi = RenderApiUtil::findApiTypeByName(argName);
+                DeviceType deviceType = _toRenderType(renderApi);
 
                 if (deviceType != DeviceType::Default)
                 {
                     outOptions.deviceType = deviceType;
+                    if (renderApi == RenderApiType::LLVM)
+                        outOptions.useLLVMDirectly = true;
                     continue;
                 }
 

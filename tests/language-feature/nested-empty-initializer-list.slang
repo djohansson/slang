@@ -1,7 +1,8 @@
 //TEST(compute):COMPARE_COMPUTE(filecheck-buffer=BUF):-shaderobj
-//TEST(compute):COMPARE_COMPUTE(filecheck-buffer=BUF):-dx12 -use-dxil -shaderobj
+//TEST(compute):COMPARE_COMPUTE(filecheck-buffer=BUF):-dx12 -shaderobj
 //TEST(compute):COMPARE_COMPUTE(filecheck-buffer=BUF):-cpu -shaderobj
 //TEST(compute):COMPARE_COMPUTE(filecheck-buffer=BUF):-vk -shaderobj
+//TEST(compute):COMPARE_COMPUTE(filecheck-buffer=BUF):-llvm -shaderobj
 
 //TEST_INPUT:ubuffer(data=[0], stride=4):out,name=outputBuffer
 RWStructuredBuffer<int> outputBuffer;

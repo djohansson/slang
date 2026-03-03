@@ -18,6 +18,7 @@ struct Helper
 %for _,T in ipairs(Slang.NodeBase.subclasses) do
 const SyntaxClassInfo $T::kSyntaxClassInfo = {
     "$T",
+    $(T.getDebugVisType),
     ASTNodeType::$T,
     $(#T.subclasses),
 %  if T.isAbstract then
@@ -47,7 +48,7 @@ static SyntaxClassInfo const* kAllSyntaxClasses[] = {
 
 SyntaxClassBase::SyntaxClassBase(ASTNodeType tag)
 {
-    assert(int(tag) >= 0 && int(tag) < SLANG_COUNT_OF(kAllSyntaxClasses));
+    SLANG_ASSERT(int(tag) >= 0 && int(tag) < SLANG_COUNT_OF(kAllSyntaxClasses));
     _info = kAllSyntaxClasses[int(tag)];
 }
 

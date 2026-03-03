@@ -5,7 +5,9 @@
 
 #include <assert.h>
 #include <cstddef>
+#include <cstring>
 #include <stdint.h>
+#include <type_traits>
 
 #define VARIADIC_TEMPLATE
 
@@ -199,6 +201,19 @@ inline bool isBitSet(T value, T bitToTest)
     static_assert(sizeof(T) <= sizeof(uint32_t), "Only support up to 32 bit enums");
     return (T)((uint32_t)value & (uint32_t)bitToTest) == bitToTest;
 }
+
+template<typename To, typename From>
+typename std::enable_if_t<
+    sizeof(To) == sizeof(From) && std::is_trivially_copyable_v<From> &&
+        std::is_trivially_copyable_v<To> && std::is_trivially_constructible_v<To>,
+    To>
+bitCast(const From& src)
+{
+    To dst;
+    std::memcpy(&dst, &src, sizeof(To));
+    return dst;
+}
+
 } // namespace Slang
 
 // SLANG_DEFER
@@ -328,9 +343,9 @@ public:
             __builtin_unreachable(); \
     } while (0)
 #elif SLANG_CLANG
-#define SLANG_ASSUME(X) __builtin_assume(X)
+#define SLANG_ASSUME(X) __builtin_assume(static_cast<bool>(X))
 #elif SLANG_VC
-#define SLANG_ASSUME(X) __assume(X)
+#define SLANG_ASSUME(X) __assume(static_cast<bool>(X))
 #else
 [[noreturn]] inline void invokeUndefinedBehaviour() {}
 #define SLANG_ASSUME(X)                 \
@@ -346,18 +361,18 @@ public:
 // assumptions in release builds
 //
 #ifdef _DEBUG
-#define SLANG_ASSERT(VALUE)               \
-    do                                    \
-    {                                     \
-        if (!(VALUE))                     \
-            SLANG_ASSERT_FAILURE(#VALUE); \
+#define SLANG_ASSERT(VALUE)                \
+    do                                     \
+    {                                      \
+        if (!(VALUE)) [[unlikely]]         \
+            ::Slang::handleAssert(#VALUE); \
     } while (0)
 #else
 #define SLANG_ASSERT(VALUE) SLANG_ASSUME(VALUE)
 #endif
 
 #define SLANG_RELEASE_ASSERT(VALUE) \
-    if (VALUE)                      \
+    if (VALUE) [[likely]]           \
     {                               \
     }                               \
     else                            \

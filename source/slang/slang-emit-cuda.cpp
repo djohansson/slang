@@ -4,6 +4,7 @@
 #include "../core/slang-writer.h"
 #include "slang-emit-source-writer.h"
 #include "slang-mangled-lexer.h"
+#include "slang-rich-diagnostics.h"
 
 #include <assert.h>
 
@@ -73,17 +74,18 @@ UnownedStringSlice CUDASourceEmitter::getBuiltinTypeName(IROp op)
         return UnownedStringSlice("uint");
     case kIROp_UInt64Type:
         return UnownedStringSlice("ulonglong");
-#if SLANG_PTR_IS_64
+
     case kIROp_IntPtrType:
-        return UnownedStringSlice("int64_t");
+        if (getPointerSize(getTargetReq()) == sizeof(uint64_t))
+            return UnownedStringSlice("int64_t");
+        else
+            return UnownedStringSlice("int");
+
     case kIROp_UIntPtrType:
-        return UnownedStringSlice("uint64_t");
-#else
-    case kIROp_IntPtrType:
-        return UnownedStringSlice("int");
-    case kIROp_UIntPtrType:
-        return UnownedStringSlice("uint");
-#endif
+        if (getPointerSize(getTargetReq()) == sizeof(uint64_t))
+            return UnownedStringSlice("uint64_t");
+        else
+            return UnownedStringSlice("uint");
 
     case kIROp_HalfType:
         return UnownedStringSlice("__half");
@@ -92,6 +94,12 @@ UnownedStringSlice CUDASourceEmitter::getBuiltinTypeName(IROp op)
         return UnownedStringSlice("float");
     case kIROp_DoubleType:
         return UnownedStringSlice("double");
+    case kIROp_FloatE4M3Type:
+        return UnownedStringSlice("__nv_fp8_e4m3");
+    case kIROp_FloatE5M2Type:
+        return UnownedStringSlice("__nv_fp8_e5m2");
+    case kIROp_BFloat16Type:
+        return UnownedStringSlice("__nv_bfloat16");
     default:
         return UnownedStringSlice();
     }
@@ -123,20 +131,31 @@ UnownedStringSlice CUDASourceEmitter::getVectorPrefix(IROp op)
     case kIROp_UInt64Type:
         return UnownedStringSlice("ulonglong");
 
-#if SLANG_PTR_IS_64
     case kIROp_IntPtrType:
-        return UnownedStringSlice("longlong");
+        if (getPointerSize(getTargetReq()) == sizeof(uint64_t))
+            return UnownedStringSlice("longlong");
+        else
+            return UnownedStringSlice("int");
+
     case kIROp_UIntPtrType:
-        return UnownedStringSlice("ulonglong");
-#else
-    case kIROp_IntPtrType:
-        return UnownedStringSlice("int");
-    case kIROp_UIntPtrType:
-        return UnownedStringSlice("uint");
-#endif
+        if (getPointerSize(getTargetReq()) == sizeof(uint64_t))
+            return UnownedStringSlice("ulonglong");
+        else
+            return UnownedStringSlice("uint");
 
     case kIROp_HalfType:
+        m_extensionTracker->requireBaseType(BaseType::Half);
         return UnownedStringSlice("__half");
+
+    case kIROp_FloatE4M3Type:
+        m_extensionTracker->requireFp8();
+        return UnownedStringSlice("__nv_fp8_e4m3");
+    case kIROp_FloatE5M2Type:
+        m_extensionTracker->requireFp8();
+        return UnownedStringSlice("__nv_fp8_e5m2");
+    case kIROp_BFloat16Type:
+        m_extensionTracker->requireBfloat16();
+        return UnownedStringSlice("__nv_bfloat16");
 
     case kIROp_FloatType:
         return UnownedStringSlice("float");
@@ -191,10 +210,24 @@ SlangResult CUDASourceEmitter::calcTypeName(IRType* type, CodeGenTarget target, 
     SLANG_UNUSED(target);
 
     // The names CUDA produces are all compatible with 'C' (ie they aren't templated types)
-    SLANG_ASSERT(target == CodeGenTarget::CUDASource || target == CodeGenTarget::CSource);
+    SLANG_ASSERT(
+        target == CodeGenTarget::CUDASource || target == CodeGenTarget::CUDAHeader ||
+        target == CodeGenTarget::CSource);
 
     switch (type->getOp())
     {
+    case kIROp_PtrType:
+    case kIROp_NativePtrType:
+        {
+            auto ptrType = cast<IRPtrTypeBase>(type);
+            if (auto unsizedArrayType = as<IRUnsizedArrayType>(ptrType->getValueType()))
+            {
+                SLANG_RETURN_ON_FAIL(calcTypeName(unsizedArrayType->getElementType(), target, out));
+                out << "**";
+                return SLANG_OK;
+            }
+            break;
+        }
     case kIROp_VectorType:
         {
             auto vecType = static_cast<IRVectorType*>(type);
@@ -214,11 +247,49 @@ SlangResult CUDASourceEmitter::calcTypeName(IRType* type, CodeGenTarget target, 
             out << "TensorView";
             return SLANG_OK;
         }
+    case kIROp_CoopVectorType:
+        {
+            if (isOptixCoopVec)
+            {
+                auto coopVecType = static_cast<IRCoopVectorType*>(type);
+                auto elemCount = int(getIntVal(coopVecType->getElementCount()));
+                auto elemType = coopVecType->getElementType();
+
+                out << "OptixCoopVec<" << getBuiltinTypeName(elemType->getOp()) << ", " << elemCount
+                    << ">";
+                return SLANG_OK;
+            }
+            SLANG_DIAGNOSE_UNEXPECTED(
+                getSink(),
+                SourceLoc(),
+                "Cooperative vectors should have been lowered before reaching CUDA emit for "
+                "non-OptiX targets");
+            return SLANG_FAIL;
+        }
+    case kIROp_RaytracingAccelerationStructureType:
     case kIROp_HitObjectType:
         {
             out << "OptixTraversableHandle";
             return SLANG_OK;
         }
+    case kIROp_CoopMatrixType:
+        {
+            // CUDA wmma require SM 7.5+
+            m_extensionTracker->requireSMVersion(SemanticVersion(7, 5));
+            return emitWMMAFragmentType(as<IRCoopMatrixType>(type), out);
+        }
+    case kIROp_FloatE4M3Type:
+        out << "__nv_fp8_e4m3";
+        m_extensionTracker->requireFp8();
+        return SLANG_OK;
+    case kIROp_FloatE5M2Type:
+        out << "__nv_fp8_e5m2";
+        m_extensionTracker->requireFp8();
+        return SLANG_OK;
+    case kIROp_BFloat16Type:
+        out << "__nv_bfloat16";
+        m_extensionTracker->requireBfloat16();
+        return SLANG_OK;
     default:
         {
             if (isNominalOp(type->getOp()))
@@ -250,22 +321,6 @@ SlangResult CUDASourceEmitter::calcTypeName(IRType* type, CodeGenTarget target, 
                 break;
             }
 
-            break;
-        }
-    }
-
-    if (auto untypedBufferType = as<IRUntypedBufferResourceType>(type))
-    {
-        switch (untypedBufferType->getOp())
-        {
-        case kIROp_RaytracingAccelerationStructureType:
-            {
-                m_writer->emit("OptixTraversableHandle");
-                return SLANG_OK;
-                break;
-            }
-
-        default:
             break;
         }
     }
@@ -713,6 +768,17 @@ bool CUDASourceEmitter::tryEmitInstStmtImpl(IRInst* inst)
             m_writer->emit(", -1);\n");
             return true;
         }
+    case kIROp_SetOptiXPayloadRegister:
+        {
+            auto idxInst = as<IRIntLit>(inst->getOperand(0));
+            IRIntegerValue idx = idxInst->getValue();
+            m_writer->emit("optixSetPayload_");
+            m_writer->emit(idx);
+            m_writer->emit("(");
+            emitOperand(inst->getOperand(1), getInfo(EmitOp::General));
+            m_writer->emit(");\n");
+            return true;
+        }
     default:
         return false;
     }
@@ -845,6 +911,16 @@ bool CUDASourceEmitter::tryEmitInstExprImpl(IRInst* inst, const EmitOpInfo& inOu
             m_writer->emit(")");
             return true;
         }
+    case kIROp_MakeCoopMatrixFromScalar:
+        {
+            StringBuilder typeSB;
+            emitWMMAFragmentType(as<IRCoopMatrixType>(inst->getDataType()), typeSB);
+            m_writer->emit(typeSB);
+            m_writer->emit("(");
+            emitOperand(inst->getOperand(0), getInfo(EmitOp::General));
+            m_writer->emit(")");
+            return true;
+        }
     case kIROp_MakeArray:
         {
             IRType* dataType = inst->getDataType();
@@ -918,6 +994,15 @@ bool CUDASourceEmitter::tryEmitInstExprImpl(IRInst* inst, const EmitOpInfo& inOu
             m_writer->emit(")optixGetSbtDataPointer())");
             return true;
         }
+    case kIROp_GetOptiXPayloadRegister:
+        {
+            auto idxInst = as<IRIntLit>(inst->getOperand(0));
+            IRIntegerValue idx = idxInst->getValue();
+            m_writer->emit("optixGetPayload_");
+            m_writer->emit(idx);
+            m_writer->emit("()");
+            return true;
+        }
     case kIROp_DispatchKernel:
         {
             auto dispatchInst = as<IRDispatchKernel>(inst);
@@ -934,6 +1019,21 @@ bool CUDASourceEmitter::tryEmitInstExprImpl(IRInst* inst, const EmitOpInfo& inOu
                 emitOperand(dispatchInst->getArg(i), getInfo(EmitOp::General));
             }
             m_writer->emit(")");
+            return true;
+        }
+    case kIROp_CUDALDG:
+        {
+            m_writer->emit("__ldg(");
+            emitOperand(inst->getOperand(0), getInfo(EmitOp::General));
+            m_writer->emit(")");
+        }
+        return true;
+    case kIROp_GetStructuredBufferPtr:
+    case kIROp_GetUntypedBufferPtr:
+        {
+            m_writer->emit("(&(");
+            emitOperand(inst->getOperand(0), getInfo(EmitOp::General));
+            m_writer->emit(").data)");
             return true;
         }
     default:
@@ -962,6 +1062,26 @@ void CUDASourceEmitter::emitVectorTypeNameImpl(IRType* elementType, IRIntegerVal
 {
     m_writer->emit(getVectorPrefix(elementType->getOp()));
     m_writer->emit(elementCount);
+}
+
+void CUDASourceEmitter::_emitType(IRType* type, DeclaratorInfo* declarator)
+{
+    // Handle Ptr<T[]> on CUDA, we shouldn't emit it as Array<T>*.
+    // Instead, we should emit it as T**.
+    // e.g. Array<T>* a;    a[1] == a + sizeof(Array<T>)
+    // but T** b;    b[1] == b + sizeof(T*)
+    if (type->getOp() == kIROp_PtrType || type->getOp() == kIROp_NativePtrType)
+    {
+        auto ptrType = cast<IRPtrTypeBase>(type);
+        if (auto unsizedArrayType = as<IRUnsizedArrayType>(ptrType->getValueType()))
+        {
+            PtrDeclaratorInfo outerPtr(declarator);
+            PtrDeclaratorInfo innerPtr(&outerPtr);
+            _emitType(unsizedArrayType->getElementType(), &innerPtr);
+            return;
+        }
+    }
+    Super::_emitType(type, declarator);
 }
 
 void CUDASourceEmitter::emitSimpleTypeImpl(IRType* type)
@@ -1022,24 +1142,6 @@ void CUDASourceEmitter::emitSimpleFuncImpl(IRFunc* func)
     CLikeSourceEmitter::emitSimpleFuncImpl(func);
 }
 
-void CUDASourceEmitter::emitSimpleValueImpl(IRInst* inst)
-{
-    // Make sure we convert float to half when emitting a half literal to avoid
-    // overload ambiguity errors from CUDA.
-    if (inst->getOp() == kIROp_FloatLit)
-    {
-        if (inst->getDataType()->getOp() == kIROp_HalfType)
-        {
-            m_writer->emit("__half(");
-            CLikeSourceEmitter::emitSimpleValueImpl(inst);
-            m_writer->emit(")");
-            return;
-        }
-    }
-    Super::emitSimpleValueImpl(inst);
-}
-
-
 void CUDASourceEmitter::emitSemanticsImpl(IRInst* inst, bool allowOffsetLayout)
 {
     Super::emitSemanticsImpl(inst, allowOffsetLayout);
@@ -1092,5 +1194,153 @@ void CUDASourceEmitter::emitModuleImpl(IRModule* module, DiagnosticSink* sink)
     _emitWitnessTableDefinitions();
 }
 
+static bool typeCheck(IROp op, uint32_t matrixUse)
+{
+    switch (matrixUse)
+    {
+    case 0: // matrixA
+    case 1: // matrixB
+        return op == kIROp_UInt8Type || op == kIROp_Int8Type || op == kIROp_HalfType ||
+               op == kIROp_BFloat16Type || op == kIROp_FloatE4M3Type || op == kIROp_FloatE5M2Type;
+    case 2: // accumulator
+        return op == kIROp_IntType || op == kIROp_HalfType || op == kIROp_FloatType;
+    }
+    return false;
+}
+
+static UnownedStringSlice getMatrixUseName(uint32_t matrixUse)
+{
+    switch (matrixUse)
+    {
+    case 0:
+        return UnownedStringSlice("Slang_CUDA_WMMA::MatrixA");
+    case 1:
+        return UnownedStringSlice("Slang_CUDA_WMMA::MatrixB");
+    case 2:
+        return UnownedStringSlice("Slang_CUDA_WMMA::MatrixC");
+    default:
+        return UnownedStringSlice();
+    }
+}
+
+struct FragmentShape
+{
+    int m, n, k;
+
+    bool isValid() const { return m > 0 && n > 0 && k > 0; }
+};
+
+/*
+ * Strict Shape Validation Strategy:
+ * Users must provide exact dimensions that match one of the allowed WMMA shapes:
+ *   - m16n16k16: Matrix A (16x16), Matrix B (16x16), Matrix C/D (16x16)
+ *   - m8n32k16:  Matrix A (8x16),  Matrix B (16x32), Matrix C/D (8x32)
+ *   - m32n8k16:  Matrix A (32x16), Matrix B (16x8),  Matrix C/D (32x8)
+ *
+ * Note: k dimension is always 16 for all shapes.
+ */
+inline FragmentShape computeShapeCombination(uint32_t matrixUse, uint32_t row, uint32_t col)
+{
+    switch (matrixUse)
+    {
+    case 0: // Matrix A: row=m, col=k
+        {
+            // k must always be 16
+            if (col != 16)
+            {
+                return {0, 0, 0}; // Invalid
+            }
+            // Check exact m values
+            switch (row)
+            {
+            case 16:
+                return {16, 16, 16};
+            case 8:
+                return {8, 32, 16};
+            case 32:
+                return {32, 8, 16};
+            default:
+                return {0, 0, 0}; // Invalid
+            }
+        }
+    case 1: // Matrix B: row=k, col=n
+        {
+            // k must always be 16
+            if (row != 16)
+            {
+                return {0, 0, 0}; // Invalid
+            }
+            // Check exact n values
+            switch (col)
+            {
+            case 16:
+                return {16, 16, 16};
+            case 32:
+                return {8, 32, 16};
+            case 8:
+                return {32, 8, 16};
+            default:
+                return {0, 0, 0}; // Invalid
+            }
+        }
+    case 2: // Matrix C/D: row=m, col=n
+    default:
+        {
+            // Check exact (m, n) combinations
+            if (row == 16 && col == 16)
+                return {16, 16, 16};
+            else if (row == 8 && col == 32)
+                return {8, 32, 16};
+            else if (row == 32 && col == 8)
+                return {32, 8, 16};
+            else
+                return {0, 0, 0}; // Invalid
+        }
+    }
+}
+
+SlangResult CUDASourceEmitter::emitWMMAFragmentType(
+    IRCoopMatrixType* coopMatType,
+    StringBuilder& outStr)
+{
+    uint32_t rowCount = (uint32_t) static_cast<IRIntLit*>(coopMatType->getRowCount())->getValue();
+    uint32_t colCount =
+        (uint32_t) static_cast<IRIntLit*>(coopMatType->getColumnCount())->getValue();
+    uint32_t matrixUse = (uint32_t) static_cast<IRIntLit*>(coopMatType->getMatrixUse())->getValue();
+
+    auto elementType = coopMatType->getElementType();
+    StringBuilder elementTypeSB;
+    calcTypeName(elementType, CodeGenTarget::CUDASource, elementTypeSB);
+    auto typeName = elementTypeSB.toString();
+
+    // TODO: We should add a pass in IR to validate the coop matrix types, such that
+    // we can provide better diagnostic messages here.
+    if (!typeCheck(elementType->getOp(), matrixUse))
+    {
+        getSink()->diagnose(Diagnostics::CooperativeMatrixUnsupportedElementType{
+            .elementType = typeName,
+            .matrixUse = matrixUse == 0 ? "A" : (matrixUse == 1 ? "B" : "C")});
+        SLANG_RELEASE_ASSERT(false);
+        return SLANG_FAIL;
+    }
+
+    outStr << "Slang_CUDA_WMMA::WmmaFragment<";
+
+    FragmentShape shape = computeShapeCombination(matrixUse, rowCount, colCount);
+    if (!shape.isValid())
+    {
+        getSink()->diagnose(Diagnostics::CooperativeMatrixInvalidShape{
+            .rowCount = String(rowCount),
+            .colCount = String(colCount),
+            .matrixUse = matrixUse == 0 ? "A" : (matrixUse == 1 ? "B" : "C")});
+        SLANG_RELEASE_ASSERT(false);
+        return SLANG_FAIL;
+    }
+
+    outStr << typeName << "," << shape.m << ", " << shape.n << ", " << shape.k << ", "
+           << getMatrixUseName(matrixUse) << ">";
+
+    return SLANG_OK;
+}
 
 } // namespace Slang

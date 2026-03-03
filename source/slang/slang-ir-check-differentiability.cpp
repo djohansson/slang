@@ -2,6 +2,7 @@
 
 #include "slang-ir-autodiff.h"
 #include "slang-ir-inst-pass-base.h"
+#include "slang-rich-diagnostics.h"
 
 namespace Slang
 {
@@ -80,6 +81,49 @@ public:
         return (
             callInst->findDecoration<IRTreatCallAsDifferentiableDecoration>() ||
             callInst->findDecoration<IRDifferentiableCallDecoration>());
+    }
+
+    // If a function call takes all literals as arguments, it will implies that this function will
+    // not be expected to any gradients, in this case, this call should be treated as no_diff even
+    // there is no 'no_diff' decorated on it explicitly. In the actual check, we only need to check
+    // the argument corresponding to the differentiable parameters, because non-differentiable
+    // parameter are not expected to produce any gradients anyway.
+    bool shouldCallImpliesNoDiff(
+        DifferentiableTypeConformanceContext& diffTypeContext,
+        IRCall* callInst)
+    {
+        if (shouldTreatCallAsDifferentiable(callInst))
+        {
+            return true;
+        }
+
+        auto calleeFuncType = as<IRFuncType>(callInst->getCallee()->getFullType());
+        if (!calleeFuncType)
+            return false;
+
+        SLANG_RELEASE_ASSERT(calleeFuncType->getParamCount() == callInst->getArgCount());
+
+        bool doesImplyNoDiff = true;
+        UInt paramIndex = 0;
+        for (auto paramType : calleeFuncType->getParamTypes())
+        {
+            if (isDifferentiableType(diffTypeContext, paramType))
+            {
+                auto arg = callInst->getArg(paramIndex);
+                if (!as<IRConstant>(arg))
+                {
+                    doesImplyNoDiff = false;
+                }
+            }
+            paramIndex++;
+        }
+
+        if (doesImplyNoDiff)
+        {
+            IRBuilder irBuilder(callInst->getModule());
+            irBuilder.addDecoration(callInst, kIROp_TreatCallAsDifferentiableDecoration);
+        }
+        return doesImplyNoDiff;
     }
 
     bool isDifferentiableFunc(IRInst* func, DifferentiableLevel level)
@@ -251,7 +295,7 @@ public:
 
         bool isSynthesizeConstructor = false;
 
-        if (auto constructor = funcInst->findDecoration<IRConstructorDecorartion>())
+        if (auto constructor = funcInst->findDecoration<IRConstructorDecoration>())
             isSynthesizeConstructor = constructor->getSynthesizedStatus();
 
         // This is a kernel function, we don't allow using TorchTensor type here.
@@ -271,7 +315,9 @@ public:
                     auto loc = inst->sourceLoc;
                     if (!loc.isValid())
                         loc = funcInst->sourceLoc;
-                    sink->diagnose(loc, Diagnostics::invalidUseOfTorchTensorTypeInDeviceFunc);
+                    sink->diagnose(Diagnostics::InvalidUseOfTorchTensorTypeInDeviceFunc{
+                        .location = loc,
+                    });
                     return;
                 }
             }
@@ -497,14 +543,17 @@ public:
                         // No need to fail here if the function is no_diff in
                         // both inputs and all outputs, this is equivalent of
                         // inserting no_diff on this inst.
-                        if (!isNeverDiffFuncType(cast<IRFuncType>(callee->getDataType())))
+                        if (!isNeverDiffFuncType(cast<IRFuncType>(callee->getDataType())) &&
+                            !shouldCallImpliesNoDiff(diffTypeContext, call))
                         {
                             sink->diagnose(
-                                inst,
-                                Diagnostics::lossOfDerivativeDueToCallOfNonDifferentiableFunction,
-                                getResolvedInstForDecorations(call->getCallee()),
-                                requiredDiffLevel == DifferentiableLevel::Forward ? "forward"
-                                                                                  : "backward");
+                                Diagnostics::LossOfDerivativeDueToCallOfNonDifferentiableFunction{
+                                    .diffLevel = requiredDiffLevel == DifferentiableLevel::Forward
+                                                     ? "forward"
+                                                     : "backward",
+                                    .funcName = getResolvedInstForDecorations(call->getCallee()),
+                                    .location = inst->sourceLoc,
+                                });
                         }
                     }
                 }
@@ -595,7 +644,8 @@ public:
             }
             else
             {
-                sink->diagnose(loop->sourceLoc, Diagnostics::loopInDiffFuncRequireUnrollOrMaxIters);
+                sink->diagnose(Diagnostics::LoopInDiffFuncRequireUnrollOrMaxIters{
+                    .location = loop->sourceLoc});
             }
         }
 
@@ -612,8 +662,9 @@ public:
                         !canAddressHoldDerivative(diffTypeContext, storeInst->getPtr()))
                     {
                         sink->diagnose(
-                            storeInst->sourceLoc,
-                            Diagnostics::lossOfDerivativeAssigningToNonDifferentiableLocation);
+                            Diagnostics::LossOfDerivativeAssigningToNonDifferentiableLocation{
+                                .location = storeInst->sourceLoc,
+                            });
                     }
                 }
                 else if (auto callInst = as<IRCall>(inst))
@@ -631,14 +682,15 @@ public:
                         auto paramType = calleeFuncType->getParamType(a);
                         if (!isDifferentiableType(diffTypeContext, paramType))
                             continue;
-                        if (as<IROutTypeBase>(paramType))
+                        if (as<IROutParamTypeBase>(paramType))
                         {
                             if (!canAddressHoldDerivative(diffTypeContext, arg))
                             {
                                 sink->diagnose(
-                                    arg->sourceLoc,
                                     Diagnostics::
-                                        lossOfDerivativeUsingNonDifferentiableLocationAsOutArg);
+                                        LossOfDerivativeUsingNonDifferentiableLocationAsOutArg{
+                                            .location = arg->sourceLoc,
+                                        });
                             }
                         }
                     }

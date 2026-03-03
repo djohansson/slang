@@ -204,12 +204,18 @@ enum
     kNodeReadFlag_AllowEscape = 1 << 0,
 };
 
+template<bool onlyReadFirstOpenChar>
 Node* readBody(Reader& reader, NodeReadFlags flags, char openChar, int openCount, char closeChar)
 {
     while (peek(reader) == openChar)
     {
         get(reader);
         openCount++;
+
+        // This case allows parsing `myFunc($((int)val))` correctly, else we parse
+        // body as `int)val`, causing non obvious segfault.
+        if constexpr (onlyReadFirstOpenChar)
+            break;
     }
 
     Node* nodes = nullptr;
@@ -317,7 +323,7 @@ Node* readBody(Reader& reader, NodeReadFlags flags, char openChar, int openCount
                     //
                     addTextSpan(link, spanBegin, spanEnd);
 
-                    Node* body = readBody(reader, 0, '(', 0, ')');
+                    Node* body = readBody<true>(reader, 0, '(', 0, ')');
 
                     addSpliceSpan(link, body);
 
@@ -327,16 +333,61 @@ Node* readBody(Reader& reader, NodeReadFlags flags, char openChar, int openCount
                 else if (peek(reader) == '{')
                 {
                     // This is the start of a block-structured escape, which will
-                    // end at a matching `}`.
+                    // end at a matching `$}`.
 
                     addTextSpan(link, spanBegin, lineBegin);
 
-                    Node* body = readBody(reader, 0, '{', 0, '}');
+                    // Consume the opening '{'
+                    get(reader);
 
-                    addEscapeSpan(link, body);
+                    // Read until we find $}
+                    Node* nodes = nullptr;
+                    Node** bodyLink = &nodes;
 
-                    spanBegin = reader.cursor;
-                    atStartOfLine = false;
+                    char const* bodyBegin = reader.cursor;
+                    bool foundClosing = false;
+                    for (;;)
+                    {
+                        int c = get(reader);
+
+                        switch (c)
+                        {
+                        default:
+                            break;
+
+                        case EOF:
+                            {
+                                addTextSpan(bodyLink, bodyBegin, reader.cursor);
+                                addEscapeSpan(link, nodes);
+                                spanBegin = reader.cursor;
+                                atStartOfLine = false;
+                                foundClosing = true;
+                                break;
+                            }
+
+                        case '$':
+                            {
+                                if (peek(reader) == '}')
+                                {
+                                    // Found the closing $}
+                                    char const* bodyEnd = reader.cursor - 1;
+                                    addTextSpan(bodyLink, bodyBegin, bodyEnd);
+                                    get(reader); // consume the '}'
+
+                                    addEscapeSpan(link, nodes);
+
+                                    spanBegin = reader.cursor;
+                                    atStartOfLine = false;
+                                    foundClosing = true;
+                                    break;
+                                }
+                            }
+                            break;
+                        }
+
+                        if (foundClosing)
+                            break;
+                    }
                 }
                 else if (atStartOfLine && peek(reader) == ':')
                 {
@@ -381,6 +432,12 @@ Node* readBody(Reader& reader, NodeReadFlags flags, char openChar, int openCount
                 }
                 else if (atStartOfLine && isIdentifierChar(peek(reader)))
                 {
+                    // We should allow something like this to work:
+                    // $T0::SomeTypeDefine
+                    // As in C++/CUDA target, it's not allowed to write this:
+                    // (SomeTemplate<...>::SomeTypeDefine).
+                    // We cannot add parentheses around type expression.
+
                     // This is a statement splice, which will use a {}-enclosed
                     // body for the template to generate.
 
@@ -398,8 +455,6 @@ Node* readBody(Reader& reader, NodeReadFlags flags, char openChar, int openCount
                     skipHorizontalSpace(reader);
                     skipOptionalNewline(reader);
                     skipHorizontalSpace(reader);
-
-                    throw 99;
                 }
                 else
                 {
@@ -419,7 +474,7 @@ Node* readInput(char const* inputBegin, char const* inputEnd)
     reader.cursor = inputBegin;
     reader.end = inputEnd;
 
-    return readBody(reader, kNodeReadFlag_AllowEscape, -2, 0, -2);
+    return readBody<false>(reader, kNodeReadFlag_AllowEscape, -2, 0, -2);
 }
 
 void emitRaw(FILE* stream, char const* begin, char const* end)

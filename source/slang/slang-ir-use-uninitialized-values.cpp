@@ -4,6 +4,7 @@
 #include "slang-ir-reachability.h"
 #include "slang-ir-util.h"
 #include "slang-ir.h"
+#include "slang-rich-diagnostics.h"
 
 namespace Slang
 {
@@ -19,6 +20,7 @@ static bool isMetaOp(IRInst* inst)
     case kIROp_IsSignedInt:
     case kIROp_IsHalf:
     case kIROp_IsFloat:
+    case kIROp_IsCoopFloat:
     case kIROp_IsVector:
     case kIROp_GetNaturalStride:
     case kIROp_TypeEquals:
@@ -35,7 +37,7 @@ static bool isUninitializedValue(IRInst* inst)
     // Also consider var since it does not
     // automatically mean it will be initialized
     // (at least not as the user may have intended)
-    return (inst->m_op == kIROp_undefined) || (inst->m_op == kIROp_Var);
+    return (as<IRUndefined>(inst) || (inst->m_op == kIROp_Var));
 }
 
 static bool isUnmodifying(IRFunc* func)
@@ -54,7 +56,7 @@ enum ParameterCheckType
 static ParameterCheckType isPotentiallyUnintended(IRParam* param, Stage stage, int index)
 {
     IRType* type = param->getFullType();
-    if (auto out = as<IROutType>(param->getFullType()))
+    if (auto out = as<IROutParamType>(param->getFullType()))
     {
         // Don't check `out Vertices<T>` or `out Indices<T>` parameters
         // in mesh shaders.
@@ -75,7 +77,7 @@ static ParameterCheckType isPotentiallyUnintended(IRParam* param, Stage stage, i
 
         return AsOut;
     }
-    else if (auto inout = as<IRInOutType>(type))
+    else if (auto inout = as<IRBorrowInOutParamType>(type))
     {
         // TODO: some way to check if the method
         // is actually used for autodiff
@@ -263,7 +265,10 @@ static InstructionUsageType getCallUsageType(IRCall* call, IRInst* inst)
     // Consider it as a store if its passed
     // as an out/inout/ref parameter
     auto type = unwrapAttributedType(ftype->getParamType(index));
-    return (as<IROutType>(type) || as<IRInOutType>(type) || as<IRRefType>(type)) ? Store : Load;
+    return (as<IROutParamType>(type) || as<IRBorrowInOutParamType>(type) ||
+            as<IRRefParamType>(type))
+               ? Store
+               : Load;
 }
 
 static InstructionUsageType getInstructionUsageType(IRInst* user, IRInst* inst)
@@ -278,9 +283,18 @@ static InstructionUsageType getInstructionUsageType(IRInst* user, IRInst* inst)
 
     switch (user->getOp())
     {
-    case kIROp_loop:
-    case kIROp_unconditionalBranch:
+    case kIROp_Loop:
+    case kIROp_UnconditionalBranch:
         // TODO: Ignore branches for now
+        return None;
+
+    // Debug info instructions should be ignored - they don't constitute
+    // actual loads or stores of data, they're just metadata.
+    case kIROp_DebugValue:
+    case kIROp_DebugVar:
+    case kIROp_DebugLine:
+    case kIROp_DebugScope:
+    case kIROp_DebugInlinedAt:
         return None;
 
     case kIROp_Call:
@@ -520,7 +534,7 @@ static List<IRStructField*> checkFieldsFromExit(
 
 static void checkConstructor(IRFunc* func, ReachabilityContext& reachability, DiagnosticSink* sink)
 {
-    auto constructor = func->findDecoration<IRConstructorDecorartion>();
+    auto constructor = func->findDecoration<IRConstructorDecoration>();
     if (!constructor)
         return;
 
@@ -537,17 +551,24 @@ static void checkConstructor(IRFunc* func, ReachabilityContext& reachability, Di
     {
         for (auto field : fields)
         {
+            StringBuilder typeNameSb;
+            printDiagnosticArg(typeNameSb, stype);
+            StringBuilder fieldNameSb;
+            printDiagnosticArg(fieldNameSb, field->getKey());
             if (synthesized)
             {
-                sink->diagnose(
-                    field->getKey(),
-                    Diagnostics::fieldNotDefaultInitialized,
-                    stype,
-                    field->getKey());
+                sink->diagnose(Diagnostics::FieldNotDefaultInitialized{
+                    .typeName = typeNameSb.produceString(),
+                    .fieldName = fieldNameSb.produceString(),
+                    .location = field->getKey()->sourceLoc,
+                });
             }
             else
             {
-                sink->diagnose(ret, Diagnostics::constructorUninitializedField, field->getKey());
+                sink->diagnose(Diagnostics::ConstructorUninitializedField{
+                    .fieldName = fieldNameSb.produceString(),
+                    .location = ret->sourceLoc,
+                });
             }
         }
     };
@@ -576,11 +597,22 @@ static void checkParameterAsOut(
     auto loads = getUnresolvedParamLoads(reachability, func, param);
     for (auto load : loads)
     {
-        sink->diagnose(
-            load,
-            as<IRTerminatorInst>(load) ? Diagnostics::returningWithUninitializedOut
-                                       : Diagnostics::usingUninitializedOut,
-            param);
+        StringBuilder paramNameSb;
+        printDiagnosticArg(paramNameSb, param);
+        if (as<IRTerminatorInst>(load))
+        {
+            sink->diagnose(Diagnostics::ReturningWithUninitializedOut{
+                .paramName = paramNameSb.produceString(),
+                .location = load->sourceLoc,
+            });
+        }
+        else
+        {
+            sink->diagnose(Diagnostics::UsingUninitializedOut{
+                .paramName = paramNameSb.produceString(),
+                .location = load->sourceLoc,
+            });
+        }
     }
 }
 
@@ -598,7 +630,7 @@ static void checkUninitializedValues(IRFunc* func, DiagnosticSink* sink)
     ReachabilityContext reachability(func);
 
     // Used for a further analysis and to skip usual return checks
-    auto constructor = func->findDecoration<IRConstructorDecorartion>();
+    auto constructor = func->findDecoration<IRConstructorDecoration>();
 
     // Special checks for stages e.g. raytracing shader
     Stage stage = Stage::Unknown;
@@ -637,7 +669,29 @@ static void checkUninitializedValues(IRFunc* func, DiagnosticSink* sink)
             auto loads = getUnresolvedVariableLoads(reachability, inst);
             for (auto load : loads)
             {
-                sink->diagnose(load, Diagnostics::usingUninitializedVariable, inst);
+                // Check if we have a meaningful name for the variable
+                bool hasName = inst->findDecoration<IRNameHintDecoration>() != nullptr ||
+                               inst->findDecoration<IRLinkageDecoration>() != nullptr;
+
+                if (hasName)
+                {
+                    StringBuilder varNameSb;
+                    printDiagnosticArg(varNameSb, inst);
+                    sink->diagnose(Diagnostics::UsingUninitializedVariable{
+                        .varName = varNameSb.produceString(),
+                        .location = load->sourceLoc,
+                    });
+                }
+                else
+                {
+                    // For poison ops and other unnamed instructions, show type instead
+                    StringBuilder typeNameSb;
+                    printDiagnosticArg(typeNameSb, type);
+                    sink->diagnose(Diagnostics::UsingUninitializedValue{
+                        .typeName = typeNameSb.produceString(),
+                        .location = load->sourceLoc,
+                    });
+                }
             }
         }
     }
@@ -688,7 +742,12 @@ static void checkUninitializedGlobals(IRGlobalVar* variable, DiagnosticSink* sin
 
     for (auto load : loads)
     {
-        sink->diagnose(load, Diagnostics::usingUninitializedGlobalVariable, variable);
+        StringBuilder varNameSb;
+        printDiagnosticArg(varNameSb, variable);
+        sink->diagnose(Diagnostics::UsingUninitializedGlobalVariable{
+            .varName = varNameSb.produceString(),
+            .location = load->sourceLoc,
+        });
     }
 }
 

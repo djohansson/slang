@@ -41,7 +41,7 @@ function(slang_add_target dir type)
         # building respectively
         EXPORT_MACRO_PREFIX
         # Ignore target type and use a particular style of export macro
-        # _DYNAMIC or _STATIC, this is useful when the target type is OBJECT 
+        # _DYNAMIC or _STATIC, this is useful when the target type is OBJECT
         # pass in STATIC or SHARED
         EXPORT_TYPE_AS
         # The folder in which to place this target for IDE-based generators (VS
@@ -64,6 +64,8 @@ function(slang_add_target dir type)
         EXPLICIT_SOURCE
         # Additional directories from which to glob source
         EXTRA_SOURCE_DIRS
+        # Headers to precompile (PCH)
+        PRECOMPILE_HEADERS
         # Additional compile definitions and options
         EXTRA_COMPILE_DEFINITIONS_PRIVATE
         EXTRA_COMPILE_DEFINITIONS_PUBLIC
@@ -420,10 +422,11 @@ function(slang_add_target dir type)
             PRIVATE $<BUILD_LOCAL_INTERFACE:${ARG_LINK_WITH_PRIVATE}>
         )
     else()
-        target_link_libraries(
-            ${target}
-            PRIVATE $<BUILD_INTERFACE:${ARG_LINK_WITH_PRIVATE}>
-        )
+        # Expand the list manually to work around a bug in cmake 3.22.1
+        # See: https://github.com/shader-slang/slang/issues/8335
+        foreach(lib IN LISTS ARG_LINK_WITH_PRIVATE)
+            target_link_libraries(${target} PRIVATE $<BUILD_INTERFACE:${lib}>)
+        endforeach()
     endif()
 
     target_link_libraries(${target} PUBLIC ${ARG_LINK_WITH_PUBLIC})
@@ -548,6 +551,13 @@ function(slang_add_target dir type)
             ${target}
             PRIVATE ${ARG_EXTRA_COMPILE_OPTIONS_PRIVATE}
         )
+    endif()
+
+    #
+    # Precompiled headers (PCH)
+    #
+    if(SLANG_ENABLE_PCH AND ARG_PRECOMPILE_HEADERS)
+        target_precompile_headers(${target} PRIVATE ${ARG_PRECOMPILE_HEADERS})
     endif()
 
     #

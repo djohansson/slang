@@ -337,7 +337,7 @@ struct DiffUnzipPass
                 SLANG_ASSERT(diffArg);
                 auto primalParamType = resolvedPrimalFuncType->getParamType(ii);
 
-                if (const auto outType = as<IROutType>(primalParamType))
+                if (const auto outType = as<IROutParamType>(primalParamType))
                 {
                     // For `out` parameters that expects an input derivative to propagate
                     // through, we insert a `LoadReverseGradient` inst here to signify the logic
@@ -351,7 +351,7 @@ struct DiffUnzipPass
                     diffBuilder->markInstAsDifferential(gradArg, primalArg->getDataType());
                     diffArgs.add(gradArg);
                 }
-                else if (const auto inoutType = as<IRInOutType>(primalParamType))
+                else if (const auto inoutType = as<IRBorrowInOutParamType>(primalParamType))
                 {
                     // Since arg is split into separate vars, we need a new temp var that
                     // represents the remerged diff pair.
@@ -397,7 +397,7 @@ struct DiffUnzipPass
             }
             else
             {
-                if (as<IRInOutType>(resolvedPrimalFuncType->getParamType(ii)))
+                if (as<IRBorrowInOutParamType>(resolvedPrimalFuncType->getParamType(ii)))
                 {
                     // For 'inout' parameter we need to create a temp var to hold the value
                     // before the primal call. This logic is similar to the 'inout' case for
@@ -588,7 +588,7 @@ struct DiffUnzipPass
     {
         switch (branchInst->getOp())
         {
-        case kIROp_unconditionalBranch:
+        case kIROp_UnconditionalBranch:
             {
                 auto uncondBranchInst = as<IRUnconditionalBranch>(branchInst);
                 auto targetBlock = uncondBranchInst->getTargetBlock();
@@ -615,7 +615,7 @@ struct DiffUnzipPass
                         diffArgs.getBuffer()));
             }
 
-        case kIROp_conditionalBranch:
+        case kIROp_ConditionalBranch:
             {
                 auto trueBlock = as<IRConditionalBranch>(branchInst)->getTrueBlock();
                 auto falseBlock = as<IRConditionalBranch>(branchInst)->getFalseBlock();
@@ -632,7 +632,7 @@ struct DiffUnzipPass
                         as<IRBlock>(diffMap[falseBlock])));
             }
 
-        case kIROp_ifElse:
+        case kIROp_IfElse:
             {
                 auto trueBlock = as<IRIfElse>(branchInst)->getTrueBlock();
                 auto falseBlock = as<IRIfElse>(branchInst)->getFalseBlock();
@@ -686,7 +686,7 @@ struct DiffUnzipPass
                         diffCaseArgs.getBuffer()));
             }
 
-        case kIROp_loop:
+        case kIROp_Loop:
             return splitLoop(primalBuilder, diffBuilder, as<IRLoop>(branchInst));
 
         default:
@@ -716,11 +716,11 @@ struct DiffUnzipPass
         case kIROp_Return:
             return splitReturn(primalBuilder, diffBuilder, as<IRReturn>(inst));
 
-        case kIROp_unconditionalBranch:
-        case kIROp_conditionalBranch:
-        case kIROp_ifElse:
+        case kIROp_UnconditionalBranch:
+        case kIROp_ConditionalBranch:
+        case kIROp_IfElse:
         case kIROp_Switch:
-        case kIROp_loop:
+        case kIROp_Loop:
             return splitControlFlow(primalBuilder, diffBuilder, inst);
 
         case kIROp_Unreachable:

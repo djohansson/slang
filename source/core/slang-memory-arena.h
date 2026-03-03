@@ -256,6 +256,12 @@ SLANG_FORCE_INLINE bool MemoryArena::isValid(const void* data, size_t size) cons
 SLANG_FORCE_INLINE void* MemoryArena::allocateUnaligned(size_t sizeInBytes)
 {
     assert(sizeInBytes > 0);
+
+    if (!m_current)
+    {
+        return _allocateAlignedFromNewBlock(sizeInBytes, kMinAlignment);
+    }
+
     // Align with the minimum alignment
     uint8_t* mem = m_current;
     uint8_t* end = mem + sizeInBytes;
@@ -273,6 +279,11 @@ SLANG_FORCE_INLINE void* MemoryArena::allocateUnaligned(size_t sizeInBytes)
 // --------------------------------------------------------------------------
 SLANG_FORCE_INLINE void* MemoryArena::allocateCurrentUnaligned(size_t sizeInBytes)
 {
+    if (!m_current)
+    {
+        return nullptr;
+    }
+
     // Align with the minimum alignment
     uint8_t* mem = m_current;
     uint8_t* end = mem + sizeInBytes;
@@ -291,6 +302,12 @@ SLANG_FORCE_INLINE void* MemoryArena::allocateCurrentUnaligned(size_t sizeInByte
 SLANG_FORCE_INLINE void* MemoryArena::allocate(size_t sizeInBytes)
 {
     assert(sizeInBytes > 0);
+
+    if (!m_current)
+    {
+        return _allocateAlignedFromNewBlock(sizeInBytes, kMinAlignment);
+    }
+
     // Align with the minimum alignment
     const size_t alignMask = kMinAlignment - 1;
     uint8_t* mem = (uint8_t*)((size_t(m_current) + alignMask) & ~alignMask);
@@ -310,6 +327,12 @@ SLANG_FORCE_INLINE void* MemoryArena::allocate(size_t sizeInBytes)
 SLANG_FORCE_INLINE void* MemoryArena::allocateAndZero(size_t sizeInBytes)
 {
     assert(sizeInBytes > 0);
+
+    if (!m_current)
+    {
+        return _allocateAlignedFromNewBlockAndZero(sizeInBytes, kMinAlignment);
+    }
+
     // Align with the minimum alignment
     const size_t alignMask = kMinAlignment - 1;
     // Implement without calling ::allocate, because in most common case we don't need to test for
@@ -334,6 +357,11 @@ SLANG_FORCE_INLINE void* MemoryArena::allocateAligned(size_t sizeInBytes, size_t
     assert(sizeInBytes > 0);
     // Alignment must be a power of 2
     assert(((alignment - 1) & alignment) == 0);
+
+    if (!m_current)
+    {
+        return _allocateAlignedFromNewBlock(sizeInBytes, alignment);
+    }
 
     // Align the pointer
     const size_t alignMask = alignment - 1;
@@ -382,9 +410,8 @@ inline const char* MemoryArena::allocateString(const char* chars, size_t numChar
 template<typename T>
 SLANG_FORCE_INLINE T* MemoryArena::allocate()
 {
-    void* mem = (SLANG_ALIGN_OF(T) <= kMinAlignment)
-                    ? allocate(sizeof(T))
-                    : allocateAligned(sizeof(T), SLANG_ALIGN_OF(T));
+    void* mem = (alignof(T) <= kMinAlignment) ? allocate(sizeof(T))
+                                              : allocateAligned(sizeof(T), alignof(T));
     return reinterpret_cast<T*>(mem);
 }
 
@@ -392,9 +419,8 @@ SLANG_FORCE_INLINE T* MemoryArena::allocate()
 template<typename T>
 SLANG_FORCE_INLINE T* MemoryArena::allocateArray(size_t numElems)
 {
-    return (numElems > 0)
-               ? reinterpret_cast<T*>(allocateAligned(sizeof(T) * numElems, SLANG_ALIGN_OF(T)))
-               : nullptr;
+    return (numElems > 0) ? reinterpret_cast<T*>(allocateAligned(sizeof(T) * numElems, alignof(T)))
+                          : nullptr;
 }
 
 // --------------------------------------------------------------------------
@@ -405,7 +431,7 @@ SLANG_FORCE_INLINE T* MemoryArena::allocateAndCopyArray(const T* arr, size_t num
     if (numElems > 0)
     {
         const size_t totalSize = sizeof(T) * numElems;
-        void* ptr = allocateAligned(totalSize, SLANG_ALIGN_OF(T));
+        void* ptr = allocateAligned(totalSize, alignof(T));
         ::memcpy(ptr, arr, totalSize);
         return reinterpret_cast<T*>(ptr);
     }
@@ -419,7 +445,7 @@ SLANG_FORCE_INLINE T* MemoryArena::allocateAndZeroArray(size_t numElems)
     if (numElems > 0)
     {
         const size_t totalSize = sizeof(T) * numElems;
-        void* ptr = allocateAligned(totalSize, SLANG_ALIGN_OF(T));
+        void* ptr = allocateAligned(totalSize, alignof(T));
         ::memset(ptr, 0, totalSize);
         return reinterpret_cast<T*>(ptr);
     }

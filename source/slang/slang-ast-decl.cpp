@@ -405,25 +405,6 @@ void ContainerDecl::_ensureLookupAcceleratorsAreValid()
 }
 
 void ContainerDecl::
-    _invalidateLookupAcceleratorsBecauseUnscopedEnumAttributeWillBeTurnedIntoTransparentModifier(
-        UnscopedEnumAttribute* unscopedEnumAttr,
-        TransparentModifier* transparentModifier)
-{
-    if (isUsingOnDemandDeserializationForDirectMembers())
-    {
-        SLANG_UNEXPECTED("this operation shouldn't be performed on deserialized declarations");
-    }
-
-    SLANG_ASSERT(unscopedEnumAttr);
-    SLANG_ASSERT(transparentModifier);
-
-    SLANG_UNUSED(unscopedEnumAttr);
-    SLANG_UNUSED(transparentModifier);
-
-    _invalidateLookupAccelerators();
-}
-
-void ContainerDecl::
     _removeDirectMemberConstructorDeclBecauseSynthesizedAnotherDefaultConstructorInstead(
         ConstructorDecl* decl)
 {
@@ -512,7 +493,7 @@ InterfaceDecl* ThisTypeConstraintDecl::getInterfaceDecl()
 
 void AggTypeDecl::addTag(TypeTag tag)
 {
-    typeTags = (TypeTag)((int)tag | (int)tag);
+    typeTags = (TypeTag)((int)typeTags | (int)tag);
 }
 
 bool AggTypeDecl::hasTag(TypeTag tag)

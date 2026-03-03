@@ -3,10 +3,12 @@
 
 #include "slang-ir-clone.h"
 #include "slang-ir-insts.h"
+#include "slang-ir-layout.h"
 #include "slang-ir-lower-out-parameters.h"
 #include "slang-ir-lower-tuple-types.h"
 #include "slang-ir-util.h"
 #include "slang-parameter-binding.h"
+#include "slang-rich-diagnostics.h"
 
 #include <set>
 
@@ -185,11 +187,10 @@ void assign(IRBuilder& builder, LegalizedVaryingVal const& dest, IRInst* src)
 
 IRInst* emitCalcGroupExtents(IRBuilder& builder, IRFunc* entryPoint, IRVectorType* type)
 {
+    static const int kAxisCount = 3;
+    IRInst* groupExtentAlongAxis[kAxisCount] = {};
     if (auto numThreadsDecor = entryPoint->findDecoration<IRNumThreadsDecoration>())
     {
-        static const int kAxisCount = 3;
-        IRInst* groupExtentAlongAxis[kAxisCount] = {};
-
         for (int axis = 0; axis < kAxisCount; axis++)
         {
             auto litValue = as<IRIntLit>(numThreadsDecor->getOperand(axis));
@@ -199,16 +200,14 @@ IRInst* emitCalcGroupExtents(IRBuilder& builder, IRFunc* entryPoint, IRVectorTyp
             groupExtentAlongAxis[axis] =
                 builder.getIntValue(type->getElementType(), litValue->getValue());
         }
-
-        return builder.emitMakeVector(type, kAxisCount, groupExtentAlongAxis);
+    }
+    else
+    {
+        for (int axis = 0; axis < kAxisCount; axis++)
+            groupExtentAlongAxis[axis] = builder.getIntValue(type->getElementType(), 1);
     }
 
-    // TODO: We may want to implement a backup option here,
-    // in case we ever want to support compute shaders with
-    // dynamic/flexible group size on targets that allow it.
-    //
-    SLANG_UNEXPECTED("Expected '[numthreads(...)]' attribute on compute entry point.");
-    UNREACHABLE_RETURN(nullptr);
+    return builder.emitMakeVector(type, kAxisCount, groupExtentAlongAxis);
 }
 
 // There are some cases of system-value inputs that can be derived
@@ -289,6 +288,46 @@ IRInst* emitCalcGroupIndex(IRBuilder& builder, IRInst* groupThreadID, IRInst* gr
 
     return offset;
 }
+
+IRInst* tryConvertValue(IRBuilder& builder, IRInst* val, IRType* toType)
+{
+    auto fromType = val->getFullType();
+    if (auto fromVector = as<IRVectorType>(fromType))
+    {
+        if (auto toVector = as<IRVectorType>(toType))
+        {
+            if (fromVector->getElementCount() != toVector->getElementCount())
+            {
+                fromType = builder.getVectorType(
+                    fromVector->getElementType(),
+                    toVector->getElementCount());
+                val = builder.emitVectorReshape(fromType, val);
+            }
+        }
+        else if (as<IRBasicType>(toType))
+        {
+            UInt index = 0;
+            val = builder.emitSwizzle(fromVector->getElementType(), val, 1, &index);
+            if (toType->getOp() == kIROp_VoidType)
+                return nullptr;
+        }
+    }
+    else if (auto fromBasicType = as<IRBasicType>(fromType))
+    {
+        if (fromBasicType->getOp() == kIROp_VoidType)
+            return nullptr;
+        if (!as<IRBasicType>(toType))
+            return nullptr;
+        if (toType->getOp() == kIROp_VoidType)
+            return nullptr;
+    }
+    else
+    {
+        return nullptr;
+    }
+    return builder.emitCast(toType, val);
+}
+
 
 /// Context for the IR pass that legalizing entry-point
 /// varying parameters for a target.
@@ -485,9 +524,14 @@ protected:
             if (param == lastOriginalParam)
                 break;
         }
+
+        // Allow subtype to perform any cleanup or finalization
+        // after all parameters have been processed.
+        endEntryPointImpl();
     }
 
     virtual void beginEntryPointImpl() {}
+    virtual void endEntryPointImpl() {}
 
     // The next level down is the per-parameter processing logic, which
     // like the per-module and per-entry-point levels maintains its own
@@ -525,11 +569,11 @@ protected:
         // the strategy we take.
         //
         auto paramType = param->getDataType();
-        if (auto inOutType = as<IRInOutType>(paramType))
+        if (auto inOutType = as<IRBorrowInOutParamType>(paramType))
         {
             processInOutParam(param, inOutType);
         }
-        else if (auto outType = as<IROutType>(paramType))
+        else if (auto outType = as<IROutParamType>(paramType))
         {
             processOutParam(param, outType);
         }
@@ -545,16 +589,16 @@ protected:
     // that provides baseline behavior that should in theory work for
     // multiple targets.
     //
-    virtual void processInOutParam(IRParam* param, IRInOutType* inOutType)
+    virtual void processInOutParam(IRParam* param, IRBorrowInOutParamType* inOutType)
     {
         processMutableParam(param, inOutType);
     }
-    virtual void processOutParam(IRParam* param, IROutType* inOutType)
+    virtual void processOutParam(IRParam* param, IROutParamType* inOutType)
     {
         processMutableParam(param, inOutType);
     }
 
-    void processMutableParam(IRParam* param, IROutTypeBase* paramPtrType)
+    void processMutableParam(IRParam* param, IROutParamTypeBase* paramPtrType)
     {
         // The deafult handling of any mutable (`out` or `inout`) parameter
         // will be to introduce a local variable of the corresponding
@@ -577,7 +621,7 @@ protected:
         builder.addSimpleDecoration<IRTempCallArgVarDecoration>(localVar);
         auto localVal = LegalizedVaryingVal::makeAddress(localVar);
 
-        if (const auto inOutType = as<IRInOutType>(paramPtrType))
+        if (const auto inOutType = as<IRBorrowInOutParamType>(paramPtrType))
         {
             // If the parameter was an `inout` and not just an `out`
             // parameter, we will create one more more legal `in`
@@ -999,10 +1043,9 @@ protected:
     {
         SLANG_UNUSED(info);
 
-        m_sink->diagnose(
-            m_param,
-            Diagnostics::unimplemented,
-            "this target doesn't support this system-defined varying parameter");
+        m_sink->diagnose(Diagnostics::Unimplemented{
+            .feature = "this target doesn't support this system-defined varying parameter",
+            .location = m_param->sourceLoc});
 
         return LegalizedVaryingVal();
     }
@@ -1011,12 +1054,30 @@ protected:
     {
         SLANG_UNUSED(info);
 
-        m_sink->diagnose(
-            m_param,
-            Diagnostics::unimplemented,
-            "this target doesn't support this user-defined varying parameter");
+        m_sink->diagnose(Diagnostics::Unimplemented{
+            .feature = "this target doesn't support this user-defined varying parameter",
+            .location = m_param->sourceLoc});
 
         return LegalizedVaryingVal();
+    }
+
+    LegalizedVaryingVal createLegalizedSystemVaryingValInst(
+        VaryingParamInfo const& info,
+        IRInst* id)
+    {
+        IRType* paramType = info.type;
+
+        // CUDA and C++ targets wrap parameters in a BorrowInParamType, but that
+        // may not always be the case for every target.
+        if (auto ptr = as<IRBorrowInParamType>(info.type))
+            paramType = ptr->getValueType();
+
+        IRBuilder builder(m_module);
+        builder.setInsertBefore(m_firstOrdinaryInst);
+
+        auto converted = tryConvertValue(builder, id, as<IRType>(paramType));
+
+        return LegalizedVaryingVal::makeValue(converted);
     }
 };
 
@@ -1043,12 +1104,681 @@ struct CUDAEntryPointVaryingParamLegalizeContext : EntryPointVaryingParamLegaliz
     //
     IRType* uint3Type = nullptr;
 
+    // Maximum number of payload registers (32 registers = 128 bytes)
+    static const int kMaxPayloadRegisters = 32;
+
+    // Track payload write-back info for inout parameters
+    struct PayloadWritebackInfo
+    {
+        IRVar* localVar;
+        IRType* payloadType;
+        int registerCount;
+    };
+    List<PayloadWritebackInfo> m_payloadWritebacks;
+
+    // Get C++ size and alignment of a type using CUDA layout rules.
+    // Uses IRTypeLayoutRules::getCUDA() which extends C layout with CUDA-specific
+    // vector alignment to match CUDA C++ compiler behavior and the prelude's layout.
+    bool getTypeCppSizeAndAlignment(
+        IRType* type,
+        IRBuilder* builder,
+        int& outSize,
+        int& outAlignment)
+    {
+        if (auto ptrValType = tryGetPointedToType(builder, type))
+            type = ptrValType;
+
+        IRSizeAndAlignment sizeAndAlign;
+        Result result =
+            getSizeAndAlignment(nullptr, IRTypeLayoutRules::getCUDA(), type, &sizeAndAlign);
+        if (SLANG_FAILED(result))
+            return false;
+
+        outSize = int(sizeAndAlign.size);
+        outAlignment = int(sizeAndAlign.alignment);
+        return true;
+    }
+
+    // Get the C++ alignment of a type in bytes.
+    int getTypeCppAlignment(IRType* type, IRBuilder* builder)
+    {
+        int size, alignment;
+        if (getTypeCppSizeAndAlignment(type, builder, size, alignment))
+            return alignment;
+        return 4; // Default fallback
+    }
+
+    // Get the C++ size of a type in bytes (including internal padding).
+    int getTypeCppSize(IRType* type, IRBuilder* builder)
+    {
+        int size, alignment;
+        if (getTypeCppSizeAndAlignment(type, builder, size, alignment))
+            return size;
+        return 0; // Failure
+    }
+
+    // Compute how many uint32 registers a type requires.
+    // Returns 0 if the type is too large (> 32 registers = 128 bytes),
+    // or if it cannot be flattened to registers.
+    // Uses C++ sizeof rules to match the prelude's PayloadRegisters<T>.
+    int computePayloadRegisterCount(IRType* type, IRBuilder* builder)
+    {
+        int sizeBytes = getTypeCppSize(type, builder);
+        if (sizeBytes == 0)
+            return 0;
+        int regCount = (sizeBytes + 3) / 4;
+        if (regCount > kMaxPayloadRegisters)
+            return 0;
+        return regCount;
+    }
+
+    // Emit code to read a value from payload registers.
+    // ioByteOffset is the current byte offset, aligned to the type's alignment before reading.
+    // This must match C++ struct layout rules for compatibility with the prelude's
+    // PayloadRegisters.
+    IRInst* emitOptiXPayloadRead(int& ioByteOffset, IRType* typeToFetch, IRBuilder* builder)
+    {
+        if (auto ptrValType = tryGetPointedToType(builder, typeToFetch))
+            typeToFetch = ptrValType;
+
+        if (auto structType = as<IRStructType>(typeToFetch))
+        {
+            List<IRInst*> fieldVals;
+            for (auto field : structType->getFields())
+            {
+                auto fieldType = field->getFieldType();
+                // Align to field alignment before reading
+                int fieldAlign = getTypeCppAlignment(fieldType, builder);
+                ioByteOffset = (ioByteOffset + fieldAlign - 1) & ~(fieldAlign - 1);
+                auto fieldVal = emitOptiXPayloadRead(ioByteOffset, fieldType, builder);
+                if (!fieldVal)
+                    return nullptr;
+                fieldVals.add(fieldVal);
+            }
+            return builder->emitMakeStruct(typeToFetch, fieldVals);
+        }
+        else if (auto arrayType = as<IRArrayTypeBase>(typeToFetch))
+        {
+            auto elementCountInst = as<IRIntLit>(arrayType->getElementCount());
+            if (!elementCountInst)
+                return nullptr;
+            IRIntegerValue elementCount = elementCountInst->getValue();
+            auto elementType = arrayType->getElementType();
+            List<IRInst*> elementVals;
+            for (IRIntegerValue ii = 0; ii < elementCount; ++ii)
+            {
+                auto elementVal = emitOptiXPayloadRead(ioByteOffset, elementType, builder);
+                if (!elementVal)
+                    return nullptr;
+                elementVals.add(elementVal);
+            }
+            return builder->emitMakeArray(
+                typeToFetch,
+                elementVals.getCount(),
+                elementVals.getBuffer());
+        }
+        else if (auto matType = as<IRMatrixType>(typeToFetch))
+        {
+            auto rowCountInst = as<IRIntLit>(matType->getRowCount());
+            if (rowCountInst)
+            {
+                auto rowType =
+                    builder->getVectorType(matType->getElementType(), matType->getColumnCount());
+                IRIntegerValue rowCount = rowCountInst->getValue();
+                List<IRInst*> rowVals;
+                for (IRIntegerValue ii = 0; ii < rowCount; ++ii)
+                {
+                    auto rowVal = emitOptiXPayloadRead(ioByteOffset, rowType, builder);
+                    if (!rowVal)
+                        return nullptr;
+                    rowVals.add(rowVal);
+                }
+                return builder->emitIntrinsicInst(
+                    typeToFetch,
+                    kIROp_MakeMatrix,
+                    rowVals.getCount(),
+                    rowVals.getBuffer());
+            }
+        }
+        else if (auto vecType = as<IRVectorType>(typeToFetch))
+        {
+            auto elementCountInst = as<IRIntLit>(vecType->getElementCount());
+            if (!elementCountInst)
+                return nullptr;
+            IRIntegerValue elementCount = elementCountInst->getValue();
+            IRType* elementType = vecType->getElementType();
+            List<IRInst*> elementVals;
+            for (IRIntegerValue ii = 0; ii < elementCount; ++ii)
+            {
+                auto elementVal = emitOptiXPayloadRead(ioByteOffset, elementType, builder);
+                if (!elementVal)
+                    return nullptr;
+                elementVals.add(elementVal);
+            }
+            return builder->emitMakeVector(
+                typeToFetch,
+                elementVals.getCount(),
+                elementVals.getBuffer());
+        }
+        else if (auto basicType = as<IRBasicType>(typeToFetch))
+        {
+            auto uintType = builder->getBasicType(BaseType::UInt);
+            int regIdx = ioByteOffset / 4;
+            IRInst* regIdxInst = builder->getIntValue(builder->getIntType(), regIdx);
+
+            switch (basicType->getBaseType())
+            {
+            case BaseType::Int:
+            case BaseType::UInt:
+                {
+                    // Direct read - register holds the value
+                    ioByteOffset += 4;
+                    return builder->emitIntrinsicInst(
+                        uintType,
+                        kIROp_GetOptiXPayloadRegister,
+                        1,
+                        &regIdxInst);
+                }
+            case BaseType::Float:
+                {
+                    // Read as uint, then bitcast to float
+                    ioByteOffset += 4;
+                    auto uintVal = builder->emitIntrinsicInst(
+                        uintType,
+                        kIROp_GetOptiXPayloadRegister,
+                        1,
+                        &regIdxInst);
+                    return builder->emitBitCast(typeToFetch, uintVal);
+                }
+            case BaseType::Bool:
+            case BaseType::Int8:
+            case BaseType::UInt8:
+                {
+                    // Read 1 byte from the appropriate position in the register
+                    int byteInReg = ioByteOffset % 4;
+                    ioByteOffset += 1;
+                    auto regVal = builder->emitIntrinsicInst(
+                        uintType,
+                        kIROp_GetOptiXPayloadRegister,
+                        1,
+                        &regIdxInst);
+                    if (byteInReg > 0)
+                    {
+                        auto shiftAmount = builder->getIntValue(uintType, byteInReg * 8);
+                        regVal = builder->emitShr(uintType, regVal, shiftAmount);
+                    }
+                    auto mask = builder->getIntValue(uintType, 0xFF);
+                    auto maskedVal = builder->emitBitAnd(uintType, regVal, mask);
+                    return builder->emitCast(typeToFetch, maskedVal);
+                }
+            case BaseType::Int16:
+            case BaseType::UInt16:
+            case BaseType::Half:
+                {
+                    // Read 2 bytes from the appropriate position in the register
+                    int byteInReg = ioByteOffset % 4;
+                    ioByteOffset += 2;
+                    auto regVal = builder->emitIntrinsicInst(
+                        uintType,
+                        kIROp_GetOptiXPayloadRegister,
+                        1,
+                        &regIdxInst);
+                    if (byteInReg > 0)
+                    {
+                        auto shiftAmount = builder->getIntValue(uintType, byteInReg * 8);
+                        regVal = builder->emitShr(uintType, regVal, shiftAmount);
+                    }
+                    auto mask = builder->getIntValue(uintType, 0xFFFF);
+                    auto maskedVal = builder->emitBitAnd(uintType, regVal, mask);
+                    if (basicType->getBaseType() == BaseType::Half)
+                    {
+                        // Cast uint32 → uint16 first, then bitcast uint16 → Half
+                        auto uint16Type = builder->getBasicType(BaseType::UInt16);
+                        auto uint16Val = builder->emitCast(uint16Type, maskedVal);
+                        return builder->emitBitCast(typeToFetch, uint16Val);
+                    }
+                    return builder->emitCast(typeToFetch, maskedVal);
+                }
+            case BaseType::Int64:
+            case BaseType::UInt64:
+                {
+                    // Read low and high parts
+                    auto uint64Type = builder->getBasicType(BaseType::UInt64);
+                    auto lowVal = builder->emitIntrinsicInst(
+                        uintType,
+                        kIROp_GetOptiXPayloadRegister,
+                        1,
+                        &regIdxInst);
+                    ioByteOffset += 4;
+                    int regIdx2 = ioByteOffset / 4;
+                    IRInst* regIdx2Inst = builder->getIntValue(builder->getIntType(), regIdx2);
+                    auto highVal = builder->emitIntrinsicInst(
+                        uintType,
+                        kIROp_GetOptiXPayloadRegister,
+                        1,
+                        &regIdx2Inst);
+                    ioByteOffset += 4;
+                    // Combine: (high << 32) | low
+                    auto lowExt = builder->emitCast(uint64Type, lowVal);
+                    auto highExt = builder->emitCast(uint64Type, highVal);
+                    auto shift = builder->getIntValue(uint64Type, 32);
+                    auto highShifted = builder->emitShl(uint64Type, highExt, shift);
+                    auto combined = builder->emitBitOr(uint64Type, highShifted, lowExt);
+                    if (basicType->getBaseType() == BaseType::Int64)
+                        return builder->emitBitCast(typeToFetch, combined);
+                    return combined;
+                }
+            case BaseType::Double:
+                {
+                    // Read as uint64, then bitcast to double
+                    auto uint64Type = builder->getBasicType(BaseType::UInt64);
+                    auto lowVal = builder->emitIntrinsicInst(
+                        uintType,
+                        kIROp_GetOptiXPayloadRegister,
+                        1,
+                        &regIdxInst);
+                    ioByteOffset += 4;
+                    int regIdx2 = ioByteOffset / 4;
+                    IRInst* regIdx2Inst = builder->getIntValue(builder->getIntType(), regIdx2);
+                    auto highVal = builder->emitIntrinsicInst(
+                        uintType,
+                        kIROp_GetOptiXPayloadRegister,
+                        1,
+                        &regIdx2Inst);
+                    ioByteOffset += 4;
+                    auto lowExt = builder->emitCast(uint64Type, lowVal);
+                    auto highExt = builder->emitCast(uint64Type, highVal);
+                    auto shift = builder->getIntValue(uint64Type, 32);
+                    auto highShifted = builder->emitShl(uint64Type, highExt, shift);
+                    auto combined = builder->emitBitOr(uint64Type, highShifted, lowExt);
+                    return builder->emitBitCast(typeToFetch, combined);
+                }
+            default:
+                return nullptr;
+            }
+        }
+        return nullptr;
+    }
+
+    // Emit code to write a value to payload registers.
+    // ioByteOffset is the current byte offset, aligned to the type's alignment before writing.
+    // This must match C++ struct layout rules for compatibility with the prelude's
+    // PayloadRegisters.
+    void emitOptiXPayloadWrite(int& ioByteOffset, IRInst* value, IRType* type, IRBuilder* builder)
+    {
+        if (auto ptrValType = tryGetPointedToType(builder, type))
+            type = ptrValType;
+
+        auto uintType = builder->getBasicType(BaseType::UInt);
+
+        if (auto structType = as<IRStructType>(type))
+        {
+            for (auto field : structType->getFields())
+            {
+                auto fieldType = field->getFieldType();
+                // Align to field alignment before writing
+                int fieldAlign = getTypeCppAlignment(fieldType, builder);
+                ioByteOffset = (ioByteOffset + fieldAlign - 1) & ~(fieldAlign - 1);
+                auto fieldKey = field->getKey();
+                auto fieldVal = builder->emitFieldExtract(fieldType, value, fieldKey);
+                emitOptiXPayloadWrite(ioByteOffset, fieldVal, fieldType, builder);
+            }
+        }
+        else if (auto arrayType = as<IRArrayTypeBase>(type))
+        {
+            auto elementCountInst = as<IRIntLit>(arrayType->getElementCount());
+            if (!elementCountInst)
+                return;
+            IRIntegerValue elementCount = elementCountInst->getValue();
+            auto elementType = arrayType->getElementType();
+            for (IRIntegerValue ii = 0; ii < elementCount; ++ii)
+            {
+                auto idx = builder->getIntValue(builder->getIntType(), ii);
+                auto elementVal = builder->emitElementExtract(elementType, value, idx);
+                emitOptiXPayloadWrite(ioByteOffset, elementVal, elementType, builder);
+            }
+        }
+        else if (auto matType = as<IRMatrixType>(type))
+        {
+            auto rowCountInst = as<IRIntLit>(matType->getRowCount());
+            auto colCountInst = as<IRIntLit>(matType->getColumnCount());
+            if (rowCountInst && colCountInst)
+            {
+                IRIntegerValue rowCount = rowCountInst->getValue();
+                IRIntegerValue colCount = colCountInst->getValue();
+                auto elementType = matType->getElementType();
+                auto rowType = builder->getVectorType(elementType, matType->getColumnCount());
+                for (IRIntegerValue row = 0; row < rowCount; ++row)
+                {
+                    auto rowIdx = builder->getIntValue(builder->getIntType(), row);
+                    // First extract the row (which is a vector)
+                    auto rowVal = builder->emitElementExtract(rowType, value, rowIdx);
+                    for (IRIntegerValue col = 0; col < colCount; ++col)
+                    {
+                        auto colIdx = builder->getIntValue(builder->getIntType(), col);
+                        // Then extract the element from the row vector
+                        auto elementVal = builder->emitElementExtract(elementType, rowVal, colIdx);
+                        emitOptiXPayloadWrite(ioByteOffset, elementVal, elementType, builder);
+                    }
+                }
+            }
+        }
+        else if (auto vecType = as<IRVectorType>(type))
+        {
+            auto elementCountInst = as<IRIntLit>(vecType->getElementCount());
+            if (!elementCountInst)
+                return;
+            IRIntegerValue elementCount = elementCountInst->getValue();
+            auto elementType = vecType->getElementType();
+            for (IRIntegerValue ii = 0; ii < elementCount; ++ii)
+            {
+                auto idx = builder->getIntValue(builder->getIntType(), ii);
+                auto elementVal = builder->emitElementExtract(elementType, value, idx);
+                emitOptiXPayloadWrite(ioByteOffset, elementVal, elementType, builder);
+            }
+        }
+        else if (auto basicType = as<IRBasicType>(type))
+        {
+            int regIdx = ioByteOffset / 4;
+            IRInst* regIdxInst = builder->getIntValue(builder->getIntType(), regIdx);
+            IRInst* uintVal = nullptr;
+
+            switch (basicType->getBaseType())
+            {
+            case BaseType::Int:
+            case BaseType::UInt:
+                uintVal = builder->emitBitCast(uintType, value);
+                break;
+            case BaseType::Float:
+                uintVal = builder->emitBitCast(uintType, value);
+                break;
+            case BaseType::Bool:
+            case BaseType::Int8:
+            case BaseType::UInt8:
+                {
+                    // Write 1 byte at the appropriate position in the register
+                    // Need read-modify-write since multiple sub-word values may share a register
+                    int byteInReg = ioByteOffset % 4;
+                    auto valAsUint = builder->emitCast(uintType, value);
+                    auto mask = builder->getIntValue(uintType, 0xFF);
+                    valAsUint = builder->emitBitAnd(uintType, valAsUint, mask);
+
+                    if (byteInReg > 0)
+                    {
+                        auto shiftAmount = builder->getIntValue(uintType, byteInReg * 8);
+                        valAsUint = builder->emitShl(uintType, valAsUint, shiftAmount);
+                    }
+
+                    // Read current register value
+                    auto oldVal = builder->emitIntrinsicInst(
+                        uintType,
+                        kIROp_GetOptiXPayloadRegister,
+                        1,
+                        &regIdxInst);
+                    // Clear the byte we're writing
+                    auto clearMask =
+                        builder->getIntValue(uintType, ~IRIntegerValue(0xFFu << (byteInReg * 8)));
+                    auto clearedVal = builder->emitBitAnd(uintType, oldVal, clearMask);
+                    // OR in the new value
+                    auto newVal = builder->emitBitOr(uintType, clearedVal, valAsUint);
+
+                    IRInst* args[] = {regIdxInst, newVal};
+                    builder->emitIntrinsicInst(
+                        builder->getVoidType(),
+                        kIROp_SetOptiXPayloadRegister,
+                        2,
+                        args);
+                    ioByteOffset += 1;
+                    return;
+                }
+            case BaseType::Int16:
+            case BaseType::UInt16:
+            case BaseType::Half:
+                {
+                    // Write 2 bytes at the appropriate position in the register
+                    // Need read-modify-write since multiple sub-word values may share a register
+                    int byteInReg = ioByteOffset % 4;
+                    IRInst* valAsUint;
+                    if (basicType->getBaseType() == BaseType::Half)
+                    {
+                        // Bitcast Half → uint16 first, then cast uint16 → uint32
+                        auto uint16Type = builder->getBasicType(BaseType::UInt16);
+                        auto uint16Val = builder->emitBitCast(uint16Type, value);
+                        valAsUint = builder->emitCast(uintType, uint16Val);
+                    }
+                    else
+                        valAsUint = builder->emitCast(uintType, value);
+                    auto mask = builder->getIntValue(uintType, 0xFFFF);
+                    valAsUint = builder->emitBitAnd(uintType, valAsUint, mask);
+
+                    if (byteInReg > 0)
+                    {
+                        auto shiftAmount = builder->getIntValue(uintType, byteInReg * 8);
+                        valAsUint = builder->emitShl(uintType, valAsUint, shiftAmount);
+                    }
+
+                    // Read current register value
+                    auto oldVal = builder->emitIntrinsicInst(
+                        uintType,
+                        kIROp_GetOptiXPayloadRegister,
+                        1,
+                        &regIdxInst);
+                    // Clear the bytes we're writing
+                    auto clearMask =
+                        builder->getIntValue(uintType, ~IRIntegerValue(0xFFFFu << (byteInReg * 8)));
+                    auto clearedVal = builder->emitBitAnd(uintType, oldVal, clearMask);
+                    // OR in the new value
+                    auto newVal = builder->emitBitOr(uintType, clearedVal, valAsUint);
+
+                    IRInst* args[] = {regIdxInst, newVal};
+                    builder->emitIntrinsicInst(
+                        builder->getVoidType(),
+                        kIROp_SetOptiXPayloadRegister,
+                        2,
+                        args);
+                    ioByteOffset += 2;
+                    return;
+                }
+            case BaseType::Int64:
+            case BaseType::UInt64:
+                {
+                    // Write low and high parts
+                    auto uint64Type = builder->getBasicType(BaseType::UInt64);
+                    auto valAs64 = builder->emitBitCast(uint64Type, value);
+                    auto lowVal = builder->emitCast(uintType, valAs64);
+                    auto shift = builder->getIntValue(uint64Type, 32);
+                    auto highVal64 = builder->emitShr(uint64Type, valAs64, shift);
+                    auto highVal = builder->emitCast(uintType, highVal64);
+
+                    IRInst* lowArgs[] = {regIdxInst, lowVal};
+                    builder->emitIntrinsicInst(
+                        builder->getVoidType(),
+                        kIROp_SetOptiXPayloadRegister,
+                        2,
+                        lowArgs);
+                    ioByteOffset += 4;
+                    int regIdx2 = ioByteOffset / 4;
+                    IRInst* regIdx2Inst = builder->getIntValue(builder->getIntType(), regIdx2);
+                    IRInst* highArgs[] = {regIdx2Inst, highVal};
+                    builder->emitIntrinsicInst(
+                        builder->getVoidType(),
+                        kIROp_SetOptiXPayloadRegister,
+                        2,
+                        highArgs);
+                    ioByteOffset += 4;
+                    return;
+                }
+            case BaseType::Double:
+                {
+                    // Cast to uint64, then write low and high parts
+                    auto uint64Type = builder->getBasicType(BaseType::UInt64);
+                    auto valAs64 = builder->emitBitCast(uint64Type, value);
+                    auto lowVal = builder->emitCast(uintType, valAs64);
+                    auto shift = builder->getIntValue(uint64Type, 32);
+                    auto highVal64 = builder->emitShr(uint64Type, valAs64, shift);
+                    auto highVal = builder->emitCast(uintType, highVal64);
+
+                    IRInst* lowArgs[] = {regIdxInst, lowVal};
+                    builder->emitIntrinsicInst(
+                        builder->getVoidType(),
+                        kIROp_SetOptiXPayloadRegister,
+                        2,
+                        lowArgs);
+                    ioByteOffset += 4;
+                    int regIdx2 = ioByteOffset / 4;
+                    IRInst* regIdx2Inst = builder->getIntValue(builder->getIntType(), regIdx2);
+                    IRInst* highArgs[] = {regIdx2Inst, highVal};
+                    builder->emitIntrinsicInst(
+                        builder->getVoidType(),
+                        kIROp_SetOptiXPayloadRegister,
+                        2,
+                        highArgs);
+                    ioByteOffset += 4;
+                    return;
+                }
+            default:
+                return;
+            }
+
+            if (uintVal)
+            {
+                IRInst* args[] = {regIdxInst, uintVal};
+                builder->emitIntrinsicInst(
+                    builder->getVoidType(),
+                    kIROp_SetOptiXPayloadRegister,
+                    2,
+                    args);
+                ioByteOffset += 4;
+            }
+        }
+    }
+
+    // Check if a function is a shader-terminating intrinsic (IgnoreHit, AcceptHitAndEndSearch)
+    bool isShaderTerminatingIntrinsic(IRFunc* func)
+    {
+        if (!func)
+            return false;
+
+        // Check if function has targetIntrinsic decoration with IgnoreHit or AcceptHitAndEndSearch
+        for (auto decoration : func->getDecorations())
+        {
+            if (auto targetIntrinsic = as<IRTargetIntrinsicDecoration>(decoration))
+            {
+                auto definitionStr = targetIntrinsic->getDefinition();
+                if (definitionStr.indexOf(UnownedStringSlice("IgnoreHit")) != Index(-1) ||
+                    definitionStr.indexOf(UnownedStringSlice("AcceptHitAndEndSearch")) != Index(-1))
+                    return true;
+            }
+        }
+
+        // Also check function name hint
+        if (auto nameHint = func->findDecoration<IRNameHintDecoration>())
+        {
+            auto name = nameHint->getName();
+            if (name == "IgnoreHit" || name == "AcceptHitAndEndSearch")
+                return true;
+        }
+
+        return false;
+    }
+
+    // Find the TempCallArgVar with matching type in the first block.
+    // This is the variable that actually gets modified by the function body.
+    IRVar* findTempCallArgVar(IRType* payloadType)
+    {
+        auto firstBlock = m_entryPointFunc->getFirstBlock();
+        if (!firstBlock)
+            return nullptr;
+
+        for (auto inst : firstBlock->getChildren())
+        {
+            auto varInst = as<IRVar>(inst);
+            if (!varInst)
+                continue;
+
+            // Check for TempCallArgVarDecoration
+            bool hasTempCallArgDecor = false;
+            for (auto decor : varInst->getDecorations())
+            {
+                if (as<IRTempCallArgVarDecoration>(decor))
+                {
+                    hasTempCallArgDecor = true;
+                    break;
+                }
+            }
+
+            if (hasTempCallArgDecor)
+            {
+                // Check if the type matches
+                auto varPtrType = as<IRPtrTypeBase>(varInst->getDataType());
+                if (varPtrType && varPtrType->getValueType() == payloadType)
+                    return varInst;
+            }
+        }
+        return nullptr;
+    }
+
+    // Emit payload write-backs before return instructions and shader-terminating calls
+    void emitPayloadWritebacks()
+    {
+        if (m_payloadWritebacks.getCount() == 0)
+            return;
+
+        IRBuilder builder(m_module);
+
+        // For each payload, find the TempCallArgVar that contains the modified value
+        for (auto& info : m_payloadWritebacks)
+        {
+            // Find the TempCallArgVar with matching type - this has the modified value
+            IRVar* actualVar = findTempCallArgVar(info.payloadType);
+            if (!actualVar)
+                actualVar = info.localVar; // Fallback to our tracked variable
+
+            // Insert write-backs before return statements
+            for (auto block : m_entryPointFunc->getBlocks())
+            {
+                auto terminator = block->getTerminator();
+                if (terminator && (terminator->getOp() == kIROp_Return ||
+                                   terminator->getOp() == kIROp_MissingReturn))
+                {
+                    builder.setInsertBefore(terminator);
+                    auto payloadVal = builder.emitLoad(actualVar);
+                    int regIndex = 0;
+                    emitOptiXPayloadWrite(regIndex, payloadVal, info.payloadType, &builder);
+                }
+
+                // Insert write-backs before shader-terminating calls
+                for (auto inst : block->getChildren())
+                {
+                    if (auto call = as<IRCall>(inst))
+                    {
+                        auto callee = call->getCallee();
+                        auto calleeFunc = as<IRFunc>(callee);
+                        if (!calleeFunc)
+                        {
+                            if (auto specialize = as<IRSpecialize>(callee))
+                                calleeFunc = as<IRFunc>(specialize->getBase());
+                        }
+
+                        if (isShaderTerminatingIntrinsic(calleeFunc))
+                        {
+                            builder.setInsertBefore(call);
+                            auto payloadVal = builder.emitLoad(actualVar);
+                            int regIndex = 0;
+                            emitOptiXPayloadWrite(regIndex, payloadVal, info.payloadType, &builder);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Scans through and returns the first typeLayout attribute of non-zero size.
     static LayoutResourceKind getLayoutResourceKind(IRTypeLayout* typeLayout)
     {
         for (auto attr : typeLayout->getSizeAttrs())
         {
-            if (attr->getSize() != 0)
+            if (attr->getSize().compare(0) == std::partial_ordering::greater)
                 return attr->getResourceKind();
         }
         return LayoutResourceKind::None;
@@ -1263,6 +1993,16 @@ struct CUDAEntryPointVaryingParamLegalizeContext : EntryPointVaryingParamLegaliz
         // requires more (and more subtle) code in this pass.
     }
 
+    void endEntryPointImpl() SLANG_OVERRIDE
+    {
+        // After all parameters have been processed, emit write-backs
+        // for any inline payload registers before return statements.
+        emitPayloadWritebacks();
+
+        // Clear the writeback list for the next entry point
+        m_payloadWritebacks.clear();
+    }
+
     LegalizedVaryingVal createLegalSystemVaryingValImpl(VaryingParamInfo const& info) SLANG_OVERRIDE
     {
         // Because all of the relevant values are either
@@ -1274,13 +2014,13 @@ struct CUDAEntryPointVaryingParamLegalizeContext : EntryPointVaryingParamLegaliz
         switch (info.systemValueSemanticName)
         {
         case SystemValueSemanticName::GroupID:
-            return createLegalizedVal(info, blockIdxGlobalParam);
+            return createLegalizedSystemVaryingValInst(info, blockIdxGlobalParam);
         case SystemValueSemanticName::GroupThreadID:
-            return createLegalizedVal(info, threadIdxGlobalParam);
+            return createLegalizedSystemVaryingValInst(info, threadIdxGlobalParam);
         case SystemValueSemanticName::GroupIndex:
-            return createLegalizedVal(info, groupThreadIndex);
+            return createLegalizedSystemVaryingValInst(info, groupThreadIndex);
         case SystemValueSemanticName::DispatchThreadID:
-            return createLegalizedVal(info, dispatchThreadID);
+            return createLegalizedSystemVaryingValInst(info, dispatchThreadID);
         default:
             return diagnoseUnsupportedSystemVal(info);
         }
@@ -1295,21 +2035,64 @@ struct CUDAEntryPointVaryingParamLegalizeContext : EntryPointVaryingParamLegaliz
             {
                 IRBuilder builder(m_module);
                 builder.setInsertBefore(m_firstOrdinaryInst);
-                IRPtrType* ptrType = builder.getPtrType(info.type);
-                IRInst* getRayPayload =
-                    builder.emitIntrinsicInst(ptrType, kIROp_GetOptiXRayPayloadPtr, 0, nullptr);
-                return LegalizedVaryingVal::makeAddress(getRayPayload);
-                // Todo: compute how many registers are required for the current payload.
-                // If more than 32, use the above logic.
-                // Otherwise, either use the optix_get_payload or optix_set_payload
-                // intrinsics depending on input/output
-                /*if (info.kind == LayoutResourceKind::VaryingInput) {
+
+                // Only use register-based payload for hit/miss/anyhit shaders
+                // Raygen shaders pass payload TO TraceRay, not receive it FROM registers
+                bool useRegisterBasedPayload = (m_stage == Stage::AnyHit) ||
+                                               (m_stage == Stage::ClosestHit) ||
+                                               (m_stage == Stage::Miss);
+
+                // Compute how many registers are required for this payload type
+                int registerCount = 0;
+                if (useRegisterBasedPayload)
+                    registerCount = computePayloadRegisterCount(info.type, &builder);
+
+                if (!useRegisterBasedPayload || registerCount == 0 ||
+                    registerCount > kMaxPayloadRegisters)
+                {
+                    // Fallback to pointer packing for large/unsupported payloads or non-callee
+                    // stages
+                    IRPtrType* ptrType = builder.getPtrType(info.type);
+                    IRInst* getRayPayload =
+                        builder.emitIntrinsicInst(ptrType, kIROp_GetOptiXRayPayloadPtr, 0, nullptr);
+                    return LegalizedVaryingVal::makeAddress(getRayPayload);
                 }
-                else if (info.kind == LayoutResourceKind::VaryingOutput) {
+                else
+                {
+                    // Use inline payload registers for small payloads
+                    // 1. Read payload from registers
+                    int regIndex = 0;
+                    IRInst* payloadVal = emitOptiXPayloadRead(regIndex, info.type, &builder);
+                    if (!payloadVal)
+                    {
+                        // Fallback if read fails
+                        IRPtrType* ptrType = builder.getPtrType(info.type);
+                        IRInst* getRayPayload = builder.emitIntrinsicInst(
+                            ptrType,
+                            kIROp_GetOptiXRayPayloadPtr,
+                            0,
+                            nullptr);
+                        return LegalizedVaryingVal::makeAddress(getRayPayload);
+                    }
+
+                    // 2. Create a local variable to hold the payload
+                    auto localVar = builder.emitVar(info.type);
+                    builder.emitStore(localVar, payloadVal);
+
+                    // 3. Track this payload for write-back at function exit
+                    // Only add if not already present - the first variable created is the one used
+                    if (m_payloadWritebacks.getCount() == 0)
+                    {
+                        PayloadWritebackInfo writebackInfo;
+                        writebackInfo.localVar = as<IRVar>(localVar);
+                        writebackInfo.payloadType = info.type;
+                        writebackInfo.registerCount = registerCount;
+                        m_payloadWritebacks.add(writebackInfo);
+                    }
+
+                    // Return the address of the local variable so code can read/write through it
+                    return LegalizedVaryingVal::makeAddress(localVar);
                 }
-                else {
-                    return diagnoseUnsupportedUserVal(info);
-                }*/
             }
         case LayoutResourceKind::HitAttributes:
             {
@@ -1322,11 +2105,11 @@ struct CUDAEntryPointVaryingParamLegalizeContext : EntryPointVaryingParamLegaliz
                     /*the builder in use*/ &builder);
                 if (ioBaseAttributeIndex > 8)
                 {
-                    m_sink->diagnose(
-                        m_param,
-                        Diagnostics::unexpected,
-                        "the supplied hit attribute exceeds the maximum hit attribute structure "
-                        "size (32 bytes)");
+                    m_sink->diagnose(Diagnostics::Unexpected{
+                        .message = "the supplied hit attribute exceeds the maximum hit attribute "
+                                   "structure "
+                                   "size (32 bytes)",
+                        .location = m_param->sourceLoc});
                     return LegalizedVaryingVal();
                 }
                 return LegalizedVaryingVal::makeValue(getHitAttributes);
@@ -1334,62 +2117,6 @@ struct CUDAEntryPointVaryingParamLegalizeContext : EntryPointVaryingParamLegaliz
         default:
             return diagnoseUnsupportedUserVal(info);
         }
-    }
-
-    LegalizedVaryingVal createLegalizedVal(VaryingParamInfo const& info, IRInst* id)
-    {
-        // If the parameter type is not uint3, we need to extract components as needed
-        auto paramType = info.type->getOperand(0);
-        IRBuilder builder(m_module);
-        builder.setInsertBefore(m_firstOrdinaryInst);
-
-        if (as<IRBasicType>(paramType))
-        {
-            auto uintType = builder.getBasicType(BaseType::UInt);
-            UInt swizzleIndex = 0;
-            auto xComponent = builder.emitSwizzle(uintType, id, 1, &swizzleIndex);
-
-            if (auto basicType = as<IRBasicType>(paramType))
-            {
-                if (basicType->getBaseType() != BaseType::UInt)
-                {
-                    xComponent = builder.emitBitCast(basicType, xComponent);
-                }
-            }
-            return LegalizedVaryingVal::makeValue(xComponent);
-        }
-        // For vector types, use a swizzle to extract the needed components
-        else if (auto vectorType = as<IRVectorType>(paramType))
-        {
-            auto elementCount = getIntVal(vectorType->getElementCount());
-
-            if (elementCount > 0 && elementCount <= 3)
-            {
-                // Setup indices for the swizzle (0 for x, 1 for y, 2 for z)
-                UInt swizzleIndices[3] = {0, 1, 2};
-                auto uintType = builder.getBasicType(BaseType::UInt);
-
-                // Use a swizzle to extract all needed components at once
-                auto extractedVector = builder.emitSwizzle(
-                    builder.getVectorType(uintType, elementCount),
-                    id,
-                    elementCount,
-                    swizzleIndices);
-
-                // Cast if the element type is not uint
-                auto elementType = vectorType->getElementType();
-                if (auto basicElementType = as<IRBasicType>(elementType))
-                {
-                    if (basicElementType->getBaseType() != BaseType::UInt)
-                    {
-                        extractedVector = builder.emitBitCast(vectorType, extractedVector);
-                    }
-                }
-                return LegalizedVaryingVal::makeValue(extractedVector);
-            }
-        }
-        // Default to the full uint3 if the parameter type doesn't match our expectations
-        return LegalizedVaryingVal::makeValue(id);
     }
 };
 
@@ -1415,6 +2142,13 @@ struct CPUEntryPointVaryingParamLegalizeContext : EntryPointVaryingParamLegalize
     IRStructKey* groupIDKey = nullptr;
     IRStructKey* groupThreadIDKey = nullptr;
 
+    TargetProgram* target;
+
+    CPUEntryPointVaryingParamLegalizeContext(TargetProgram* target)
+        : target(target)
+    {
+    }
+
     void beginModuleImpl() SLANG_OVERRIDE
     {
         IRBuilder builder(m_module);
@@ -1430,7 +2164,14 @@ struct CPUEntryPointVaryingParamLegalizeContext : EntryPointVaryingParamLegalize
         // coming from the "prelude" file that already defines this type.
 
         varyingInputStructType = builder.createStructType();
-        varyingInputStructPtrType = builder.getPtrType(varyingInputStructType);
+        auto dataLayout = isCPUTargetViaLLVM(target->getTargetReq())
+                              ? (IRType*)builder.getLLVMBufferLayoutType()
+                              : (IRType*)builder.getCBufferLayoutType();
+        varyingInputStructPtrType = builder.getPtrType(
+            varyingInputStructType,
+            AccessQualifier::Read,
+            AddressSpace::Generic,
+            dataLayout);
 
         builder.addTargetIntrinsicDecoration(
             varyingInputStructType,
@@ -1498,9 +2239,8 @@ struct CPUEntryPointVaryingParamLegalizeContext : EntryPointVaryingParamLegalize
 
         if (!groupExtents)
         {
-            m_sink->diagnose(
-                m_entryPointFunc,
-                Diagnostics::unsupportedSpecializationConstantForNumThreads);
+            m_sink->diagnose(Diagnostics::UnsupportedSpecializationConstantForNumThreads{
+                .location = m_entryPointFunc->sourceLoc});
 
             // Fill in placeholder values.
             static const int kAxisCount = 3;
@@ -1529,23 +2269,25 @@ struct CPUEntryPointVaryingParamLegalizeContext : EntryPointVaryingParamLegalize
         switch (info.systemValueSemanticName)
         {
         case SystemValueSemanticName::GroupID:
-            return LegalizedVaryingVal::makeValue(groupID);
+            return createLegalizedSystemVaryingValInst(info, groupID);
         case SystemValueSemanticName::GroupThreadID:
-            return LegalizedVaryingVal::makeValue(groupThreadID);
+            return createLegalizedSystemVaryingValInst(info, groupThreadID);
         case SystemValueSemanticName::GroupIndex:
-            return LegalizedVaryingVal::makeValue(groupThreadIndex);
+            return createLegalizedSystemVaryingValInst(info, groupThreadIndex);
         case SystemValueSemanticName::DispatchThreadID:
-            return LegalizedVaryingVal::makeValue(dispatchThreadID);
-
+            return createLegalizedSystemVaryingValInst(info, dispatchThreadID);
         default:
             return diagnoseUnsupportedSystemVal(info);
         }
     }
 };
 
-void legalizeEntryPointVaryingParamsForCPU(IRModule* module, DiagnosticSink* sink)
+void legalizeEntryPointVaryingParamsForCPU(
+    IRModule* module,
+    TargetProgram* target,
+    DiagnosticSink* sink)
 {
-    CPUEntryPointVaryingParamLegalizeContext context;
+    CPUEntryPointVaryingParamLegalizeContext context(target);
     context.processModule(module, sink);
 }
 
@@ -1562,7 +2304,7 @@ void depointerizeInputParams(IRFunc* entryPointFunc)
     Index i = 0;
     for (auto param : entryPointFunc->getParams())
     {
-        if (auto constRefType = as<IRConstRefType>(param->getFullType()))
+        if (auto constRefType = as<IRBorrowInParamType>(param->getFullType()))
         {
             switch (constRefType->getValueType()->getOp())
             {
@@ -1628,6 +2370,11 @@ class LegalizeShaderEntryPointContext
 public:
     void legalizeEntryPoints(List<EntryPointInfo>& entryPoints)
     {
+        // Collect struct types used as return types before processing.
+        // We should not remove semantic decorations from these structs
+        // since they are needed for output variable binding (e.g., @location in WGSL).
+        collectStructTypesUsedAsReturnType(entryPoints);
+
         for (auto entryPoint : entryPoints)
             legalizeEntryPoint(entryPoint);
         removeSemanticLayoutsFromLegalizedStructs();
@@ -1723,7 +2470,7 @@ protected:
                     {var,
                      varType,
                      String(semanticDecoration->getSemanticName()).toLower(),
-                     (UInt)semanticDecoration->getSemanticIndex()}};
+                     (UInt)semanticDecoration->getEffectiveSemanticIndex()}};
             }
         }
 
@@ -1805,13 +2552,10 @@ protected:
                 // If we can't convert the value, report an error.
                 for (auto permittedType : info.permittedTypes)
                 {
-                    StringBuilder typeNameSB;
-                    getTypeNameHint(typeNameSB, permittedType);
-                    m_sink->diagnose(
-                        var->sourceLoc,
-                        Diagnostics::systemValueTypeIncompatible,
-                        semanticName,
-                        typeNameSB.produceString());
+                    m_sink->diagnose(Diagnostics::SystemValueTypeIncompatible{
+                        .semanticName = semanticName,
+                        .requiredType = permittedType,
+                        .location = var->sourceLoc});
                 }
             }
         }
@@ -1819,6 +2563,25 @@ protected:
 
 private:
     HashSet<IRStructField*> semanticInfoToRemove;
+    HashSet<IRStructType*> structTypesUsedAsReturnType;
+
+    void collectStructTypesUsedAsReturnType(List<EntryPointInfo>& entryPoints)
+    {
+        for (auto entryPoint : entryPoints)
+        {
+            auto func = entryPoint.entryPointFunc;
+            if (!func)
+                continue;
+            auto funcType = as<IRFuncType>(func->getDataType());
+            if (!funcType)
+                continue;
+            auto returnType = funcType->getResultType();
+            if (!returnType)
+                continue;
+            if (auto structType = as<IRStructType>(returnType))
+                structTypesUsedAsReturnType.add(structType);
+        }
+    }
 
     void removeSemanticLayoutsFromLegalizedStructs()
     {
@@ -1907,6 +2670,13 @@ private:
                     builder.getModule(),
                     field->getKey(),
                     fieldParam);
+
+                // Remove the semantic info from the original struct, but only if
+                // the struct is not used as a return type of another entry point.
+                // If the struct is used as a return type, we need to keep the semantic
+                // decorations for output variable binding (e.g., @location in WGSL).
+                if (!structTypesUsedAsReturnType.contains(structType))
+                    semanticInfoToRemove.add(field);
 
                 IRVarLayout* fieldLayout =
                     structTypeLayout ? structTypeLayout->getFieldLayout(fieldIndex) : nullptr;
@@ -2206,10 +2976,9 @@ private:
 
     void reportUnsupportedSystemAttribute(IRInst* param, String semanticName)
     {
-        m_sink->diagnose(
-            param->sourceLoc,
-            Diagnostics::systemValueAttributeNotSupported,
-            semanticName);
+        m_sink->diagnose(Diagnostics::SystemValueAttributeNotSupported{
+            .semanticName = semanticName,
+            .location = param->sourceLoc});
     }
 
     template<LayoutResourceKind K>
@@ -2227,7 +2996,7 @@ private:
             {
                 if (semanticDecor->getSemanticName().startsWithCaseInsensitive(toSlice("sv_")))
                 {
-                    auto indexAsString = String(UInt(semanticDecor->getSemanticIndex()));
+                    auto indexAsString = String(UInt(semanticDecor->getEffectiveSemanticIndex()));
                     auto sysValInfo =
                         getSystemValueInfo(semanticDecor->getSemanticName(), &indexAsString, field);
                     if (sysValInfo.isUnsupported)
@@ -2795,8 +3564,9 @@ private:
 
                 auto loweredName = String(outName).toLower();
                 auto loweredNameSlice = getUserSemanticNameSlice(loweredName, isUserSemantic);
-                auto semanticIndex =
-                    hasStringIndex ? stringToInt(outIndex) : semanticDecoration->getSemanticIndex();
+                auto semanticIndex = hasStringIndex
+                                         ? stringToInt(outIndex)
+                                         : semanticDecoration->getEffectiveSemanticIndex();
                 auto newDecoration =
                     builder.addSemanticDecoration(key, loweredNameSlice, semanticIndex);
 
@@ -2992,45 +3762,6 @@ private:
         }
 
         fixUpFuncType(func, structType);
-    }
-
-    IRInst* tryConvertValue(IRBuilder& builder, IRInst* val, IRType* toType)
-    {
-        auto fromType = val->getFullType();
-        if (auto fromVector = as<IRVectorType>(fromType))
-        {
-            if (auto toVector = as<IRVectorType>(toType))
-            {
-                if (fromVector->getElementCount() != toVector->getElementCount())
-                {
-                    fromType = builder.getVectorType(
-                        fromVector->getElementType(),
-                        toVector->getElementCount());
-                    val = builder.emitVectorReshape(fromType, val);
-                }
-            }
-            else if (as<IRBasicType>(toType))
-            {
-                UInt index = 0;
-                val = builder.emitSwizzle(fromVector->getElementType(), val, 1, &index);
-                if (toType->getOp() == kIROp_VoidType)
-                    return nullptr;
-            }
-        }
-        else if (auto fromBasicType = as<IRBasicType>(fromType))
-        {
-            if (fromBasicType->getOp() == kIROp_VoidType)
-                return nullptr;
-            if (!as<IRBasicType>(toType))
-                return nullptr;
-            if (toType->getOp() == kIROp_VoidType)
-                return nullptr;
-        }
-        else
-        {
-            return nullptr;
-        }
-        return builder.emitCast(toType, val);
     }
 
     void legalizeSystemValueParameters(EntryPointInfo entryPoint)
@@ -3325,11 +4056,19 @@ protected:
                 result.permittedTypes.add(builder.getUIntType());
                 break;
             }
+        case SystemValueSemanticName::Barycentrics:
+            {
+                result.systemValueName = toSlice("barycentric_coord");
+                result.permittedTypes.add(builder.getVectorType(
+                    builder.getBasicType(BaseType::Float),
+                    builder.getIntValue(builder.getIntType(), 3)));
+                break;
+            }
         default:
-            m_sink->diagnose(
-                parentVar,
-                Diagnostics::unimplementedSystemValueSemantic,
-                semanticName);
+            m_sink->diagnose(Diagnostics::UnimplementedSystemValueSemantic{
+                .semanticName = semanticName,
+                .location = parentVar->sourceLoc,
+            });
             return result;
         }
         return result;
@@ -3478,9 +4217,8 @@ protected:
                 emitCalcGroupExtents(svBuilder, entryPoint.entryPointFunc, uint3Type);
             if (!computeExtent)
             {
-                m_sink->diagnose(
-                    entryPoint.entryPointFunc,
-                    Diagnostics::unsupportedSpecializationConstantForNumThreads);
+                m_sink->diagnose(Diagnostics::UnsupportedSpecializationConstantForNumThreads{
+                    .location = entryPoint.entryPointFunc->sourceLoc});
 
                 // Fill in placeholder values.
                 static const int kAxisCount = 3;
@@ -3511,7 +4249,7 @@ protected:
             {
                 if (const auto dec = func->findDecoration<IRKnownBuiltinDecoration>())
                 {
-                    if (dec->getName() == "DispatchMesh")
+                    if (dec->getName() == KnownBuiltinDeclName::DispatchMesh)
                     {
                         SLANG_ASSERT(!dispatchMeshFunc && "Multiple DispatchMesh functions found");
                         dispatchMeshFunc = func;
@@ -3544,9 +4282,10 @@ protected:
                     builder.setInsertBefore(
                         entryPoint.entryPointFunc->getFirstBlock()->getFirstOrdinaryInst());
                     const auto annotatedPayloadType = builder.getPtrType(
-                        kIROp_RefType,
+                        kIROp_RefParamType,
                         payloadPtrType->getValueType(),
-                        AddressSpace::MetalObjectData);
+                        AddressSpace::MetalObjectData,
+                        payloadPtrType->getDataLayout());
                     auto packedParam = builder.emitParam(annotatedPayloadType);
                     builder.addExternCppDecoration(packedParam, toSlice("_slang_mesh_payload"));
                     IRVarLayout::Builder varLayoutBuilder(
@@ -3586,8 +4325,7 @@ protected:
 
                 IRPtrTypeBase* type = as<IRPtrTypeBase>(param->getDataType());
 
-                const auto annotatedPayloadType = builder.getPtrType(
-                    kIROp_ConstRefType,
+                const auto annotatedPayloadType = builder.getBorrowInParamType(
                     type->getValueType(),
                     AddressSpace::MetalObjectData);
 
@@ -3603,7 +4341,8 @@ protected:
         }
 
         const auto topologyEnum = outputDeco->getTopologyType();
-        IRInst* topologyConst = builder.getIntValue(builder.getIntType(), topologyEnum);
+        IRIntLit* topologyConst =
+            (IRIntLit*)builder.getIntValue(builder.getIntType(), topologyEnum);
 
         IRType* vertexType = nullptr;
         IRType* indicesType = nullptr;
@@ -3651,7 +4390,7 @@ protected:
             }
             if (param->findDecorationImpl(kIROp_IndicesDecoration))
             {
-                auto indicesRefType = (IRConstRefType*)param->getDataType();
+                auto indicesRefType = (IRBorrowInParamType*)param->getDataType();
                 auto indicesOutputType = (IRIndicesType*)indicesRefType->getValueType();
                 indicesType = indicesOutputType->getElementType();
                 maxPrimitives = indicesOutputType->getMaxElementCount();
@@ -3661,7 +4400,7 @@ protected:
             }
             if (param->findDecorationImpl(kIROp_PrimitivesDecoration))
             {
-                auto primitivesRefType = (IRConstRefType*)param->getDataType();
+                auto primitivesRefType = (IRBorrowInParamType*)param->getDataType();
                 auto primitivesOutputType = (IRPrimitivesType*)primitivesRefType->getValueType();
                 primitiveType = primitivesOutputType->getElementType();
                 SLANG_ASSERT(primitiveType);
@@ -3950,10 +4689,10 @@ protected:
             }
         default:
             {
-                m_sink->diagnose(
-                    parentVar,
-                    Diagnostics::unimplementedSystemValueSemantic,
-                    semanticName);
+                m_sink->diagnose(Diagnostics::UnimplementedSystemValueSemantic{
+                    .semanticName = semanticName,
+                    .location = parentVar->sourceLoc,
+                });
                 return result;
             }
         }
@@ -4027,7 +4766,7 @@ void legalizeVertexShaderOutputParamsForMetal(DiagnosticSink* sink, EntryPointIn
     // handled further down the pipeline
     const bool hasOutParameters = anyOf(
         oldFunc->getParams(),
-        [](auto param) { return as<IROutTypeBase>(param->getFullType()); });
+        [](auto param) { return as<IROutParamTypeBase>(param->getFullType()); });
 
     auto returnType = oldFunc->getResultType();
     if (!as<IRStructType>(returnType) && !hasOutParameters)

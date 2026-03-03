@@ -2,6 +2,7 @@
 
 #include "slang-ir-layout.h"
 #include "slang-ir-util.h"
+#include "slang-rich-diagnostics.h"
 
 // A note on row/column "terminology reversal".
 //
@@ -281,7 +282,7 @@ void WGSLSourceEmitter::emitSemanticsPrefixImpl(IRInst* inst)
         if (auto semanticDecoration = inst->findDecoration<IRSemanticDecoration>())
         {
             m_writer->emit("@location(");
-            m_writer->emit(semanticDecoration->getSemanticIndex());
+            m_writer->emit(semanticDecoration->getEffectiveSemanticIndex());
             m_writer->emit(")");
             return;
         }
@@ -294,6 +295,11 @@ void WGSLSourceEmitter::emitStructFieldAttributes(
     bool allowOffsetLayout)
 {
     SLANG_UNUSED(allowOffsetLayout);
+
+    // If the struct type is not used for physical storage, then we don't need to
+    // emit any layout attributes.
+    if (!structType->findDecoration<IRPhysicalTypeDecoration>())
+        return;
 
     // Tint emits errors unless we explicitly spell out the layout in some cases, so emit
     // offset and align attribtues for all fields.
@@ -331,10 +337,12 @@ void WGSLSourceEmitter::emit(const AddressSpace addressSpace)
         break;
 
     case AddressSpace::StorageBuffer:
+    case AddressSpace::Global:
         m_writer->emit("storage");
         break;
 
     case AddressSpace::Generic:
+    case AddressSpace::Function:
         m_writer->emit("function");
         break;
 
@@ -434,12 +442,10 @@ const char* WGSLSourceEmitter::getWgslImageFormat(IRTextureTypeBase* type)
         return "rgba32float";
     default:
         const auto imageFormatInfo = getImageFormatInfo(imageFormat);
-        getSink()->diagnose(
-            SourceLoc(),
-            Diagnostics::imageFormatUnsupportedByBackend,
-            imageFormatInfo.name,
-            "WGSL",
-            "rgba32float");
+        getSink()->diagnose(Diagnostics::ImageFormatUnsupportedByBackend{
+            .format = imageFormatInfo.name,
+            .backend = "WGSL",
+            .replacement = "rgba32float"});
         return "rgba32float";
     }
 }
@@ -515,8 +521,10 @@ void WGSLSourceEmitter::emitSimpleTypeImpl(IRType* type)
             return;
         }
     case kIROp_Int16Type:
+        diagnoseOnce(Diagnostics::Int16NotSupportedInWgsl{.typeName = "int16_t"});
+        return;
     case kIROp_UInt16Type:
-        SLANG_UNEXPECTED("16 bit integer value emitted");
+        diagnoseOnce(Diagnostics::Int16NotSupportedInWgsl{.typeName = "uint16_t"});
         return;
     case kIROp_Int64Type:
     case kIROp_IntPtrType:
@@ -560,10 +568,10 @@ void WGSLSourceEmitter::emitSimpleTypeImpl(IRType* type)
         }
 
     case kIROp_PtrType:
-    case kIROp_InOutType:
-    case kIROp_OutType:
-    case kIROp_RefType:
-    case kIROp_ConstRefType:
+    case kIROp_BorrowInOutParamType:
+    case kIROp_OutParamType:
+    case kIROp_RefParamType:
+    case kIROp_BorrowInParamType:
         {
             auto ptrType = cast<IRPtrTypeBase>(type);
             m_writer->emit("ptr<");
@@ -734,15 +742,15 @@ void WGSLSourceEmitter::emitLayoutQualifiersImpl(IRVarLayout* layout)
 
 static bool isStaticConst(IRInst* inst)
 {
-    if (inst->getParent()->getOp() == kIROp_Module)
+    if (inst->getParent()->getOp() == kIROp_ModuleInst)
     {
         return true;
     }
     switch (inst->getOp())
     {
     case kIROp_MakeVector:
-    case kIROp_swizzle:
-    case kIROp_swizzleSet:
+    case kIROp_Swizzle:
+    case kIROp_SwizzleSet:
     case kIROp_IntCast:
     case kIROp_FloatCast:
     case kIROp_CastFloatToInt:
@@ -976,9 +984,13 @@ void WGSLSourceEmitter::emitSimpleValueImpl(IRInst* inst)
                         break;
                     }
                 case BaseType::Int16:
+                    {
+                        diagnoseOnce(Diagnostics::Int16NotSupportedInWgsl{.typeName = "int16_t"});
+                        break;
+                    }
                 case BaseType::UInt16:
                     {
-                        SLANG_UNEXPECTED("16 bit integer value emitted");
+                        diagnoseOnce(Diagnostics::Int16NotSupportedInWgsl{.typeName = "uint16_t"});
                         break;
                     }
                 case BaseType::Int:
@@ -1013,28 +1025,34 @@ void WGSLSourceEmitter::emitSimpleValueImpl(IRInst* inst)
                     }
                 case BaseType::IntPtr:
                     {
-#if SLANG_PTR_IS_64
-                        m_writer->emit("i64(");
-                        m_writer->emitInt64(int64_t(litInst->value.intVal));
-                        m_writer->emit(")");
-#else
-                        m_writer->emit("i32(");
-                        m_writer->emit(int(litInst->value.intVal));
-                        m_writer->emit(")");
-#endif
+                        if (getPointerSize(getTargetReq()) == sizeof(uint64_t))
+                        {
+                            m_writer->emit("i64(");
+                            m_writer->emitInt64(int64_t(litInst->value.intVal));
+                            m_writer->emit(")");
+                        }
+                        else
+                        {
+                            m_writer->emit("i32(");
+                            m_writer->emit(int(litInst->value.intVal));
+                            m_writer->emit(")");
+                        }
                         break;
                     }
                 case BaseType::UIntPtr:
                     {
-#if SLANG_PTR_IS_64
-                        m_writer->emit("u64(");
-                        m_writer->emitUInt64(uint64_t(litInst->value.intVal));
-                        m_writer->emit(")");
-#else
-                        m_writer->emit("u32(");
-                        m_writer->emit(UInt(uint32_t(litInst->value.intVal)));
-                        m_writer->emit(")");
-#endif
+                        if (getPointerSize(getTargetReq()) == sizeof(uint64_t))
+                        {
+                            m_writer->emit("u64(");
+                            m_writer->emitUInt64(uint64_t(litInst->value.intVal));
+                            m_writer->emit(")");
+                        }
+                        else
+                        {
+                            m_writer->emit("u32(");
+                            m_writer->emit(UInt(uint32_t(litInst->value.intVal)));
+                            m_writer->emit(")");
+                        }
                         break;
                     }
                 }
@@ -1300,7 +1318,7 @@ bool WGSLSourceEmitter::tryEmitInstStmtImpl(IRInst* inst)
 
 void WGSLSourceEmitter::emitCallArg(IRInst* inst)
 {
-    if (as<IRPtrTypeBase>(inst->getDataType()))
+    if (as<IRPointerLikeType>(inst->getDataType()) || as<IRPtrTypeBase>(inst->getDataType()))
     {
         // If we are calling a function with a pointer-typed argument, we need to
         // explicitly prefix the argument with `&` to pass a pointer.
@@ -1617,6 +1635,22 @@ bool WGSLSourceEmitter::tryEmitInstExprImpl(IRInst* inst, const EmitOpInfo& inOu
             emitOperand(inst->getOperand(0), getInfo(EmitOp::General));
             m_writer->emit(")");
             return true;
+        }
+    case kIROp_Neg:
+        {
+            auto opType = inst->getOperand(0)->getDataType();
+            if (as<IRMatrixType>(opType) || as<IRVectorType>(opType))
+            {
+                // WGSL does not support negate operator on matrices and vectors,
+                // we should emit "(type(0) - op0)" instead.
+                m_writer->emit("(");
+                emitType(inst->getDataType());
+                m_writer->emit("(0) - ");
+                emitOperand(inst->getOperand(0), getInfo(EmitOp::General));
+                m_writer->emit(")");
+                return true;
+            }
+            break;
         }
     }
 

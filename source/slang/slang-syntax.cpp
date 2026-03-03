@@ -912,30 +912,23 @@ FuncType* getFuncType(ASTBuilder* astBuilder, DeclRef<CallableDecl> const& declR
 {
     List<Type*> paramTypes;
     auto resultType = getResultType(astBuilder, declRef);
+
+    if (!resultType)
+        resultType = astBuilder->getErrorType();
+
     auto errorType = getErrorCodeType(astBuilder, declRef);
     auto visitParamDecl = [&](DeclRef<ParamDecl> paramDeclRef)
     {
+        auto paramValueType = getParamValueType(astBuilder, paramDeclRef);
+        if (!paramValueType)
+        {
+            paramValueType = astBuilder->getErrorType();
+        }
+
         auto paramDecl = paramDeclRef.getDecl();
-        auto paramType = getParamType(astBuilder, paramDeclRef);
-        if (paramDecl->findModifier<RefModifier>())
-        {
-            paramType = astBuilder->getRefType(paramType, AddressSpace::Generic);
-        }
-        else if (paramDecl->findModifier<ConstRefModifier>())
-        {
-            paramType = astBuilder->getConstRefType(paramType);
-        }
-        else if (paramDecl->findModifier<OutModifier>())
-        {
-            if (paramDecl->findModifier<InOutModifier>() || paramDecl->findModifier<InModifier>())
-            {
-                paramType = astBuilder->getInOutType(paramType);
-            }
-            else
-            {
-                paramType = astBuilder->getOutType(paramType);
-            }
-        }
+        auto paramMode = getParamPassingMode(paramDecl);
+        auto paramType = getParamTypeWithModeWrapper(astBuilder, paramValueType, paramMode);
+
         paramTypes.add(paramType);
     };
     auto parent = declRef.getParent();
@@ -951,8 +944,7 @@ FuncType* getFuncType(ASTBuilder* astBuilder, DeclRef<CallableDecl> const& declR
         visitParamDecl(paramDeclRef);
     }
 
-    FuncType* funcType =
-        astBuilder->getOrCreate<FuncType>(paramTypes.getArrayView(), resultType, errorType);
+    FuncType* funcType = astBuilder->getFuncType(paramTypes.getArrayView(), resultType, errorType);
     return funcType;
 }
 
@@ -1185,8 +1177,15 @@ bool findVkImageFormatByName(const UnownedStringSlice& name, ImageFormat* outFor
     if (name.endsWith(kSNorm))
     {
         StringBuilder buf;
-        //  format names end with snormal after a '_', so replace with that
-        buf << name.head(name.getLength() - kSNorm.getLength()) << "_" << kSNorm;
+        auto prefix = name.head(name.getLength() - kSNorm.getLength());
+        buf << prefix;
+        // format names end with snormal after a '_', so add an underscore
+        // if the prefix doesn't already end with one
+        if (prefix.getLength() == 0 || prefix[prefix.getLength() - 1] != '_')
+        {
+            buf << "_";
+        }
+        buf << kSNorm;
         return findImageFormatByName(buf.getUnownedSlice(), outFormat);
     }
 

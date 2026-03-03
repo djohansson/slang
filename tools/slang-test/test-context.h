@@ -90,6 +90,7 @@ class TestContext
 {
 public:
     typedef Slang::TestToolUtil::InnerMainFunc InnerMainFunc;
+    typedef void (*CleanDeviceCacheFunc)();
 
     /// Get the slang session
     SlangSession* getSession() const { return m_session; }
@@ -100,6 +101,9 @@ public:
     InnerMainFunc getInnerMainFunc(const Slang::String& dirPath, const Slang::String& name);
     /// Set the function for the shared library
     void setInnerMainFunc(const Slang::String& name, InnerMainFunc func);
+
+    /// Get the device cache cleanup function (from shared library)
+    CleanDeviceCacheFunc getCleanDeviceCacheFunc(const Slang::String& name);
 
     void setTestRequirements(TestRequirements* req);
 
@@ -167,8 +171,8 @@ public:
     /// TODO(JS): We could split the core module compilation from other actions, and have timeout
     /// specific for that. To do this we could have a 'compileCoreModule' RPC method.
     ///
-    /// Current default is 60 seconds.
-    Slang::Int connectionTimeOutInMs = 60 * 1000;
+    /// Current default is 120 seconds.
+    Slang::Int connectionTimeOutInMs = 120 * 1000;
 
     void setThreadIndex(int index);
     void setMaxTestRunnerThreadCount(int count);
@@ -196,6 +200,7 @@ protected:
     {
         Slang::ComPtr<ISlangSharedLibrary> m_sharedLibrary;
         InnerMainFunc m_func;
+        CleanDeviceCacheFunc m_cleanDeviceCacheFunc;
     };
 
     Slang::List<Slang::RefPtr<Slang::JSONRPCConnection>> m_jsonRpcConnections;

@@ -9,6 +9,7 @@
 #include "slang-ir-single-return.h"
 #include "slang-ir-ssa-simplification.h"
 #include "slang-ir-validate.h"
+#include "slang-rich-diagnostics.h"
 
 namespace Slang
 {
@@ -202,7 +203,7 @@ IRInst* DifferentialPairTypeBuilder::emitFieldAccessor(
     {
         auto loweredType = lowerDiffPairType(builder, basePtrType->getValueType());
 
-        pairType = builder->getPtrType(kIROp_PtrType, (IRType*)loweredType);
+        pairType = builder->getPtrType((IRType*)loweredType);
     }
     else
     {
@@ -824,7 +825,7 @@ IRInst* DifferentialPairTypeBuilder::_createDiffPairType(IRType* origBaseType, I
 {
     switch (origBaseType->getOp())
     {
-    case kIROp_LookupWitness:
+    case kIROp_LookupWitnessMethod:
     case kIROp_Specialize:
     case kIROp_Param:
         return nullptr;
@@ -1046,7 +1047,7 @@ IRInst* AutoDiffSharedContext::findDifferentiableInterface()
             {
                 if (auto decor = intf->findDecoration<IRKnownBuiltinDecoration>())
                 {
-                    if (decor->getName() == toSlice("IDifferentiable"))
+                    if (decor->getName() == KnownBuiltinDeclName::IDifferentiable)
                     {
                         return globalInst;
                     }
@@ -1721,17 +1722,17 @@ IRType* DifferentiableTypeConformanceContext::differentiateType(
             SLANG_UNIMPLEMENTED_X("Impl");
         }
 
-    case kIROp_OutType:
+    case kIROp_OutParamType:
         if (auto diffValueType =
-                differentiateType(builder, as<IROutType>(primalType)->getValueType()))
-            return builder->getOutType(diffValueType);
+                differentiateType(builder, as<IROutParamType>(primalType)->getValueType()))
+            return builder->getOutParamType(diffValueType);
         else
             return nullptr;
 
-    case kIROp_InOutType:
+    case kIROp_BorrowInOutParamType:
         if (auto diffValueType =
-                differentiateType(builder, as<IRInOutType>(primalType)->getValueType()))
-            return builder->getInOutType(diffValueType);
+                differentiateType(builder, as<IRBorrowInOutParamType>(primalType)->getValueType()))
+            return builder->getBorrowInOutParamType(diffValueType);
         else
             return nullptr;
 
@@ -2961,7 +2962,7 @@ struct AutoDiffPass : public InstPassBase
                 // For generics/struct types, we will generate a new generic/struct type
                 // representing the differntial.
 
-                SLANG_RELEASE_ASSERT(t->getParent() && t->getParent()->getOp() == kIROp_Module);
+                SLANG_RELEASE_ASSERT(t->getParent() && t->getParent()->getOp() == kIROp_ModuleInst);
                 builder.setInsertBefore(t);
                 auto diffInfo = fillDifferentialTypeImplementation(&ctx, diffTypes, t);
                 diffTypes[t] = diffInfo;
@@ -3276,6 +3277,14 @@ struct AutoDiffPass : public InstPassBase
 
     HashSet<IRInst*> fullyDifferentiatedInsts;
 
+    // Cache for generic functions that have been determined to be unreachable.
+    // This allows early termination when traversing reference chains that
+    // include previously-analyzed unreachable generics.
+    HashSet<IRInst*> unreachableGenericFunctionsCache;
+
+    // Cache for generic functions that have been determined to be reachable.
+    HashSet<IRInst*> reachableGenericFunctionsCache;
+
     // Returns true if `type` is fully differentiated, i.e. does not have
     // any unmaterialized intermediate context types.
     bool isTypeFullyDifferentiated(IRInst* type)
@@ -3301,8 +3310,8 @@ struct AutoDiffPass : public InstPassBase
         {
         case kIROp_ArrayType:
         case kIROp_UnsizedArrayType:
-        case kIROp_InOutType:
-        case kIROp_OutType:
+        case kIROp_BorrowInOutParamType:
+        case kIROp_OutParamType:
         case kIROp_PtrType:
         case kIROp_DifferentialPairType:
         case kIROp_DifferentialPairUserCodeType:
@@ -3345,6 +3354,151 @@ struct AutoDiffPass : public InstPassBase
         return true;
     }
 
+    // This function will check whether a global inst can be gathered as a candidate for
+    // differentiable IR. Before we do the recursive search on every IR, we will first filter
+    // the global IR to find out some candidates, and then we will start the recursive search
+    // on this filtered list.
+    // For a generic, we will add it to the list only when it's a function and it's used by other
+    // function, because that is the case of dynamic dispatch.
+
+    // Helper function to check if a generic function is reachable by recursively
+    // checking the reference chain. The `visitedSet` is used to detect circular
+    // references (e.g., A->B->C->A), which are considered unreachable.
+    // Note: Callers are responsible for checking/updating the reachability caches.
+    bool isGenericFunctionReachableImpl(IRGeneric* genericInst, HashSet<IRInst*>& visitedSet)
+    {
+        // If we've already visited this generic in the current traversal,
+        // we have a circular reference. Circular references are considered unreachable.
+        if (visitedSet.contains(genericInst))
+            return false;
+
+        // Only process generics that return a function
+        if (!as<IRFunc>(findInnerMostGenericReturnVal(genericInst)))
+            return false;
+
+        // Mark as visited before checking uses to handle circular references
+        visitedSet.add(genericInst);
+
+        for (auto use = genericInst->firstUse; use; use = use->nextUse)
+        {
+            auto user = use->getUser();
+
+            // If used directly at module level, it's reachable
+            if (as<IRModuleInst>(user->parent))
+                return true;
+
+            // Walk up the parent chain to find the containing function or generic
+            for (; user; user = user->parent)
+            {
+                if (auto genericUser = as<IRGeneric>(user))
+                {
+                    // If the user is a generic that returns a function,
+                    // recursively check if that generic is reachable
+                    if (as<IRFunc>(findInnerMostGenericReturnVal(genericUser)))
+                    {
+                        if (isGenericFunctionReachable(genericUser, visitedSet))
+                            return true;
+                    }
+                    break;
+                }
+                else if (as<IRFunc>(user))
+                {
+                    // Used by a non-generic function, it's reachable
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    // Wrapper that handles caching for reachability checks.
+    // Uses `unreachableGenericFunctionsCache` and `reachableGenericFunctionsCache`
+    // to avoid redundant traversals.
+    bool isGenericFunctionReachable(IRGeneric* genericInst, HashSet<IRInst*>& visitedSet)
+    {
+        // Check caches first
+        if (reachableGenericFunctionsCache.contains(genericInst))
+            return true;
+        if (unreachableGenericFunctionsCache.contains(genericInst))
+            return false;
+
+        // Perform the actual reachability check
+        bool result = isGenericFunctionReachableImpl(genericInst, visitedSet);
+
+        // Cache the result
+        if (result)
+            reachableGenericFunctionsCache.add(genericInst);
+        else
+            unreachableGenericFunctionsCache.add(genericInst);
+
+        return result;
+    }
+
+    bool isReachableInst(IRInst* inst)
+    {
+        switch (inst->getOp())
+        {
+        case kIROp_ForwardDifferentiate:
+        case kIROp_BackwardDifferentiate:
+        case kIROp_BackwardDifferentiatePrimal:
+        case kIROp_BackwardDifferentiatePropagate:
+        case kIROp_BackwardDiffIntermediateContextType:
+        case kIROp_Func:
+            return true;
+        case kIROp_Generic:
+            {
+                // For generic, if it's a generic function and it's used by any other reachable
+                // inst, we will consider it reachable.
+                auto genericIR = as<IRGeneric>(inst);
+                HashSet<IRInst*> visitedSet;
+                return isGenericFunctionReachable(genericIR, visitedSet);
+            }
+        }
+        return false;
+    }
+
+    template<typename Func>
+    void processAllReachableInsts(const Func& f)
+    {
+        workList.clear();
+        workListSet.clear();
+
+        // We will do the first around of filter to include only functions and generic functions
+        for (auto child = module->getModuleInst()->getFirstChild(); child;
+             child = child->getNextInst())
+        {
+            if (isReachableInst(child))
+            {
+                addToWorkList(child);
+            }
+        }
+
+        while (workList.getCount() != 0)
+        {
+            IRInst* inst = pop(false);
+            f(inst);
+            for (auto child = inst->getLastChild(); child; child = child->getPrevInst())
+            {
+                if (as<IRDecoration>(child))
+                    break;
+                switch (child->getOp())
+                {
+                case kIROp_GenericSpecializationDictionary:
+                case kIROp_ExistentialFuncSpecializationDictionary:
+                case kIROp_ExistentialTypeSpecializationDictionary:
+                case kIROp_DebugInlinedAt:
+                case kIROp_DebugFunction:
+                    continue;
+                default:
+                    break;
+                }
+                SLANG_ASSERT(child);
+                if (shouldInstBeLiveIfParentIsLive(child, IRDeadCodeEliminationOptions()))
+                    addToWorkList(child);
+            }
+        }
+    }
     // Process all differentiate calls, and recursively generate code for forward and backward
     // derivative functions.
     //
@@ -3373,7 +3527,7 @@ struct AutoDiffPass : public InstPassBase
                         {
                         case kIROp_Func:
                         case kIROp_Specialize:
-                        case kIROp_LookupWitness:
+                        case kIROp_LookupWitnessMethod:
                         case kIROp_Generic:
                             if (auto innerFunc =
                                     as<IRFunc>(getResolvedInstForDecorations(inst->getOperand(0))))
@@ -3610,7 +3764,7 @@ protected:
     DifferentialPairTypeBuilder pairBuilderStorage;
 };
 
-void checkAutodiffPatterns(TargetProgram* target, IRModule* module, DiagnosticSink* sink)
+void checkAutodiffPatterns(IRModule* module, TargetProgram* target, DiagnosticSink* sink)
 {
     SLANG_UNUSED(target);
 
@@ -3648,9 +3802,10 @@ void checkAutodiffPatterns(TargetProgram* target, IRModule* module, DiagnosticSi
                 if (auto nameHint = func->findDecoration<IRNameHintDecoration>())
                 {
                     sink->diagnose(
-                        func,
-                        Diagnostics::potentialIssuesWithPreferRecomputeOnSideEffectMethod,
-                        nameHint->getName());
+                        Diagnostics::PotentialIssuesWithPreferRecomputeOnSideEffectMethod{
+                            .funcName = String(nameHint->getName()),
+                            .location = func->sourceLoc,
+                        });
                 }
             }
         }
@@ -3658,8 +3813,8 @@ void checkAutodiffPatterns(TargetProgram* target, IRModule* module, DiagnosticSi
 }
 
 bool processAutodiffCalls(
-    TargetProgram* target,
     IRModule* module,
+    TargetProgram* target,
     DiagnosticSink* sink,
     IRAutodiffPassOptions const&)
 {
@@ -3783,7 +3938,7 @@ void releaseNullDifferentialType(AutoDiffSharedContext* context)
     }
 }
 
-bool finalizeAutoDiffPass(TargetProgram* target, IRModule* module)
+bool finalizeAutoDiffPass(IRModule* module, TargetProgram* target)
 {
     bool modified = false;
 
@@ -3829,14 +3984,14 @@ UIndex addPhiOutputArg(
     builder->setInsertInto(block);
     switch (branchInst->getOp())
     {
-    case kIROp_unconditionalBranch:
+    case kIROp_UnconditionalBranch:
         inoutTerminatorInst = builder->emitBranch(
             branchInst->getTargetBlock(),
             phiArgs.getCount(),
             phiArgs.getBuffer());
         break;
 
-    case kIROp_loop:
+    case kIROp_Loop:
         {
             auto newLoop = builder->emitLoop(
                 as<IRLoop>(branchInst)->getTargetBlock(),

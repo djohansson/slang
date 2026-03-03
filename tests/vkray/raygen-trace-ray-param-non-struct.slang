@@ -1,4 +1,4 @@
-//TEST:SIMPLE(filecheck=CHECK): -target hlsl -stage raygeneration -entry main
+//TEST:SIMPLE(filecheck=CHECK): -target hlsl -stage raygeneration -entry main -capability hlsl_nvapi
 
 RaytracingAccelerationStructure as;
 
@@ -28,7 +28,7 @@ void main()
 
     // CHECK: rayPayload{{_[0-9]}}.data{{_[0-9]}} = {{.*}}
     // CHECK: TraceRay(
-    // CHECK: {{.*}} = rayPayload{{.*}}.data{{.*}};
+    // CHECK: rayPayload{{.*}}.data{{.*}};
     TraceRay(as,
              1,
              0xff,
@@ -39,23 +39,23 @@ void main()
              someInData1);
     outputBuffer1[0] = outputBuffer1[0]+someInData1;
 
-    // CHECK: rayPayload{{_[0-9]}}.data{{_[0-9]}} = {{.*}}
-    // CHECK: TraceMotionRay(
-    // CHECK: {{.*}} = rayPayload{{.*}}.data{{.*}};
-    TraceMotionRay(as,
+    // Motion blur not supported in HLSL - removed TraceMotionRay test
+    // CHECK: rayPayload{{_[0-9]}}.data{{_[0-9]}} = rayPayload{{.*}}.data{{.*}};
+    // CHECK: TraceRay(
+    // CHECK: rayPayload{{.*}}.data{{.*}};
+    TraceRay(as,
             1,
             0xff,
             0,
             0,
             2,
             ray,
-            0.0f,
             someInData1);
     outputBuffer1[0] = outputBuffer1[0]+someInData1;
 
     // CHECK: rayPayload{{_[0-9]}}.data{{_[0-9]}} = {{.*}}
     // CHECK: NvTraceRayHitObject(
-    // CHECK: {{.*}} = rayPayload{{.*}}.data{{.*}};
+    // CHECK: rayPayload{{.*}}.data{{.*}};
     HitObject::TraceRay(as,
              1,
              0xff,
@@ -67,22 +67,8 @@ void main()
     outputBuffer1[0] = outputBuffer1[0]+someInData1;
 
     // CHECK: rayPayload{{_[0-9]}}.data{{_[0-9]}} = {{.*}}
-    // CHECK: TraceMotionRay(
-    // CHECK: {{.*}} = rayPayload{{.*}}.data{{.*}};
-    HitObject::TraceMotionRay(as,
-            1,
-            0xff,
-            0,
-            0,
-            2,
-            ray,
-            0.0f,
-            someInData1);
-    outputBuffer1[0] = outputBuffer1[0]+someInData1;
-
-    // CHECK: rayPayload{{_[0-9]}}.data{{_[0-9]}} = {{.*}}
     // CHECK: NvInvokeHitObject(
-    // CHECK: {{.*}} = rayPayload{{.*}}.data{{.*}};
+    // CHECK: rayPayload{{.*}}.data{{.*}};
     HitObject hitObject_HitOrMiss;
     HitObject::Invoke(
         as,

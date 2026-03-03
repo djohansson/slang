@@ -2,6 +2,7 @@
 //TEST:SIMPLE(filecheck=CHECK1):-target hlsl -entry main -stage compute
 //TEST:SIMPLE(filecheck=CHECK2):-target spirv -entry main -stage compute -emit-spirv-via-glsl
 //TEST:SIMPLE(filecheck=CHECK3):-target spirv -entry main -stage compute -emit-spirv-directly
+//TEST:SIMPLE(filecheck=CHECK4):-target cuda -entry main -stage compute -emit-spirv-directly
 
 RWStructuredBuffer<int> buffer[];
 
@@ -21,10 +22,18 @@ void main(uint3 dispatchThreadID: SV_DispatchThreadID)
     // CHECK2: %[[VAR3]] = OpCopyObject %{{.*}}
     // CHECK2: %{{.*}} = OpBitcast %int %[[VAR3]]
 
-    // CHECK3: %[[VAR1:[a-zA-Z0-9_]+]] = OpAccessChain %_ptr_StorageBuffer_RWStructuredBuffer %buffer %{{.*}}NonUniform
-    // CHECK3: %{{.*}} = OpAccessChain %_ptr_StorageBuffer_int %[[VAR1]]
-    // CHECK3: %[[VAR2:[a-zA-Z0-9_]+]] = OpAccessChain %_ptr_StorageBuffer_RWStructuredBuffer %buffer %{{.*}}NonUniform
-    // CHECK3: %{{.*}} = OpAccessChain %_ptr_StorageBuffer_int %[[VAR2]]
+    // CHECK3-DAG: OpDecorate %[[IDX1:[a-zA-Z0-9_]+]] NonUniform
+    // CHECK3-DAG: OpDecorate %[[AC1:[a-zA-Z0-9_]+]] NonUniform
+    // CHECK3-DAG: OpDecorate %[[IDX2:[a-zA-Z0-9_]+]] NonUniform
+    // CHECK3-DAG: OpDecorate %[[AC2:[a-zA-Z0-9_]+]] NonUniform
+    // CHECK3: %[[AC1]] = OpAccessChain %_ptr_StorageBuffer_RWStructuredBuffer %buffer %[[IDX1]]
+    // CHECK3: %{{.*}} = OpAccessChain %_ptr_StorageBuffer_int %[[AC1]]
+    // CHECK3: %[[AC2]] = OpAccessChain %_ptr_StorageBuffer_RWStructuredBuffer %buffer %[[IDX2]]
+    // CHECK3: %{{.*}} = OpAccessChain %_ptr_StorageBuffer_int %[[AC2]]
+    
+    // CHECK4: Array<RWStructuredBuffer<int>>  [[BUFFER:buffer[_0-9]*]];
+    // CHECK4: [[GLOBALPARAMS:globalParams[_0-9]*]]->[[BUFFER]][_S{{[0-9]+}}]
+    // CHECK4: [[GLOBALPARAMS]]->[[BUFFER]][int(_S{{[0-9]+}})]
     RWStructuredBuffer<int> buffer1 = buffer[NonUniformResourceIndex(NonUniformResourceIndex(NonUniformResourceIndex(dispatchThreadID.x)))];
     buffer1[0] = 1;
 

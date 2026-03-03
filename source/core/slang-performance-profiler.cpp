@@ -35,15 +35,38 @@ public:
         char buffer[512];
         for (const auto& func : data)
         {
-            memset(buffer, 0, sizeof(buffer));
-            snprintf(buffer, sizeof(buffer), "[*] %30s", func.key);
-            out << buffer << " \t";
-            auto milliseconds =
-                std::chrono::duration_cast<std::chrono::milliseconds>(func.value.duration);
-            out << func.value.invocationCount << " \t"
-                << static_cast<uint64_t>(milliseconds.count()) << "ms\n";
+            auto microseconds =
+                std::chrono::duration_cast<std::chrono::microseconds>(func.value.duration);
+            double milliseconds = microseconds.count() / 1000.0;
+
+            if (func.value.invocationCount > 50)
+            {
+                double timePerOperation = milliseconds / func.value.invocationCount;
+                snprintf(
+                    buffer,
+                    sizeof(buffer),
+                    "[*] %30s \t%d \t%8.2fms \t%8.4fms/op\n",
+                    func.key,
+                    func.value.invocationCount,
+                    milliseconds,
+                    timePerOperation);
+            }
+            else
+            {
+                snprintf(
+                    buffer,
+                    sizeof(buffer),
+                    "[*] %30s \t%d \t%8.2fms\n",
+                    func.key,
+                    func.value.invocationCount,
+                    milliseconds);
+            }
+
+            out << buffer;
         }
     }
+
+
     virtual void clear() override { data.clear(); }
     virtual void dispose() override { data = decltype(data)(); }
 };

@@ -11,6 +11,7 @@
 
 #include "slang-ir-insts.h"
 #include "slang-ir-layout.h"
+#include "slang-rich-diagnostics.h"
 
 namespace Slang
 {
@@ -38,10 +39,13 @@ struct ByteAddressBufferLegalizationContext
     IRModule* m_module;
     IRBuilder m_builder;
 
-    Dictionary<IRInst*, IRType*> byteAddrBufferToReplace;
+    // Track ByteAddressBuffer parameters that have been replaced by StructuredBuffer.
+    // These need to be removed at the end to avoid leaving invalid types in the IR
+    // for targets like SPIR-V that don't support ByteAddressBuffer directly.
+    HashSet<IRGlobalParam*> m_replacedByteAddressBufferParams;
 
     // Everything starts with a request to process a module,
-    // which delegates to the central recrusive walk of the IR.
+    // which delegates to the central recursive walk of the IR.
     //
     void processModule(IRModule* module)
     {
@@ -49,6 +53,19 @@ struct ByteAddressBufferLegalizationContext
         m_builder = IRBuilder(m_module);
 
         processInstRec(module->getModuleInst());
+
+        // After processing, remove ByteAddressBuffer parameters that have been
+        // replaced by StructuredBuffer parameters. These are no longer needed
+        // and would cause errors in backends like SPIR-V that don't support
+        // ByteAddressBuffer types directly.
+        for (auto param : m_replacedByteAddressBufferParams)
+        {
+            // Only remove if it has no uses (its uses should have been replaced)
+            if (!param->hasUses())
+            {
+                param->removeAndDeallocate();
+            }
+        }
     }
 
     // We recursively walk the entire IR structure (except
@@ -178,6 +195,20 @@ struct ByteAddressBufferLegalizationContext
                 return false;
             }
 
+            // For Metal targets, 64-bit integer types need special handling
+            // because Metal doesn't support as_type casts from 64-bit to 32-bit.
+            // These types should be lowered to two 32-bit operations.
+            //
+            if (m_options.lowerBasicTypeOps)
+            {
+                // getSameSizeUIntBaseType should convert any 64-bit types to UInt64
+                auto unsignedBaseType = getSameSizeUIntBaseType(type->getOp());
+                if (unsignedBaseType == BaseType::UInt64)
+                {
+                    return false; // Force legalization for 64-bit integer types
+                }
+            }
+
             // Otherwise, scalar types are assumed
             // legal for load/store.
             //
@@ -190,7 +221,7 @@ struct ByteAddressBufferLegalizationContext
         {
             // If we've been asked to scalarize all
             // vector load/store, then we need to
-            // tread them as illegal.
+            // treat them as illegal.
             //
             if (m_options.scalarizeVectorLoadStore)
                 return false;
@@ -223,7 +254,7 @@ struct ByteAddressBufferLegalizationContext
         else if (auto alignInst = as<IRIntLit>(unknownOffsetAlignment))
         {
             // If the offset is not known during compile time, use the explicit align
-            // field of the overloaded `Load` or `Store` operation or vi `LoadAligned`
+            // field of the overloaded `Load` or `Store` operation or via `LoadAligned`
             // or `StoreAligned` function.
             //
             // Unaligned `Load`s or `Store`s are identified with 0 alignment, to prevent
@@ -235,11 +266,11 @@ struct ByteAddressBufferLegalizationContext
             {
                 return true;
             }
-            m_sink->diagnose(
-                offset->sourceLoc,
-                Slang::Diagnostics::byteAddressBufferUnaligned,
-                alignInst->getValue(),
-                alignmentVal);
+            m_sink->diagnose(Diagnostics::ByteAddressBufferUnaligned{
+                .alignment = alignInst->getValue(),
+                .elementSize = alignmentVal,
+                .location = offset->sourceLoc,
+            });
         }
         return false;
     }
@@ -249,9 +280,9 @@ struct ByteAddressBufferLegalizationContext
         if (target->getHLSLToVulkanLayoutOptions() &&
             target->getHLSLToVulkanLayoutOptions()->shouldUseGLLayout())
         {
-            return getStd430Offset(target->getOptionSet(), field, outOffset);
+            return getStd430Offset(target->getTargetReq(), field, outOffset);
         }
-        return getNaturalOffset(target->getOptionSet(), field, outOffset);
+        return getNaturalOffset(target->getTargetReq(), field, outOffset);
     }
 
     SlangResult getSizeAndAlignment(
@@ -262,9 +293,9 @@ struct ByteAddressBufferLegalizationContext
         if (target->getHLSLToVulkanLayoutOptions() &&
             target->getHLSLToVulkanLayoutOptions()->shouldUseGLLayout())
         {
-            return getStd430SizeAndAlignment(target->getOptionSet(), type, outSizeAlignment);
+            return getStd430SizeAndAlignment(target->getTargetReq(), type, outSizeAlignment);
         }
-        return getNaturalSizeAndAlignment(target->getOptionSet(), type, outSizeAlignment);
+        return getNaturalSizeAndAlignment(target->getTargetReq(), type, outSizeAlignment);
     }
 
     // The core workhorse routine for the load case is `emitLegalLoad`,
@@ -348,8 +379,8 @@ struct ByteAddressBufferLegalizationContext
             }
 
             // Once all the field values have been loaded, we can bind
-            // then together to make a singel value of the `struct` type,
-            // representing the reuslt of the legalized load.
+            // then together to make a single value of the `struct` type,
+            // representing the result of the legalized load.
             //
             return m_builder.emitMakeStruct(type, fieldVals);
         }
@@ -358,7 +389,7 @@ struct ByteAddressBufferLegalizationContext
             // Loading a value of array type amounts to loading each
             // of its elements. There is shared logic between the
             // array, matrix, and vector cases, so we factor it into
-            // a subroutien that we will explain later.
+            // a subroutine that we will explain later.
             //
             // We need a known constant number of elements in an array
             // to be able to emit per-element loads, so we skip
@@ -372,7 +403,7 @@ struct ByteAddressBufferLegalizationContext
                 // Else, fallback to scalarizing the loads.
                 IRSizeAndAlignment elementLayout;
                 SLANG_RELEASE_ASSERT(!getNaturalSizeAndAlignment(
-                    m_targetProgram->getOptionSet(),
+                    m_target,
                     arrayType->getElementType(),
                     &elementLayout));
                 IRIntegerValue elementStride = elementLayout.getStride();
@@ -470,7 +501,7 @@ struct ByteAddressBufferLegalizationContext
                 // Else, fallback to scalarizing the loads.
                 IRSizeAndAlignment elementLayout;
                 SLANG_RELEASE_ASSERT(!getNaturalSizeAndAlignment(
-                    m_targetProgram->getOptionSet(),
+                    m_target,
                     vecType->getElementType(),
                     &elementLayout));
                 IRIntegerValue elementStride = elementLayout.getStride();
@@ -592,10 +623,8 @@ struct ByteAddressBufferLegalizationContext
         // the "stride" of the element type.
         //
         IRSizeAndAlignment elementLayout;
-        SLANG_RETURN_NULL_ON_FAIL(getNaturalSizeAndAlignment(
-            m_targetProgram->getOptionSet(),
-            elementType,
-            &elementLayout));
+        SLANG_RETURN_NULL_ON_FAIL(
+            getNaturalSizeAndAlignment(m_target, elementType, &elementLayout));
         IRIntegerValue elementStride = elementLayout.getStride();
 
         // We will collect all the element values into an array so
@@ -695,8 +724,7 @@ struct ByteAddressBufferLegalizationContext
                 auto offsetType = offset->getDataType();
 
                 IRSizeAndAlignment typeLayout;
-                SLANG_RETURN_NULL_ON_FAIL(
-                    getNaturalSizeAndAlignment(m_targetProgram->getOptionSet(), type, &typeLayout));
+                SLANG_RETURN_NULL_ON_FAIL(getNaturalSizeAndAlignment(m_target, type, &typeLayout));
                 auto typeStrideVal = typeLayout.getStride();
 
                 auto typeStrideInst = m_builder.getIntValue(offsetType, typeStrideVal);
@@ -713,8 +741,7 @@ struct ByteAddressBufferLegalizationContext
             // Some platforms e.g. Metal does not allow loading basic types that are not 4-byte
             // sized. We need to lower such loads.
             IRSizeAndAlignment sizeAlignment;
-            SLANG_RETURN_NULL_ON_FAIL(
-                getNaturalSizeAndAlignment(m_targetProgram->getOptionSet(), type, &sizeAlignment));
+            SLANG_RETURN_NULL_ON_FAIL(getNaturalSizeAndAlignment(m_target, type, &sizeAlignment));
             if (sizeAlignment.size == 8)
             {
                 // We need to load the value as two 4-byte values and then combine them.
@@ -739,7 +766,18 @@ struct ByteAddressBufferLegalizationContext
                     hi64,
                     m_builder.getIntValue(m_builder.getUInt64Type(), 32));
                 auto fullValue = m_builder.emitBitOr(m_builder.getUInt64Type(), lo64, shift);
-                return m_builder.emitBitCast(type, fullValue);
+                // For pointer types, Metal doesn't allow as_type casts from integers to pointers,
+                // so we use proper cast operations instead of bit casts.
+                if (type->getOp() == kIROp_PtrType || type->getOp() == kIROp_RawPointerType)
+                {
+                    // Use proper cast operation instead of bit cast for pointers
+                    return m_builder.emitCastIntToPtr(type, fullValue);
+                }
+                else
+                {
+                    // For non-pointer 64-bit types (including IntPtr/UIntPtr)
+                    return m_builder.emitBitCast(type, fullValue);
+                }
             }
             else if (sizeAlignment.size < 4)
             {
@@ -916,6 +954,19 @@ struct ByteAddressBufferLegalizationContext
         {
             return getEquivalentStructuredBufferParam(elementType, byteAddressBufferParam);
         }
+        else if (auto castDynamicResource = as<IRCastDynamicResource>(byteAddressBuffer))
+        {
+            // If the underlying structured buffer is a CastDynamicResource,
+            // we can simply cast the dynamic resource into the byte address buffer type instead.
+            auto arg = castDynamicResource->getOperand(0);
+            return m_builder.emitIntrinsicInst(
+                getEquivalentStructuredBufferParamType(
+                    elementType,
+                    byteAddressBuffer->getDataType()),
+                kIROp_CastDynamicResource,
+                1,
+                &arg);
+        }
 
         if (byteAddressBuffer->getOp() == kIROp_GetElement)
         {
@@ -945,6 +996,18 @@ struct ByteAddressBufferLegalizationContext
                 structuredBufferArrayType->getElementType(),
                 structuredBufferArray,
                 index);
+        }
+
+        // Handle IRParam by changing its type to StructuredBuffer
+        if (auto babParam = as<IRParam>(byteAddressBuffer))
+        {
+            IRType* babType = babParam->getDataType();
+            IRType* structuredBufferType =
+                getEquivalentStructuredBufferParamType(elementType, babType);
+
+            // Propagate type change to all uses via replaceUsesWith
+            babType->replaceUsesWith(structuredBufferType);
+            return babParam;
         }
 
         // If we failed to pattern-match the byte-address buffer operand
@@ -988,6 +1051,7 @@ struct ByteAddressBufferLegalizationContext
 
     void cloneBufferDecorations(IRBuilder& builder, IRInst* dest, IRInst* src)
     {
+        List<IRDecoration*> decorationsToRemove;
         for (auto decoration : src->getDecorations())
         {
             switch (decoration->getOp())
@@ -997,9 +1061,29 @@ struct ByteAddressBufferLegalizationContext
                     dest,
                     as<IRMemoryQualifierSetDecoration>(decoration)->getMemoryQualifierBit());
                 break;
+            case kIROp_KeepAliveDecoration:
+                // Transfer KeepAlive to the new buffer and mark for removal from original
+                // This is needed when -preserve-params is used: the original ByteAddressBuffer
+                // should not be kept alive since it's replaced by the StructuredBuffer.
+                builder.addKeepAliveDecoration(dest);
+                decorationsToRemove.add(decoration);
+                break;
+            case kIROp_ExportDecoration:
+                // Transfer Export decoration to the new buffer and mark for removal from original
+                {
+                    auto exportDecor = as<IRExportDecoration>(decoration);
+                    builder.addExportDecoration(dest, exportDecor->getMangledName());
+                    decorationsToRemove.add(decoration);
+                }
+                break;
             default:
                 break;
             }
+        }
+        // Remove decorations from the original that were transferred to the new buffer
+        for (auto decoration : decorationsToRemove)
+        {
+            decoration->removeAndDeallocate();
         }
     }
 
@@ -1045,6 +1129,11 @@ struct ByteAddressBufferLegalizationContext
             paramBuilder.addLayoutDecoration(structuredBufferParam, layoutDecoration->getLayout());
         }
         cloneBufferDecorations(paramBuilder, structuredBufferParam, byteAddressBufferParam);
+
+        // Track that this ByteAddressBuffer parameter has been replaced.
+        // It will be removed at the end of the pass if it has no remaining uses.
+        m_replacedByteAddressBufferParams.add(byteAddressBufferParam);
+
         return structuredBufferParam;
     }
 
@@ -1052,6 +1141,9 @@ struct ByteAddressBufferLegalizationContext
         IRType* elementType,
         IRType* byteAddressBufferType)
     {
+        if (as<IRHLSLStructuredBufferTypeBase>(byteAddressBufferType))
+            return byteAddressBufferType;
+
         // Our task in this function is to compute the type for
         // a structure buffer that is equivalent to `byteAddressBufferType`,
         // but with the given `elementType`.
@@ -1100,7 +1192,7 @@ struct ByteAddressBufferLegalizationContext
 
     void processStore(IRInst* store)
     {
-        // Just as for loads, the logic for stores is base don the type
+        // Just as for loads, the logic for stores is base on the type
         // being used, but unlike in the load case we don't care about
         // the type of the store operation, but instead the operand
         // that represents the value to be stored.
@@ -1183,7 +1275,7 @@ struct ByteAddressBufferLegalizationContext
                 // Else, fallback to scalarizing the stores.
                 IRSizeAndAlignment elementLayout;
                 SLANG_RELEASE_ASSERT(!getNaturalSizeAndAlignment(
-                    m_targetProgram->getOptionSet(),
+                    m_target,
                     arrayType->getElementType(),
                     &elementLayout));
                 IRIntegerValue elementStride = elementLayout.getStride();
@@ -1276,7 +1368,7 @@ struct ByteAddressBufferLegalizationContext
 
                 IRSizeAndAlignment elementLayout;
                 SLANG_RELEASE_ASSERT(!getNaturalSizeAndAlignment(
-                    m_targetProgram->getOptionSet(),
+                    m_target,
                     vecType->getElementType(),
                     &elementLayout));
                 IRIntegerValue elementStride = elementLayout.getStride();
@@ -1368,8 +1460,7 @@ struct ByteAddressBufferLegalizationContext
                 auto indexType = offset->getDataType();
 
                 IRSizeAndAlignment typeLayout;
-                SLANG_RETURN_ON_FAIL(
-                    getNaturalSizeAndAlignment(m_targetProgram->getOptionSet(), type, &typeLayout));
+                SLANG_RETURN_ON_FAIL(getNaturalSizeAndAlignment(m_target, type, &typeLayout));
 
                 auto typeStride = m_builder.getIntValue(indexType, typeLayout.getStride());
 
@@ -1384,16 +1475,29 @@ struct ByteAddressBufferLegalizationContext
         if (m_options.lowerBasicTypeOps)
         {
             // Some platforms e.g. Metal does not allow storing basic types that are not 4-byte
-            // sized. We need to lower such loads.
+            // sized. We need to lower such stores.
             IRSizeAndAlignment sizeAlignment;
-            SLANG_RETURN_ON_FAIL(
-                getNaturalSizeAndAlignment(m_targetProgram->getOptionSet(), type, &sizeAlignment));
+            SLANG_RETURN_ON_FAIL(getNaturalSizeAndAlignment(m_target, type, &sizeAlignment));
             if (sizeAlignment.size == 8)
             {
                 // We need to store the value as two 4-byte values.
-                auto uint64Val = m_builder.emitBitCast(m_builder.getUInt64Type(), value);
-                auto loVal = m_builder.emitCast(m_builder.getUIntType(), uint64Val);
-                auto hiVal = m_builder.emitCast(
+                // For pointer types, Metal doesn't allow as_type casts from pointers to integers,
+                // so we use proper cast operations instead of bit casts.
+                IRInst* loVal;
+                IRInst* hiVal;
+                IRInst* uint64Val;
+                if (type->getOp() == kIROp_PtrType || type->getOp() == kIROp_RawPointerType)
+                {
+                    // Use proper cast operation instead of bit cast for pointers
+                    uint64Val = m_builder.emitCastPtrToInt(value);
+                }
+                else
+                {
+                    // For non-pointer 64-bit types (including IntPtr/UIntPtr)
+                    uint64Val = m_builder.emitBitCast(m_builder.getUInt64Type(), value);
+                }
+                loVal = m_builder.emitCast(m_builder.getUIntType(), uint64Val);
+                hiVal = m_builder.emitCast(
                     m_builder.getUIntType(),
                     m_builder.emitShr(
                         m_builder.getUInt64Type(),
@@ -1473,10 +1577,7 @@ struct ByteAddressBufferLegalizationContext
         // We iterate over the elements and fetch then store each one.
         //
         IRSizeAndAlignment elementLayout;
-        SLANG_RETURN_ON_FAIL(getNaturalSizeAndAlignment(
-            m_targetProgram->getOptionSet(),
-            elementType,
-            &elementLayout));
+        SLANG_RETURN_ON_FAIL(getNaturalSizeAndAlignment(m_target, elementType, &elementLayout));
         IRIntegerValue elementStride = elementLayout.getStride();
 
         auto indexType = m_builder.getIntType();
@@ -1499,9 +1600,9 @@ struct ByteAddressBufferLegalizationContext
 
 
 void legalizeByteAddressBufferOps(
+    IRModule* module,
     Session* session,
     TargetProgram* program,
-    IRModule* module,
     DiagnosticSink* sink,
     ByteAddressBufferLegalizationOptions const& options)
 {
@@ -1513,5 +1614,6 @@ void legalizeByteAddressBufferOps(
     context.m_sink = sink;
     context.processModule(module);
 }
+
 
 } // namespace Slang

@@ -7,6 +7,7 @@
 #include "../core/slang-type-text-util.h"
 #include "slang-ast-builder.h"
 #include "slang-lookup.h"
+#include "slang-rich-diagnostics.h"
 
 namespace Slang
 {
@@ -353,6 +354,35 @@ String DocMarkdownWriter::_getName(InheritanceDecl* decl)
     StringBuilder buf;
     buf.clear();
     buf << decl->base;
+    return buf.produceString();
+}
+
+String DocMarkdownWriter::_getName(ExtensionDecl* extDecl)
+{
+    StringBuilder buf;
+    buf.clear();
+
+    if (auto declRef = isDeclRefTypeOf<Decl>(extDecl->targetType))
+    {
+        buf << "extension " << _getName(declRef.getDecl()).getUnownedSlice();
+
+        List<InheritanceDecl*> inheritanceDecls;
+        _getDecls(extDecl, inheritanceDecls);
+
+        const Index count = inheritanceDecls.getCount();
+        if (count)
+        {
+            buf << " : ";
+
+            List<String> baseNames;
+            for (Index i = 0; i < count; ++i)
+            {
+                baseNames.add(_getName(inheritanceDecls[i]));
+            }
+            StringUtil::join(baseNames, UnownedStringSlice(", "), buf);
+        }
+    }
+
     return buf.produceString();
 }
 
@@ -1076,7 +1106,7 @@ static Index _addRequirements(Decl* decl, List<DocMarkdownWriter::Requirement>& 
 
     if (auto capAttr = decl->findModifier<RequireCapabilityAttribute>())
     {
-        return _addRequirement(capAttr->capabilitySet, ioReqs);
+        return _addRequirement(CapabilitySet{capAttr->capabilitySet}, ioReqs);
     }
     return -1;
 }
@@ -1491,9 +1521,7 @@ void DocMarkdownWriter::writeCallableOverridable(
             {
                 auto decl = as<Decl>(entry->m_node);
                 m_sink->diagnose(
-                    decl->loc,
-                    Diagnostics::ignoredDocumentationOnOverloadCandidate,
-                    decl);
+                    Diagnostics::IgnoredDocumentationOnOverloadCandidate{.location = decl});
             }
         }
         else
@@ -2973,6 +3001,14 @@ DocumentPage* DocMarkdownWriter::getPage(Decl* decl)
     page->path = path;
     page->shortName = _getName(decl);
     page->decl = decl;
+    if (auto extDecl = as<ExtensionDecl>(decl))
+    {
+        page->shortName = _getName(extDecl);
+        if (auto declRef = isDeclRefTypeOf<Decl>(extDecl->targetType))
+        {
+            page->decl = declRef.getDecl();
+        }
+    }
     m_output[path] = page;
 
     // If parent page exists, add this page to it's children

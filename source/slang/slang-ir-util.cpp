@@ -4,6 +4,7 @@
 #include "slang-ir-dce.h"
 #include "slang-ir-dominators.h"
 #include "slang-ir-insts.h"
+#include "slang-rich-diagnostics.h"
 
 namespace Slang
 {
@@ -15,6 +16,14 @@ bool isPointerOfType(IRInst* type, IROp opCode)
         return ptrType->getValueType() && ptrType->getValueType()->getOp() == opCode;
     }
     return false;
+}
+
+bool isUserPointerType(IRInst* type)
+{
+    auto ptrType = as<IRPtrType>(type);
+    if (!ptrType)
+        return false;
+    return ptrType->getAddressSpace() == AddressSpace::UserPointer;
 }
 
 IRType* getVectorElementType(IRType* type)
@@ -127,6 +136,9 @@ IROp getTypeStyle(IROp op)
     case kIROp_HalfType:
     case kIROp_FloatType:
     case kIROp_DoubleType:
+    case kIROp_FloatE4M3Type:
+    case kIROp_FloatE5M2Type:
+    case kIROp_BFloat16Type:
         {
             // All float like
             return kIROp_FloatType;
@@ -175,8 +187,29 @@ IRInst* specializeWithGeneric(
     {
         genArgs.add(param);
     }
+
+    // Default to type kind for now.
+    IRType* typeForSpecialization = builder.getTypeKind();
+
+    auto dataType = genericToSpecialize->getDataType();
+    if (dataType)
+    {
+        if (dataType->getOp() == kIROp_TypeKind || dataType->getOp() == kIROp_GenericKind)
+        {
+            typeForSpecialization = (genericToSpecialize)->getDataType();
+        }
+        else if (dataType->getOp() == kIROp_Generic)
+        {
+            typeForSpecialization = (IRType*)builder.emitSpecializeInst(
+                builder.getTypeKind(),
+                (genericToSpecialize)->getDataType(),
+                genArgs.getCount(),
+                genArgs.getBuffer());
+        }
+    }
+
     return builder.emitSpecializeInst(
-        builder.getTypeKind(),
+        typeForSpecialization,
         genericToSpecialize,
         (UInt)genArgs.getCount(),
         genArgs.getBuffer());
@@ -304,8 +337,8 @@ bool isWrapperType(IRInst* inst)
     case kIROp_VectorType:
     case kIROp_MatrixType:
     case kIROp_PtrType:
-    case kIROp_RefType:
-    case kIROp_ConstRefType:
+    case kIROp_RefParamType:
+    case kIROp_BorrowInParamType:
     case kIROp_HLSLStructuredBufferType:
     case kIROp_HLSLRWStructuredBufferType:
     case kIROp_HLSLRasterizerOrderedStructuredBufferType:
@@ -453,6 +486,9 @@ void getTypeNameHint(StringBuilder& sb, IRInst* type)
 
     switch (type->getOp())
     {
+    case kIROp_BoolType:
+        sb << "bool";
+        break;
     case kIROp_FloatType:
         sb << "float";
         break;
@@ -466,31 +502,31 @@ void getTypeNameHint(StringBuilder& sb, IRInst* type)
         sb << "int";
         break;
     case kIROp_Int8Type:
-        sb << "int8";
+        sb << "int8_t";
         break;
     case kIROp_Int16Type:
-        sb << "int16";
+        sb << "int16_t";
         break;
     case kIROp_Int64Type:
-        sb << "int64";
+        sb << "int64_t";
         break;
     case kIROp_IntPtrType:
-        sb << "intptr";
+        sb << "intptr_t";
         break;
     case kIROp_UIntType:
         sb << "uint";
         break;
     case kIROp_UInt8Type:
-        sb << "uint8";
+        sb << "uint8_t";
         break;
     case kIROp_UInt16Type:
-        sb << "uint16";
+        sb << "uint16_t";
         break;
     case kIROp_UInt64Type:
-        sb << "uint64";
+        sb << "uint64_t";
         break;
     case kIROp_UIntPtrType:
-        sb << "uintptr";
+        sb << "uintptr_t";
         break;
     case kIROp_CharType:
         sb << "char";
@@ -512,10 +548,23 @@ void getTypeNameHint(StringBuilder& sb, IRInst* type)
         break;
     case kIROp_SubpassInputType:
         {
-            auto textureType = as<IRSubpassInputType>(type);
+            auto subpassInputType = as<IRSubpassInputType>(type);
             sb << "SubpassInput";
-            if (textureType->isMultisample())
-                sb << "MS";
+            // Handle isMultisample individually - if constant, use pretty name; if generic, include
+            // it
+            auto isMS = subpassInputType->getIsMultisampleInst();
+            if (auto isMSLit = as<IRIntLit>(isMS))
+            {
+                if (isMSLit->getValue() != 0)
+                    sb << "MS";
+            }
+            else
+            {
+                // Generic parameter - include in output for uniqueness
+                sb << "<";
+                getTypeNameHint(sb, isMS);
+                sb << ">";
+            }
             break;
         }
     case kIROp_TextureType:
@@ -542,59 +591,103 @@ void getTypeNameHint(StringBuilder& sb, IRInst* type)
             case SLANG_RESOURCE_ACCESS_READ:
                 break;
             }
-            if (textureType->isCombined())
+
+            auto isCombinedInst = textureType->getIsCombinedInst();
+            auto isCombinedLit = as<IRIntLit>(isCombinedInst);
+            if (isCombinedLit)
             {
-                switch (textureType->GetBaseShape())
+                bool isCombined = (isCombinedLit->getValue() != 0);
+                if (isCombined)
                 {
-                case SLANG_TEXTURE_1D:
-                    sb << "Sampler1D";
-                    break;
-                case SLANG_TEXTURE_2D:
-                    sb << "Sampler2D";
-                    break;
-                case SLANG_TEXTURE_3D:
-                    sb << "Sampler3D";
-                    break;
-                case SLANG_TEXTURE_CUBE:
-                    sb << "SamplerCube";
-                    break;
-                case SLANG_TEXTURE_BUFFER:
-                    sb << "SamplerBuffer";
-                    break;
+                    switch (textureType->GetBaseShape())
+                    {
+                    case SLANG_TEXTURE_1D:
+                        sb << "Sampler1D";
+                        break;
+                    case SLANG_TEXTURE_2D:
+                        sb << "Sampler2D";
+                        break;
+                    case SLANG_TEXTURE_3D:
+                        sb << "Sampler3D";
+                        break;
+                    case SLANG_TEXTURE_CUBE:
+                        sb << "SamplerCube";
+                        break;
+                    case SLANG_TEXTURE_BUFFER:
+                        sb << "SamplerBuffer";
+                        break;
+                    }
+                }
+                else
+                {
+                    switch (textureType->GetBaseShape())
+                    {
+                    case SLANG_TEXTURE_1D:
+                        sb << "Texture1D";
+                        break;
+                    case SLANG_TEXTURE_2D:
+                        sb << "Texture2D";
+                        break;
+                    case SLANG_TEXTURE_3D:
+                        sb << "Texture3D";
+                        break;
+                    case SLANG_TEXTURE_CUBE:
+                        sb << "TextureCube";
+                        break;
+                    case SLANG_TEXTURE_BUFFER:
+                        sb << "Buffer";
+                        break;
+                    }
                 }
             }
-            else
+
+            // Handle each boolean flag individually
+            auto isMultisampleInst = textureType->getIsMultisampleInst();
+            if (auto lit = as<IRIntLit>(isMultisampleInst))
             {
-                switch (textureType->GetBaseShape())
+                if (lit->getValue() != 0)
+                    sb << "MS";
+            }
+
+            auto isArrayInst = textureType->getIsArrayInst();
+            if (auto lit = as<IRIntLit>(isArrayInst))
+            {
+                if (lit->getValue() != 0)
+                    sb << "Array";
+            }
+
+            auto isShadowInst = textureType->getIsShadowInst();
+            if (auto lit = as<IRIntLit>(isShadowInst))
+            {
+                if (lit->getValue() != 0)
+                    sb << "Shadow";
+            }
+
+            // If any parameters are generic (not constants), append them for uniqueness
+            bool hasGenericParams = !as<IRIntLit>(textureType->getAccessInst()) || !isCombinedLit ||
+                                    !as<IRIntLit>(isMultisampleInst) ||
+                                    !as<IRIntLit>(isArrayInst) || !as<IRIntLit>(isShadowInst);
+
+            if (hasGenericParams)
+            {
+                sb << "<";
+                bool first = true;
+                auto appendParam = [&](IRInst* inst)
                 {
-                case SLANG_TEXTURE_1D:
-                    sb << "Texture1D";
-                    break;
-                case SLANG_TEXTURE_2D:
-                    sb << "Texture2D";
-                    break;
-                case SLANG_TEXTURE_3D:
-                    sb << "Texture3D";
-                    break;
-                case SLANG_TEXTURE_CUBE:
-                    sb << "TextureCube";
-                    break;
-                case SLANG_TEXTURE_BUFFER:
-                    sb << "Buffer";
-                    break;
-                }
-            }
-            if (textureType->isMultisample())
-            {
-                sb << "MS";
-            }
-            if (textureType->isArray())
-            {
-                sb << "Array";
-            }
-            if (textureType->isShadow())
-            {
-                sb << "Shadow";
+                    if (!as<IRIntLit>(inst))
+                    {
+                        if (!first)
+                            sb << ",";
+                        getTypeNameHint(sb, inst);
+                        first = false;
+                    }
+                };
+                appendParam(textureType->getAccessInst());
+                appendParam(isCombinedInst);
+                appendParam(isMultisampleInst);
+                appendParam(isArrayInst);
+                appendParam(isShadowInst);
+                sb << ">";
             }
         }
         break;
@@ -631,7 +724,7 @@ void getTypeNameHint(StringBuilder& sb, IRInst* type)
         sb << "AtomicCounter";
         break;
     case kIROp_RaytracingAccelerationStructureType:
-        sb << "RayTracingAccelerationStructure";
+        sb << "RaytracingAccelerationStructure";
         break;
     case kIROp_HitObjectType:
         sb << "HitObject";
@@ -716,6 +809,39 @@ void getTypeNameHint(StringBuilder& sb, IRInst* type)
     case kIROp_IntLit:
         sb << as<IRIntLit>(type)->getValue();
         break;
+    case kIROp_BoolLit:
+        sb << (as<IRBoolLit>(type)->getValue() ? "true" : "false");
+        break;
+    case kIROp_FloatLit:
+        sb << as<IRFloatLit>(type)->getValue();
+        break;
+    case kIROp_StringLit:
+        {
+            auto stringLit = as<IRStringLit>(type);
+            sb << "\"";
+            sb << stringLit->getStringSlice();
+            sb << "\"";
+        }
+        break;
+    case kIROp_VoidLit:
+        sb << "void";
+        break;
+    case kIROp_PtrLit:
+        {
+            auto ptrLit = as<IRPtrLit>(type);
+            sb << "ptr_";
+            sb << (UInt64)ptrLit->getValue();
+        }
+        break;
+    case kIROp_FloatE4M3Type:
+        sb << "FloatE4M3";
+        break;
+    case kIROp_FloatE5M2Type:
+        sb << "FloatE5M2";
+        break;
+    case kIROp_BFloat16Type:
+        sb << "BFloat16";
+        break;
     default:
         if (auto decor = type->findDecoration<IRNameHintDecoration>())
             sb << decor->getName();
@@ -765,33 +891,253 @@ IRInst* getRootAddr(IRInst* addr, List<IRInst*>& outAccessChain, List<IRInst*>* 
     return addr;
 }
 
+
+IRInst* getRootBufferOrAddr(IRInst* addr)
+{
+    auto rootAddr = getRootAddr(addr);
+    if (as<IRRWStructuredBufferGetElementPtr>(rootAddr))
+    {
+        auto bufferHandle = rootAddr->getOperand(0);
+        // Check if the bufferHandle itself is a load from a global parameter.
+        if (auto load = as<IRLoad>(bufferHandle))
+        {
+            auto newRoot = getRootAddr(load->getPtr());
+            if (newRoot->getOp() == kIROp_GlobalParam)
+                return newRoot;
+        }
+    }
+    return rootAddr;
+}
+
+// The aliasing class of an address. This is used to determine
+// if two addresses may alias.
+enum class AddressAliasingClass
+{
+    Unknown,
+    UserPointer,      // A user pointer into global memory
+    Var,              // A thread-local or groupshared var.
+    ConstantBuffer,   // A constant buffer or parameter block.
+    BoundBuffer,      // A bound buffer.
+    BoundTexture,     // A bound texture resource.
+    DescriptorHandle, // A bindless buffer or resource.
+};
+
+AddressAliasingClass getAliasingClass(IRInst* addr)
+{
+    if (auto globalParam = as<IRGlobalParam>(addr))
+    {
+        auto type = unwrapArray(globalParam->getDataType());
+        if (!type)
+            return AddressAliasingClass::Unknown;
+        switch (type->getOp())
+        {
+        case kIROp_TextureType:
+            return AddressAliasingClass::BoundTexture;
+        case kIROp_HLSLStructuredBufferType:
+        case kIROp_HLSLRWStructuredBufferType:
+        case kIROp_HLSLAppendStructuredBufferType:
+        case kIROp_HLSLConsumeStructuredBufferType:
+        case kIROp_HLSLRasterizerOrderedStructuredBufferType:
+        case kIROp_HLSLByteAddressBufferType:
+        case kIROp_HLSLRWByteAddressBufferType:
+        case kIROp_HLSLRasterizerOrderedByteAddressBufferType:
+        case kIROp_GLSLShaderStorageBufferType:
+            return AddressAliasingClass::BoundBuffer;
+        case kIROp_ConstantBufferType:
+        case kIROp_ParameterBlockType:
+            return AddressAliasingClass::ConstantBuffer;
+        case kIROp_PtrType:
+            if (isUserPointerType(type))
+                return AddressAliasingClass::UserPointer;
+            return AddressAliasingClass::Unknown;
+        case kIROp_DynamicResourceType:
+            return AddressAliasingClass::DescriptorHandle;
+        default:
+            return AddressAliasingClass::Unknown;
+        }
+    }
+    else if (as<IRVar>(addr))
+        return AddressAliasingClass::Var;
+    else if (as<IRGlobalVar>(addr))
+        return AddressAliasingClass::Var;
+    else if (as<IRRWStructuredBufferGetElementPtr>(addr))
+        return AddressAliasingClass::DescriptorHandle;
+    else if (as<IRCastDescriptorHandleToResource>(addr))
+        return AddressAliasingClass::DescriptorHandle;
+
+    auto type = addr->getDataType();
+    if (isUserPointerType(type))
+        return AddressAliasingClass::UserPointer;
+    return AddressAliasingClass::Unknown;
+}
+
+bool canAddrClassesAlias(AddressAliasingClass c1, AddressAliasingClass c2)
+{
+    if (c1 == AddressAliasingClass::Unknown || c2 == AddressAliasingClass::Unknown)
+        return true;
+
+    switch (c1)
+    {
+    case AddressAliasingClass::Unknown:
+        return true;
+    case AddressAliasingClass::UserPointer:
+    case AddressAliasingClass::Var:
+        // A users pointer or var can only alias with another
+        // object that is either a user pointer or var.
+        //
+        // Generally, a var should never alias with anything else that isn't a var,
+        // if we never allow the user to take address of a local var.
+        // We don't allow taking addresses of a local var on most GPU targets, but
+        // we currently do expose an internal intrinsic to do so when targeting CPU.
+        // We should consider disallowing this across the board, or enable more aggresive
+        // criteria when targeting GPU backends.
+        // For now we stay conservative and just report true even when addr1 is var and
+        // addr2 is not rooted from a var.
+        //
+        return c2 == AddressAliasingClass::UserPointer || c2 == AddressAliasingClass::Var;
+    case AddressAliasingClass::BoundBuffer:
+    case AddressAliasingClass::BoundTexture:
+        // A bound resource can only alias with another
+        // object that is a bound resource or descriptor handle
+        return c2 == c1 || c2 == AddressAliasingClass::DescriptorHandle;
+
+    case AddressAliasingClass::DescriptorHandle:
+        // Can alias with any other resource.
+        switch (c2)
+        {
+        case AddressAliasingClass::BoundBuffer:
+        case AddressAliasingClass::BoundTexture:
+        case AddressAliasingClass::DescriptorHandle:
+            return true;
+        default:
+            return false;
+        }
+    case AddressAliasingClass::ConstantBuffer:
+        // Constant buffer cannot alias with anything.
+        return false;
+    }
+    // For any other unknown case, assume they may alias.
+    return true;
+}
+
+// Has `var` being used in a way that may allow it to alias with a user pointer?
+bool canVarAliasWithUserPointer(TargetRequest* target, IRInst* var)
+{
+    if (target && !isCPUTarget(target))
+    {
+        // We don't allow taking the address of a variable on anything other
+        // than the CPU target. Therefore a var can never alias with a user
+        // pointer on these targets.
+        return false;
+    }
+
+    SLANG_UNUSED(var);
+    return true;
+}
+
 // A simple and conservative address aliasing check.
-bool canAddressesPotentiallyAlias(IRGlobalValueWithCode* func, IRInst* addr1, IRInst* addr2)
+bool canAddressesPotentiallyAlias(
+    TargetRequest* target,
+    IRGlobalValueWithCode* func,
+    IRInst* addr1,
+    IRInst* addr2)
 {
     if (addr1 == addr2)
         return true;
 
-    // Two variables can never alias.
-    addr1 = getRootAddr(addr1);
-    addr2 = getRootAddr(addr2);
+    auto root1 = getRootBufferOrAddr(addr1);
+    auto root2 = getRootBufferOrAddr(addr2);
 
-    // Global addresses can alias with anything.
-    if (!isChildInstOf(addr1, func))
-        return true;
+    auto addr1Class = getAliasingClass(root1);
+    auto addr2Class = getAliasingClass(root2);
 
-    if (!isChildInstOf(addr2, func))
-        return true;
-
-    if (addr1->getOp() == kIROp_Var && addr2->getOp() == kIROp_Var && addr1 != addr2)
+    if (!canAddrClassesAlias(addr1Class, addr2Class))
         return false;
+
+    if (addr1Class == addr2Class)
+    {
+        // For these classes of addresses, the identity of the root
+        // determines whether or not the addresse can alias.
+        // Note that we assume two different bound resources can never
+        // alias, and two different variables can never alias.
+        switch (addr1Class)
+        {
+        case AddressAliasingClass::Var:
+        case AddressAliasingClass::BoundBuffer:
+        case AddressAliasingClass::BoundTexture:
+        case AddressAliasingClass::ConstantBuffer:
+            if (root1 != root2)
+                return false;
+            break;
+        }
+    }
 
     // A param and a var can never alias.
-    if (addr1->getOp() == kIROp_Param && addr1->getParent() == func->getFirstBlock() &&
-            addr2->getOp() == kIROp_Var ||
-        addr1->getOp() == kIROp_Var && addr2->getOp() == kIROp_Param &&
-            addr2->getParent() == func->getFirstBlock())
+    if (root1->getOp() == kIROp_Param && root1->getParent() == func->getFirstBlock() &&
+            root2->getOp() == kIROp_Var ||
+        root1->getOp() == kIROp_Var && root2->getOp() == kIROp_Param &&
+            root2->getParent() == func->getFirstBlock())
         return false;
+
+    // If one addr is user pointer and one addr is a var,
+    // they can never alias, if the user code never took the address of
+    // the var.
+    if (addr1Class == AddressAliasingClass::Var && addr2Class == AddressAliasingClass::UserPointer)
+    {
+        return canVarAliasWithUserPointer(target, root1);
+    }
+    if (addr2Class == AddressAliasingClass::Var && addr1Class == AddressAliasingClass::UserPointer)
+    {
+        return canVarAliasWithUserPointer(target, root2);
+    }
+
+    // If two addrs are rooted from the same object but found to statically differ in access chain,
+    // then they cannot alias.
+    if (root1 == root2)
+    {
+        List<IRInst*> accessChain1;
+        List<IRInst*> accessChain2;
+
+        // Since getRootBufferOrAddr has a different behavior around
+        // RWStructuredBufferGetElementPtr compared to getRootAddr,
+        // we need to call getRootAddr here again to get a simpler access chain
+        // that we can handle here, so that we don't need to handle the nuance
+        // of whether or not to trace past any RWStructuredBufferGetElementPtr.
+        //
+        root1 = getRootAddr(addr1, accessChain1, nullptr);
+        root2 = getRootAddr(addr2, accessChain2, nullptr);
+        if (root1 != root2)
+            return true;
+        for (Index i = 0; i < Math::Min(accessChain1.getCount(), accessChain2.getCount()); i++)
+        {
+            auto node1 = accessChain1[i];
+            auto node2 = accessChain2[i];
+            if (as<IRStructKey>(node1) && as<IRStructKey>(node2))
+            {
+                // Two different field keys means the two addresses cannot alias.
+                // TODO: If we are going to support union types, we need to exclude that
+                // here.
+                if (node1 != node2)
+                    return false;
+                // If the keys are the same, continue looking further down the access chain.
+                continue;
+            }
+            // Two different constant indices means the two addresses cannot alias.
+            auto index1 = as<IRIntLit>(node1);
+            auto index2 = as<IRIntLit>(node2);
+            if (index1 && index2 && index1->getValue() != index2->getValue())
+                return false;
+            // In all other cases, such as when either one of the indices is
+            // a untime value, we treat the two indices as potentially being the same.
+            return true;
+        }
+    }
     return true;
+}
+
+bool canAddressesPotentiallyAlias(IRGlobalValueWithCode* func, IRInst* addr1, IRInst* addr2)
+{
+    return canAddressesPotentiallyAlias(nullptr, func, addr1, addr2);
 }
 
 bool isPtrLikeOrHandleType(IRInst* type)
@@ -809,11 +1155,11 @@ bool isPtrLikeOrHandleType(IRInst* type)
     case kIROp_ComPtrType:
     case kIROp_RawPointerType:
     case kIROp_RTTIPointerType:
-    case kIROp_OutType:
-    case kIROp_InOutType:
+    case kIROp_OutParamType:
+    case kIROp_BorrowInOutParamType:
     case kIROp_PtrType:
-    case kIROp_RefType:
-    case kIROp_ConstRefType:
+    case kIROp_RefParamType:
+    case kIROp_BorrowInParamType:
     case kIROp_GLSLShaderStorageBufferType:
         return true;
     }
@@ -871,8 +1217,8 @@ bool canInstHaveSideEffectAtAddress(IRGlobalValueWithCode* func, IRInst* inst, I
             }
         }
         break;
-    case kIROp_unconditionalBranch:
-    case kIROp_loop:
+    case kIROp_UnconditionalBranch:
+    case kIROp_Loop:
         {
             auto branch = as<IRUnconditionalBranch>(inst);
             // If any pointer typed argument of the branch inst may overlap addr, return true.
@@ -916,13 +1262,13 @@ bool canInstHaveSideEffectAtAddress(IRGlobalValueWithCode* func, IRInst* inst, I
     return false;
 }
 
-IRInst* getUndefInst(IRBuilder builder, IRModule* module)
+IRInst* getUnitPoisonVal(IRBuilder builder, IRModule* module)
 {
     IRInst* undefInst = nullptr;
 
     for (auto inst : module->getModuleInst()->getChildren())
     {
-        if (inst->getOp() == kIROp_undefined && inst->getDataType() &&
+        if (inst->getOp() == kIROp_Poison && inst->getDataType() &&
             inst->getDataType()->getOp() == kIROp_VoidType)
         {
             undefInst = inst;
@@ -933,7 +1279,7 @@ IRInst* getUndefInst(IRBuilder builder, IRModule* module)
     {
         auto voidType = builder.getVoidType();
         builder.setInsertAfter(voidType);
-        undefInst = builder.emitUndefined(voidType);
+        undefInst = builder.emitPoison(voidType);
     }
     return undefInst;
 }
@@ -972,7 +1318,7 @@ IRInst* emitLoopBlocks(
     auto ifBreakBlock = loopBuilder.emitBlock();
     loopBreakBlock = loopBuilder.emitBlock();
     auto loopContinueBlock = loopBuilder.emitBlock();
-    builder->emitLoop(loopHeadBlock, loopBreakBlock, loopHeadBlock, 1, &initVal);
+    builder->emitLoop(loopHeadBlock, loopBreakBlock, loopContinueBlock, 1, &initVal);
     loopBuilder.setInsertInto(loopHeadBlock);
     auto loopParam = loopBuilder.emitParam(initVal->getFullType());
     auto cmpResult = loopBuilder.emitLess(loopParam, finalVal);
@@ -992,17 +1338,20 @@ IRInst* emitLoopBlocks(
 
 void sortBlocksInFunc(IRGlobalValueWithCode* func)
 {
-    auto order = getReversePostorder(func);
+    auto order = getReverseMirroredPostorder(func);
     for (auto block : order)
         block->insertAtEnd(func);
 }
 
-void removeLinkageDecorations(IRGlobalValueWithCode* func)
+void removeLinkageDecorations(IRInst* inst)
 {
+    if (!inst)
+        return;
+
     List<IRInst*> toRemove;
-    for (auto inst : func->getDecorations())
+    for (auto decoration : inst->getDecorations())
     {
-        switch (inst->getOp())
+        switch (decoration->getOp())
         {
         case kIROp_ImportDecoration:
         case kIROp_ExportDecoration:
@@ -1013,14 +1362,14 @@ void removeLinkageDecorations(IRGlobalValueWithCode* func)
         case kIROp_CudaDeviceExportDecoration:
         case kIROp_DllExportDecoration:
         case kIROp_HLSLExportDecoration:
-            toRemove.add(inst);
+            toRemove.add(decoration);
             break;
         default:
             break;
         }
     }
-    for (auto inst : toRemove)
-        inst->removeAndDeallocate();
+    for (auto decoration : toRemove)
+        decoration->removeAndDeallocate();
 }
 
 void setInsertBeforeOrdinaryInst(IRBuilder* builder, IRInst* inst)
@@ -1111,15 +1460,15 @@ bool areCallArgumentsSideEffectFree(IRCall* call, SideEffectAnalysisOptions opti
             if (isBitSet(options, SideEffectAnalysisOptions::UseDominanceTree))
                 dom = module->findOrCreateDominatorTree(parentFunc);
 
-            // If the pointer argument is a local variable (thus can't alias with other addresses)
-            // and it is never read from in the function, we can safely treat the call as having
-            // no side-effect.
-            // This is a conservative test, but is sufficient to detect the most common case where
-            // a temporary variable is used as the inout argument and the result stored in the temp
-            // variable isn't being used elsewhere in the parent func.
+            // If the pointer argument is a local variable (thus can't alias with other
+            // addresses) and it is never read from in the function, we can safely treat the
+            // call as having no side-effect. This is a conservative test, but is sufficient to
+            // detect the most common case where a temporary variable is used as the inout
+            // argument and the result stored in the temp variable isn't being used elsewhere in
+            // the parent func.
             //
-            // A more aggresive test can check all other address uses reachable from the call site
-            // and see if any of them are aliasing with the argument.
+            // A more aggresive test can check all other address uses reachable from the call
+            // site and see if any of them are aliasing with the argument.
             for (auto use = arg->firstUse; use; use = use->nextUse)
             {
                 if (as<IRDecoration>(use->getUser()))
@@ -1143,7 +1492,7 @@ bool areCallArgumentsSideEffectFree(IRCall* call, SideEffectAnalysisOptions opti
                         if (!funcType)
                             return false;
                         if (funcType->getParamCount() > i &&
-                            as<IROutType>(funcType->getParamType(i)))
+                            as<IROutParamType>(funcType->getParamType(i)))
                             continue;
 
                         // We are an argument to an inout parameter.
@@ -1293,8 +1642,8 @@ bool doesCalleeHaveSideEffect(IRInst* callee)
         }
     }
 
-    // If the callee has no side effect, check if any of its associated functions have side effect.
-    // If so, we want to keep the callee around.
+    // If the callee has no side effect, check if any of its associated functions have side
+    // effect. If so, we want to keep the callee around.
     //
     // Typically, once the relevant pass has completed, the association is removed,
     // and at that point we can remove the function.
@@ -1547,7 +1896,7 @@ IRPtrTypeBase* isMutablePointerType(IRInst* inst)
 {
     switch (inst->getOp())
     {
-    case kIROp_ConstRefType:
+    case kIROp_BorrowInParamType:
         return nullptr;
     default:
         return asRelevantPtrType(inst);
@@ -1711,7 +2060,7 @@ List<IRBlock*> collectBlocksInRegion(
                 continue;
             if (!dom->dominates(firstBlock, succ))
                 continue;
-            if (!as<IRUnreachable>(breakBlock->getTerminator()))
+            if (!as<IRUnreachableBase>(breakBlock->getTerminator()))
             {
                 if (dom->dominates(breakBlock, succ))
                     continue;
@@ -1775,6 +2124,38 @@ UnownedStringSlice getBuiltinFuncName(IRInst* callee)
     auto decor = getResolvedInstForDecorations(callee)->findDecoration<IRKnownBuiltinDecoration>();
     if (!decor)
         return UnownedStringSlice();
+
+    // For backward compatibility, convert enum back to string
+    switch (decor->getName())
+    {
+    case KnownBuiltinDeclName::GeometryStreamAppend:
+        return UnownedStringSlice::fromLiteral("GeometryStreamAppend");
+    case KnownBuiltinDeclName::GeometryStreamRestart:
+        return UnownedStringSlice::fromLiteral("GeometryStreamRestart");
+    case KnownBuiltinDeclName::GetAttributeAtVertex:
+        return UnownedStringSlice::fromLiteral("GetAttributeAtVertex");
+    case KnownBuiltinDeclName::DispatchMesh:
+        return UnownedStringSlice::fromLiteral("DispatchMesh");
+    case KnownBuiltinDeclName::saturated_cooperation:
+        return UnownedStringSlice::fromLiteral("saturated_cooperation");
+    case KnownBuiltinDeclName::saturated_cooperation_using:
+        return UnownedStringSlice::fromLiteral("saturated_cooperation_using");
+    case KnownBuiltinDeclName::IDifferentiable:
+        return UnownedStringSlice::fromLiteral("IDifferentiable");
+    case KnownBuiltinDeclName::IDifferentiablePtr:
+        return UnownedStringSlice::fromLiteral("IDifferentiablePtr");
+    case KnownBuiltinDeclName::NullDifferential:
+        return UnownedStringSlice::fromLiteral("NullDifferential");
+    default:
+        return UnownedStringSlice();
+    }
+}
+
+KnownBuiltinDeclName getBuiltinFuncEnum(IRInst* callee)
+{
+    auto decor = getResolvedInstForDecorations(callee)->findDecoration<IRKnownBuiltinDecoration>();
+    if (!decor)
+        return KnownBuiltinDeclName::COUNT; // Use COUNT as invalid value
     return decor->getName();
 }
 
@@ -1850,23 +2231,23 @@ UnownedStringSlice getBasicTypeNameHint(IRType* basicType)
     case kIROp_IntType:
         return UnownedStringSlice::fromLiteral("int");
     case kIROp_Int8Type:
-        return UnownedStringSlice::fromLiteral("int8");
+        return UnownedStringSlice::fromLiteral("int8_t");
     case kIROp_Int16Type:
-        return UnownedStringSlice::fromLiteral("int16");
+        return UnownedStringSlice::fromLiteral("int16_t");
     case kIROp_Int64Type:
-        return UnownedStringSlice::fromLiteral("int64");
+        return UnownedStringSlice::fromLiteral("int64_t");
     case kIROp_IntPtrType:
-        return UnownedStringSlice::fromLiteral("intptr");
+        return UnownedStringSlice::fromLiteral("intptr_t");
     case kIROp_UIntType:
         return UnownedStringSlice::fromLiteral("uint");
     case kIROp_UInt8Type:
-        return UnownedStringSlice::fromLiteral("uint8");
+        return UnownedStringSlice::fromLiteral("uint8_t");
     case kIROp_UInt16Type:
-        return UnownedStringSlice::fromLiteral("uint16");
+        return UnownedStringSlice::fromLiteral("uint16_t");
     case kIROp_UInt64Type:
-        return UnownedStringSlice::fromLiteral("uint64");
+        return UnownedStringSlice::fromLiteral("uint64_t");
     case kIROp_UIntPtrType:
-        return UnownedStringSlice::fromLiteral("uintptr");
+        return UnownedStringSlice::fromLiteral("uintptr_t");
     case kIROp_FloatType:
         return UnownedStringSlice::fromLiteral("float");
     case kIROp_HalfType:
@@ -2026,7 +2407,8 @@ void verifyComputeDerivativeGroupModifiers(
 
     if (quadAttr && linearAttr)
     {
-        sink->diagnose(errorLoc, Diagnostics::onlyOneOfDerivativeGroupLinearOrQuadCanBeSet);
+        sink->diagnose(
+            Diagnostics::OnlyOneOfDerivativeGroupLinearOrQuadCanBeSet{.location = errorLoc});
     }
 
     IRIntegerValue x = 1;
@@ -2042,14 +2424,14 @@ void verifyComputeDerivativeGroupModifiers(
     if (quadAttr)
     {
         if (x % 2 != 0 || y % 2 != 0)
-            sink->diagnose(errorLoc, Diagnostics::derivativeGroupQuadMustBeMultiple2ForXYThreads);
+            sink->diagnose(
+                Diagnostics::DerivativeGroupQuadMustBeMultiple2ForXyThreads{.location = errorLoc});
     }
     else if (linearAttr)
     {
         if ((x * y * z) % 4 != 0)
-            sink->diagnose(
-                errorLoc,
-                Diagnostics::derivativeGroupLinearMustBeMultiple4ForTotalThreadCount);
+            sink->diagnose(Diagnostics::DerivativeGroupLinearMustBeMultiple4ForTotalThreadCount{
+                .location = errorLoc});
     }
 }
 
@@ -2064,6 +2446,56 @@ IRType* getIRVectorBaseType(IRType* type)
     if (type->getOp() != kIROp_VectorType)
         return type;
     return as<IRVectorType>(type)->getElementType();
+}
+
+IRType* getElementType(IRBuilder& builder, IRType* valueType)
+{
+    valueType = (IRType*)unwrapAttributedType(valueType);
+    if (auto arrayType = as<IRArrayTypeBase>(valueType))
+    {
+        return arrayType->getElementType();
+    }
+    else if (auto vectorType = as<IRVectorType>(valueType))
+    {
+        return vectorType->getElementType();
+    }
+    else if (auto basicType = as<IRBasicType>(valueType))
+    {
+        return basicType;
+    }
+    else if (auto coopVecType = as<IRCoopVectorType>(valueType))
+    {
+        return coopVecType->getElementType();
+    }
+    else if (auto matrixType = as<IRMatrixType>(valueType))
+    {
+        return builder.getVectorType(matrixType->getElementType(), matrixType->getColumnCount());
+    }
+    else if (auto coopMatType = as<IRCoopMatrixType>(valueType))
+    {
+        return coopMatType->getElementType();
+    }
+    else if (auto hlslInputPatchType = as<IRHLSLInputPatchType>(valueType))
+    {
+        return hlslInputPatchType->getElementType();
+    }
+    return nullptr;
+}
+
+IRType* getFieldType(IRType* valueType, IRStructKey* key)
+{
+    valueType = (IRType*)unwrapAttributedType(valueType);
+    if (auto structType = as<IRStructType>(valueType))
+    {
+        for (auto field : structType->getFields())
+        {
+            if (field->getKey() == key)
+            {
+                return field->getFieldType();
+            }
+        }
+    }
+    return nullptr;
 }
 
 Int getSpecializationConstantId(IRGlobalParam* param)
@@ -2093,8 +2525,89 @@ IRBlock* getLoopHeaderForConditionBlock(IRBlock* block)
     return nullptr;
 }
 
-void legalizeDefUse(IRGlobalValueWithCode* func)
+// Return true if `inst` is defined at the start of `block`.
+// That is, either `inst` is defined in a block that dominates `block`,
+// or `inst` is defined in a parent of `block`.
+bool isInstAvailableAtBlock(IRDominatorTree& dom, IRInst* inst, IRBlock* block)
 {
+    auto defBlock = as<IRBlock>(inst->getParent());
+    if (!defBlock)
+        return true;
+    if (dom.dominates(defBlock, block))
+        return true;
+    // If inst is a parent of block, it is available.
+    for (IRInst* curr = block; curr; curr = curr->getParent())
+    {
+        if (curr == defBlock)
+            return true;
+    }
+    return false;
+}
+
+
+bool doesTargetSupportUnrestrictedPointers(TargetRequest* req)
+{
+    return isCPUTarget(req) || isCUDATarget(req) || isCPUTargetViaLLVM(req);
+}
+
+bool canInstBeStored(IRInst* inst)
+{
+    // Cannot store insts whose value is a type or a witness table, or a function.
+    // These insts get lowered to target-specific logic, and cannot be
+    // stored into variables or context structs as normal values.
+    //
+    if (as<IRTypeType>(inst->getDataType()) || as<IRWitnessTableType>(inst->getDataType()) ||
+        as<IRTypeKind>(inst->getDataType()) || as<IRFuncType>(inst->getDataType()) ||
+        !inst->getDataType())
+        return false;
+
+    return true;
+}
+
+// Should `inst` be duplicated at use sites instead of being
+// stored to a temporary variable?
+// Some targets such as spirv don't support forming variables of pointer types,
+// so in those cases we will duplicate pointer access chains at use sites.
+//
+bool shouldDuplicateInstAtUseSite(IRInst* inst, TargetProgram* target)
+{
+    switch (inst->getOp())
+    {
+    case kIROp_CastDescriptorHandleToResource:
+    case kIROp_CastDynamicResource:
+        // These casts potentially produces non-storable types, so we will always duplicate them at
+        // use sites.
+        return true;
+    }
+
+    if (!canInstBeStored(inst))
+        return true;
+
+    // For targets that don't support forming variables of pointer types,
+    // we will duplicate pointer access chains at use sites.
+    if (isPtrLikeOrHandleType(inst->getDataType()))
+    {
+        if (doesTargetSupportUnrestrictedPointers(target->getTargetReq()))
+            return false;
+        if (auto ptrType = as<IRPtrTypeBase>(inst->getDataType()))
+        {
+            // A user-pointer type can be stored to a variable.
+            if (ptrType->getAddressSpace() == AddressSpace::UserPointer)
+                return false;
+        }
+        return true;
+    }
+    return false;
+}
+
+void legalizeDefUse(IRGlobalValueWithCode* func, TargetProgram* target)
+{
+    // After multi-level break lowering, we may create situations where an inst
+    // defined in an inner region is referenced from an outer region, which creates
+    // an invalid IR form where the def does not dominate its use. This function
+    // fixes up such situations by creating temporary variables in the common dominator block, and
+    // insert a store to the variable in the inner region, and replacing the uses with loads from
+    // the variable.
     auto dom = computeDominatorTree(func);
 
     // Make a map of loop condition blocks to their loop header.
@@ -2108,123 +2621,162 @@ void legalizeDefUse(IRGlobalValueWithCode* func)
         if (auto header = getLoopHeaderForConditionBlock(block))
             loopHeaderBlockMap.add(block, header);
     }
-
-    for (auto block : func->getBlocks())
+    bool needRerun = true;
+    while (needRerun)
     {
-        for (auto inst : block->getModifiableChildren())
+        needRerun = false;
+        for (auto block : func->getBlocks())
         {
-            // Inspect all uses of `inst` and find the common dominator of all use sites.
-            IRBlock* commonDominator = block;
-            for (auto use = inst->firstUse; use; use = use->nextUse)
+            for (auto inst : block->getModifiableChildren())
             {
-                auto userBlock = as<IRBlock>(use->getUser()->getParent());
-                if (!userBlock)
-                    continue;
-                while (commonDominator && !dom->dominates(commonDominator, userBlock))
+                // Inspect all uses of `inst` and find the common dominator of all use sites.
+                IRBlock* commonDominator = block;
+                for (auto use = inst->firstUse; use; use = use->nextUse)
                 {
-                    commonDominator = dom->getImmediateDominator(commonDominator);
-                }
-            }
-            SLANG_ASSERT(commonDominator);
-
-            // If commonDominator is 'block' and if the inst is not a Var in
-            // a loop condition block, we can skip the legalization.
-            //
-            if (commonDominator == block &&
-                !(as<IRVar>(inst) && loopHeaderBlockMap.containsKey(block)))
-                continue;
-
-            // Normally, if the common dominator is not `block`, we can simply move the definition
-            // to the common dominator.
-            // An exception is when the common dominator is the target block of a
-            // loop.
-            // Another exception is when a var in the loop condition block is accessed both inside
-            // and outside the loop. It is technically visible, but effects on the 'var' are not
-            // visible outside the loop, so we'll need to hoist it out of the loop.
-            //
-            // Note that after normalization, loops are in the form of:
-            // ```
-            // loop { if (condition) block; else break; }
-            // ```
-            // If we find ourselves needing to make the inst available right before
-            // the `if`, it means we are seeing uses of the inst outside the loop.
-            // In this case, we should insert a var/move the inst before the loop
-            // instead of before the `if`. This situation can occur in the IR if
-            // the original code is lowered from a `do-while` loop.
-            //
-            bool shouldInitializeVar = false;
-            if (loopHeaderBlockMap.containsKey(commonDominator))
-            {
-                bool shouldMoveToHeader = false;
-
-                // Check that the break-block dominates any of the uses are past the break
-                // block
-                for (auto _use = inst->firstUse; _use; _use = _use->nextUse)
-                {
-                    if (dom->dominates(
-                            as<IRLoop>(loopHeaderBlockMap[commonDominator]->getTerminator())
-                                ->getBreakBlock(),
-                            _use->getUser()->getParent()))
+                    auto userBlock = as<IRBlock>(use->getUser()->getParent());
+                    if (!userBlock)
+                        continue;
+                    while (commonDominator && !dom->dominates(commonDominator, userBlock))
                     {
-                        shouldMoveToHeader = true;
-                        break;
+                        commonDominator = dom->getImmediateDominator(commonDominator);
                     }
                 }
-                if (shouldMoveToHeader)
+                SLANG_ASSERT(commonDominator);
+
+                // If commonDominator is 'block' and if the inst is not a Var in
+                // a loop condition block, we can skip the legalization.
+                //
+                if (commonDominator == block &&
+                    !(as<IRVar>(inst) && loopHeaderBlockMap.containsKey(block)))
+                    continue;
+
+                // Normally, if the common dominator is not `block`, we can simply move the
+                // definition to the common dominator. An exception is when the common dominator is
+                // the target block of a loop. Another exception is when a var in the loop condition
+                // block is accessed both inside and outside the loop. It is technically visible,
+                // but effects on the 'var' are not visible outside the loop, so we'll need to hoist
+                // it out of the loop.
+                //
+                // Note that after normalization, loops are in the form of:
+                // ```
+                // loop { if (condition) block; else break; }
+                // ```
+                // If we find ourselves needing to make the inst available right before
+                // the `if`, it means we are seeing uses of the inst outside the loop.
+                // In this case, we should insert a var/move the inst before the loop
+                // instead of before the `if`. This situation can occur in the IR if
+                // the original code is lowered from a `do-while` loop.
+                //
+                bool shouldInitializeVar = false;
+                if (loopHeaderBlockMap.containsKey(commonDominator))
                 {
-                    commonDominator = loopHeaderBlockMap[commonDominator];
-                    shouldInitializeVar = true;
-                }
-            }
+                    bool shouldMoveToHeader = false;
 
-            // Now we can legalize uses based on the type of `inst`.
-            if (auto var = as<IRVar>(inst))
-            {
-                // If inst is an var, this is easy, we just move it to the
-                // common dominator.
-                if (var->getParent() != commonDominator)
-                    var->insertBefore(commonDominator->getTerminator());
-
-                if (shouldInitializeVar)
-                {
-                    IRBuilder builder(func);
-                    builder.setInsertAfter(var);
-                    builder.emitStore(
-                        var,
-                        builder.emitDefaultConstruct(
-                            as<IRPtrTypeBase>(var->getDataType())->getValueType()));
-                }
-            }
-            else
-            {
-                // For all other insts, we need to create a local var for it,
-                // and replace all uses with a load from the local var.
-                IRBuilder builder(func);
-                builder.setInsertBefore(commonDominator->getTerminator());
-                IRVar* tempVar = builder.emitVar(inst->getFullType());
-                auto defaultVal = builder.emitDefaultConstruct(inst->getFullType());
-                builder.emitStore(tempVar, defaultVal);
-
-                builder.setInsertAfter(inst);
-                builder.emitStore(tempVar, inst);
-
-                traverseUses(
-                    inst,
-                    [&](IRUse* use)
+                    // Check that the break-block dominates any of the uses are past the break
+                    // block
+                    for (auto _use = inst->firstUse; _use; _use = _use->nextUse)
                     {
-                        auto userBlock = as<IRBlock>(use->getUser()->getParent());
-                        if (!userBlock)
-                            return;
-                        // Only fix the use of the current definition of `inst` does not
-                        // dominate it.
-                        if (!dom->dominates(block, userBlock))
+                        if (dom->dominates(
+                                as<IRLoop>(loopHeaderBlockMap[commonDominator]->getTerminator())
+                                    ->getBreakBlock(),
+                                _use->getUser()->getParent()))
                         {
-                            // Replace the use with a load of tempVar.
-                            builder.setInsertBefore(use->getUser());
-                            auto load = builder.emitLoad(tempVar);
-                            builder.replaceOperand(use, load);
+                            shouldMoveToHeader = true;
+                            break;
                         }
-                    });
+                    }
+                    if (shouldMoveToHeader)
+                    {
+                        commonDominator = loopHeaderBlockMap[commonDominator];
+                        shouldInitializeVar = true;
+                    }
+                }
+
+                // Now we can legalize uses based on the type of `inst`.
+                if (auto var = as<IRVar>(inst))
+                {
+                    // If inst is an var, this is easy, we just move it to the
+                    // common dominator.
+                    if (var->getParent() != commonDominator)
+                        var->insertBefore(commonDominator->getTerminator());
+
+                    if (shouldInitializeVar)
+                    {
+                        IRBuilder builder(func);
+                        builder.setInsertAfter(var);
+                        builder.emitStore(
+                            var,
+                            builder.emitDefaultConstruct(
+                                as<IRPtrTypeBase>(var->getDataType())->getValueType()));
+                    }
+                }
+                else if (shouldDuplicateInstAtUseSite(inst, target))
+                {
+                    // If inst must be duplicated at use sites due to target restrictions,
+                    // we will make a copy of it at its use, and rerun the entire processing loop
+                    // to transitively duplicate referenced operands.
+                    traverseUses(
+                        inst,
+                        [&](IRUse* use)
+                        {
+                            auto userBlock = as<IRBlock>(use->getUser()->getParent());
+                            if (!userBlock)
+                                return;
+                            // Only fix the use of the current definition of `inst` does not
+                            // dominate it.
+                            if (!dom->dominates(block, userBlock))
+                            {
+                                IRBuilder builder(func);
+                                builder.setInsertBefore(use->getUser());
+                                IRCloneEnv env;
+                                auto clonedInst = Slang::cloneInst(&env, &builder, inst);
+                                builder.replaceOperand(use, clonedInst);
+
+                                // If any operands of the gep inst is not defined at the use site,
+                                // we need to rerun the legalization and make sure they are
+                                // also made available.
+                                for (UInt i = 0; i < inst->getOperandCount(); i++)
+                                {
+                                    auto operand = inst->getOperand(i);
+                                    if (!isInstAvailableAtBlock(*dom, operand, userBlock))
+                                    {
+                                        needRerun = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        });
+                }
+                else
+                {
+                    // For all other insts, we need to create a local var for it,
+                    // and replace all uses with a load from the local var.
+                    IRBuilder builder(func);
+                    builder.setInsertBefore(commonDominator->getTerminator());
+                    IRVar* tempVar = builder.emitVar(inst->getFullType());
+                    auto defaultVal = builder.emitDefaultConstruct(inst->getFullType());
+                    builder.emitStore(tempVar, defaultVal);
+
+                    traverseUses(
+                        inst,
+                        [&](IRUse* use)
+                        {
+                            auto userBlock = as<IRBlock>(use->getUser()->getParent());
+                            if (!userBlock)
+                                return;
+                            // Only fix the use of the current definition of `inst` does not
+                            // dominate it.
+                            if (!dom->dominates(block, userBlock))
+                            {
+                                // Replace the use with a load of tempVar.
+                                builder.setInsertBefore(use->getUser());
+                                auto load = builder.emitLoad(tempVar);
+                                builder.replaceOperand(use, load);
+                            }
+                        });
+                    builder.setInsertAfter(inst);
+                    builder.emitStore(tempVar, inst);
+                }
             }
         }
     }
@@ -2281,9 +2833,9 @@ bool canOperationBeSpecConst(IROp op, IRType* resultType, IRInst* const* fixedAr
     // Returns true for ops that can be declared as an operation under `OpSpecConstantOp`.
     //
     // Integer arithmetic and comparison operations can be `OpSpecConstantOp` with the `Shader`
-    // capability, while floating-point arithmetic and comparison operations require the `Kernel`
-    // capability. We only support `Shader` capability for now, return false when floating-point
-    // arithmetic/comparison is encountered.
+    // capability, while floating-point arithmetic and comparison operations require the
+    // `Kernel` capability. We only support `Shader` capability for now, return false when
+    // floating-point arithmetic/comparison is encountered.
     switch (op)
     {
     case kIROp_Add:
@@ -2299,6 +2851,8 @@ bool canOperationBeSpecConst(IROp op, IRType* resultType, IRInst* const* fixedAr
     case kIROp_Geq:
     case kIROp_Less:
     case kIROp_Greater:
+    case kIROp_And:
+    case kIROp_Or:
         {
             IRInst* operand1;
             IRInst* operand2;
@@ -2393,6 +2947,9 @@ bool isSignedType(IRType* type)
     {
     case kIROp_FloatType:
     case kIROp_DoubleType:
+    case kIROp_FloatE4M3Type:
+    case kIROp_FloatE5M2Type:
+    case kIROp_BFloat16Type:
         return true;
     case kIROp_IntType:
     case kIROp_Int16Type:
@@ -2406,6 +2963,138 @@ bool isSignedType(IRType* type)
     default:
         return false;
     }
+}
+
+bool isIROpaqueType(IRType* type)
+{
+    switch (type->getOp())
+    {
+    case kIROp_TextureType:
+    case kIROp_GLSLImageType:
+    case kIROp_SamplerStateType:
+    case kIROp_SamplerComparisonStateType:
+    case kIROp_SubpassInputType:
+    case kIROp_RaytracingAccelerationStructureType:
+    case kIROp_RayQueryType:
+    case kIROp_HitObjectType:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool isPointerToImmutableLocation(IRInst* loc)
+{
+    switch (loc->getOp())
+    {
+    case kIROp_GetStructuredBufferPtr:
+    case kIROp_RWStructuredBufferGetElementPtr:
+    case kIROp_ImageSubscript:
+        return isPointerToImmutableLocation(loc->getOperand(0));
+    default:
+        break;
+    }
+
+    auto type = loc->getDataType();
+    if (!type)
+        return false;
+
+    switch (type->getOp())
+    {
+    case kIROp_HLSLStructuredBufferType:
+    case kIROp_HLSLByteAddressBufferType:
+    case kIROp_ConstantBufferType:
+    case kIROp_ParameterBlockType:
+        return true;
+    default:
+        break;
+    }
+
+    if (auto textureType = as<IRTextureType>(type))
+        return textureType->getAccess() == SLANG_RESOURCE_ACCESS_READ;
+
+    if (auto ptrType = as<IRPtrTypeBase>(type))
+    {
+        switch (ptrType->getAddressSpace())
+        {
+        case AddressSpace::BuiltinInput:
+        case AddressSpace::Input:
+        case AddressSpace::MetalObjectData:
+        case AddressSpace::Uniform:
+        case AddressSpace::UniformConstant:
+            return true;
+        }
+        if (ptrType->getAccessQualifier() == AccessQualifier::Immutable)
+            return true;
+    }
+    return false;
+}
+
+bool isGenericParameter(IRInst* inst)
+{
+    // The generic parameter must be in the first block
+    bool isParam = inst->getOp() == kIROp_Param;
+    bool isGeneric = false;
+    if (auto irBlock = as<IRBlock>(inst->parent))
+    {
+        isGeneric = as<IRGeneric>(irBlock->getParent()) != nullptr;
+    }
+    return isParam && isGeneric;
+}
+
+bool canRelaxInstOrderRule(IRInst* inst, IRInst* useOfInst)
+{
+    bool isSameBlock = (inst->getParent() == useOfInst->getParent());
+    return isSameBlock && isGenericParameter(useOfInst) && (useOfInst->getDataType() == inst);
+}
+
+IRIntegerValue getInterfaceAnyValueSize(IRInst* type, SourceLoc usageLoc)
+{
+    SLANG_UNUSED(usageLoc);
+
+    if (auto decor = type->findDecoration<IRAnyValueSizeDecoration>())
+    {
+        return decor->getSize();
+    }
+
+    // We could conceivably make it an error to have an interface
+    // without an `[anyValueSize(...)]` attribute, but then we risk
+    // producing error messages even when doing 100% static specialization.
+    //
+    // It is simpler to use a reasonable default size and treat any
+    // type without an explicit attribute as using that size.
+    //
+    return kDefaultAnyValueSize;
+}
+
+IRType* getTextureTypeFromCombinedTextureSampler(IRType* type)
+{
+    IRBuilder builder(type);
+    builder.setInsertBefore(type);
+    auto textureType = as<IRTextureTypeBase>(type);
+    return builder.getTextureType(
+        textureType->getElementType(),
+        textureType->getShapeInst(),
+        textureType->getIsArrayInst(),
+        textureType->getIsMultisampleInst(),
+        textureType->getSampleCountInst(),
+        textureType->getAccessInst(),
+        textureType->getIsShadowInst(),
+        builder.getIntValue(builder.getIntType(), 0),
+        textureType->getFormatInst());
+}
+
+IRType* getSamplerTypeFromCombinedTextureSampler(IRType* type)
+{
+    IRBuilder builder(type);
+    builder.setInsertBefore(type);
+
+    auto textureType = as<IRTextureTypeBase>(type);
+
+    if (getIntVal(textureType->getIsShadowInst()) != 0)
+        return builder.getType(kIROp_SamplerComparisonStateType);
+    else
+        return builder.getType(kIROp_SamplerStateType);
 }
 
 } // namespace Slang

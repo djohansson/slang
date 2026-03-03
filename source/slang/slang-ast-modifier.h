@@ -2,6 +2,9 @@
 #pragma once
 
 #include "slang-ast-base.h"
+#include "slang-ir-insts-enum.h"
+
+//
 #include "slang-ast-modifier.h.fiddle"
 
 FIDDLE()
@@ -191,7 +194,7 @@ FIDDLE()
 class ExplicitlyDeclaredCapabilityModifier : public Modifier
 {
     FIDDLE(...)
-    FIDDLE() CapabilitySet declaredCapabilityRequirements;
+    FIDDLE() CapabilitySetVal* declaredCapabilityRequirements = nullptr;
 };
 
 // Marks a synthesized variable as local temporary variable.
@@ -336,16 +339,16 @@ class InOutModifier : public OutModifier
 };
 
 
-// `__ref` modifier for by-reference parameter passing
+// `ref` modifier for by-reference parameter passing
 FIDDLE()
 class RefModifier : public Modifier
 {
     FIDDLE(...)
 };
 
-// `__ref` modifier for by-reference parameter passing
+// `borrow` modifier for borrow parameter passing
 FIDDLE()
-class ConstRefModifier : public Modifier
+class BorrowModifier : public Modifier
 {
     FIDDLE(...)
 };
@@ -579,7 +582,6 @@ class BuiltinRequirementModifier : public Modifier
     FIDDLE(...)
     FIDDLE() BuiltinRequirementKind kind;
 };
-
 
 // A modifier applied to declarations of builtin types to indicate how they
 // should be lowered to the IR.
@@ -914,7 +916,7 @@ FIDDLE()
 class RequireCapabilityAttribute : public Attribute
 {
     FIDDLE(...)
-    FIDDLE() CapabilitySet capabilitySet;
+    FIDDLE() CapabilitySetVal* capabilitySet = nullptr;
 };
 
 
@@ -1272,7 +1274,7 @@ class EntryPointAttribute : public Attribute
 {
     FIDDLE(...)
     // The resolved capailities for our entry point.
-    FIDDLE() CapabilitySet capabilitySet;
+    FIDDLE() CapabilitySetVal* capabilitySet = nullptr;
 };
 
 // A `[__vulkanRayPayload(location)]` attribute, which is used in the
@@ -1687,7 +1689,7 @@ FIDDLE()
 class DerivativeMemberAttribute : public Attribute
 {
     FIDDLE(...)
-    FIDDLE() DeclRefExpr* memberDeclRef;
+    FIDDLE() DeclRefExpr* memberDeclRef = nullptr;
 };
 
 /// An attribute that marks an interface type as a COM interface declaration.
@@ -1712,7 +1714,7 @@ FIDDLE()
 class RequirePreludeAttribute : public Attribute
 {
     FIDDLE(...)
-    FIDDLE() CapabilitySet capabilitySet;
+    FIDDLE() CapabilitySetVal* capabilitySet = nullptr;
     FIDDLE() String prelude;
 };
 
@@ -1952,7 +1954,7 @@ class NoSideEffectAttribute : public Attribute
     FIDDLE(...)
 };
 
-/// A `[KnownBuiltin("name")]` attribute allows the compiler to
+/// A `[KnownBuiltin(name)]` attribute allows the compiler to
 /// identify this declaration during compilation, despite obfuscation or
 /// linkage removing optimizations
 ///
@@ -1960,7 +1962,7 @@ FIDDLE()
 class KnownBuiltinAttribute : public Attribute
 {
     FIDDLE(...)
-    FIDDLE() String name;
+    FIDDLE() IntVal* name;
 };
 
 /// A modifier that applies to types rather than declarations.
@@ -2112,6 +2114,12 @@ public:
     }
     uint32_t getMemoryQualifierBit() { return memoryQualifiers; }
     List<Modifier*> getModifiers() { return memoryModifiers; }
+};
+
+FIDDLE()
+class ExperimentalModuleAttribute : public Attribute
+{
+    FIDDLE(...)
 };
 
 } // namespace Slang
