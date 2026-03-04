@@ -28,7 +28,11 @@ if(NOT EXISTS "${DLL_PATH}")
 endif()
 
 # Find dumpbin - should be available in Visual Studio environment
-find_program(DUMPBIN_EXECUTABLE dumpbin)
+set(VISUAL_STUDIO_PATH $ENV{VISUAL_STUDIO_PATH} CACHE PATH "Visual Studio root path")
+set(VISUAL_STUDIO_VCTOOLS_VERSION $ENV{VISUAL_STUDIO_VCTOOLS_VERSION} CACHE PATH "Visual Studio VC Tools version")
+find_program(DUMPBIN_EXECUTABLE dumpbin HINTS
+    "${VISUAL_STUDIO_PATH}/VC/Tools/MSVC/${VISUAL_STUDIO_VCTOOLS_VERSION}/bin/Hostx64/x64"
+)
 if(NOT DUMPBIN_EXECUTABLE)
     message(
         FATAL_ERROR
