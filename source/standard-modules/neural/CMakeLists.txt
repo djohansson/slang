@@ -28,16 +28,11 @@ endforeach()
 # (slang-bootstrap is a standalone tool with no external dependencies)
 # Otherwise, use the slangc built as part of this build
 if(SLANG_GENERATORS_PATH)
-    set(SLANG_COMPILER $<TARGET_FILE:slang-bootstrap>)
+    set(SLANG_COMPILER slang-bootstrap)
     set(SLANG_COMPILER_DEPENDENCY)
 elseif(SLANG_ENABLE_SLANGC)
-    set(SLANG_COMPILER $<TARGET_FILE:slangc>)
+    set(SLANG_COMPILER slangc)
     set(SLANG_COMPILER_DEPENDENCY slangc)
-    add_custom_command(
-        COMMAND ${CMAKE_COMMAND} -E copy -t $<TARGET_FILE_DIR:slangc> $<TARGET_RUNTIME_DLLS:slangc>
-        WORKING_DIRECTORY ${neural_output_dir}
-        VERBATIM
-    )
 else()
     # As a fallback, use the system-installed `slangc` compiler
     set(SLANG_COMPILER slangc)
@@ -54,7 +49,8 @@ endif()
 # Build neural.slang-module and output to the output directory
 add_custom_command(
     OUTPUT ${neural_module_file}
-    COMMAND ${SLANG_COMPILER} ${NEURAL_MODULE_DEFINES} neural.slang -o ${SLANG_NEURAL_MODULE_FILE_NAME}
+    COMMAND ${CMAKE_COMMAND} -E copy -t $<TARGET_FILE_DIR:${SLANG_COMPILER}> $<TARGET_RUNTIME_DLLS:${SLANG_COMPILER}>
+    COMMAND $<TARGET_FILE:${SLANG_COMPILER}> ${NEURAL_MODULE_DEFINES} neural.slang -o ${SLANG_NEURAL_MODULE_FILE_NAME}
     DEPENDS ${neural_copied_files} ${SLANG_COMPILER_DEPENDENCY}
     WORKING_DIRECTORY ${neural_output_dir}
     VERBATIM
