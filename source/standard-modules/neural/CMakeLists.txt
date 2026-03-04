@@ -33,6 +33,11 @@ if(SLANG_GENERATORS_PATH)
 elseif(SLANG_ENABLE_SLANGC)
     set(SLANG_COMPILER $<TARGET_FILE:slangc>)
     set(SLANG_COMPILER_DEPENDENCY slangc)
+    add_custom_command(
+        COMMAND ${CMAKE_COMMAND} -E copy -t $<TARGET_FILE_DIR:slangc> $<TARGET_RUNTIME_DLLS:slangc>
+        WORKING_DIRECTORY ${neural_output_dir}
+        VERBATIM
+    )
 else()
     # As a fallback, use the system-installed `slangc` compiler
     set(SLANG_COMPILER slangc)
