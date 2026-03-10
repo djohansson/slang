@@ -507,11 +507,11 @@ endif()
 
 find_package(Threads REQUIRED)
 
-if(SLANG_USE_SYSTEM_UNORDERED_DENSE)
+if(${SLANG_USE_SYSTEM_UNORDERED_DENSE})
     find_package(unordered_dense CONFIG QUIET)
 endif()
 
-if(SLANG_USE_SYSTEM_SPIRV_HEADERS)
+if(${SLANG_USE_SYSTEM_SPIRV_HEADERS})
     find_package(SPIRV-Headers REQUIRED)
 endif()
 
@@ -546,11 +546,11 @@ if(${SLANG_USE_SYSTEM_GLSLANG})
     endif()
 endif()
 
-if(SLANG_USE_SYSTEM_LUA)
-    find_package(lua REQUIRED)
+if(${SLANG_USE_SYSTEM_LUA})
+    find_package(Lua REQUIRED)
 endif()
 
-if (SLANG_USE_SYSTEM_IMGUI)
+if (${SLANG_USE_SYSTEM_IMGUI})
     find_package(imgui REQUIRED)
 endif()
 
