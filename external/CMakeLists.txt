@@ -237,7 +237,7 @@ if(SLANG_ENABLE_SLANG_GLSLANG)
         endif()
     endif()
 
-    if(NOT ${SLANG_USE_SYSTEM_GLSLANG})
+    if(NOT SLANG_USE_SYSTEM_GLSLANG)
         # glslang
         set(SKIP_GLSLANG_INSTALL ON)
         set(ENABLE_OPT ON)

@@ -1,7 +1,11 @@
 // slang-glslang.cpp
 #include "slang-glslang.h"
 
+#if defined(SLANG_USE_SYSTEM_GLSLANG) && SLANG_USE_SYSTEM_GLSLANG
 #include "glslang/SPIRV/GlslangToSpv.h"
+#else
+#include "SPIRV/GlslangToSpv.h"
+#endif
 #include "glslang/Public/ShaderLang.h"
 #include "slang.h"
 #include "spirv-tools/libspirv.h"
