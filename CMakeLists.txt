@@ -466,6 +466,18 @@ if(NOT CMAKE_C_COMPILER_LAUNCHER AND NOT CMAKE_CXX_COMPILER_LAUNCHER)
     endif()
 endif()
 
+set(VISUAL_STUDIO_PATH
+    ""
+    CACHE STRING
+    "Visual Studio root path"
+)
+
+set(VISUAL_STUDIO_VCTOOLS_VERSION
+    ""
+    CACHE STRING
+    "Visual Studio VC Tools version"
+)
+
 #
 # Option validation
 #

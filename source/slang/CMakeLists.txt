@@ -356,13 +356,16 @@ if(WIN32 AND SLANG_LIB_TYPE STREQUAL "SHARED")
     # Create a wrapper script with the actual DLL path (since generator expressions
     # don't work with -P script mode). Use per-config wrapper to avoid file(GENERATE) conflicts.
     set(DEF_GEN_WRAPPER "${CMAKE_CURRENT_BINARY_DIR}/generate-def-wrapper-$<CONFIG>.cmake")
-    file(GENERATE OUTPUT "${DEF_GEN_WRAPPER}" CONTENT "
-set(DLL_PATH \"$<TARGET_FILE:slang>\")
+    file(
+        GENERATE
+        OUTPUT "${DEF_GEN_WRAPPER}"
+        CONTENT "set(DLL_PATH \"$<TARGET_FILE:slang>\")
 set(OUTPUT_DEF \"${SLANG_PROXY_DEF}\")
 set(TARGET_DLL_NAME \"slang-compiler\")
+set(VISUAL_STUDIO_PATH \"${VISUAL_STUDIO_PATH}\")
+set(VISUAL_STUDIO_VCTOOLS_VERSION \"${VISUAL_STUDIO_VCTOOLS_VERSION}\")
 include(\"${slang_SOURCE_DIR}/cmake/RegenerateDllExports.cmake\")
 ")
-    
     # Custom command to generate the DEF file from slang-compiler.dll exports
     add_custom_command(
         OUTPUT "${SLANG_PROXY_DEF}"

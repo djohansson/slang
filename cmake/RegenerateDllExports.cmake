@@ -27,16 +27,14 @@ if(NOT EXISTS "${DLL_PATH}")
     message(FATAL_ERROR "DLL not found: ${DLL_PATH}")
 endif()
 
+set(DUMPBIN_PATH "${VISUAL_STUDIO_PATH}/VC/Tools/MSVC/${VISUAL_STUDIO_VCTOOLS_VERSION}/bin/Hostx64/x64")
+
 # Find dumpbin - should be available in Visual Studio environment
-set(VISUAL_STUDIO_PATH $ENV{VISUAL_STUDIO_PATH} CACHE PATH "Visual Studio root path")
-set(VISUAL_STUDIO_VCTOOLS_VERSION $ENV{VISUAL_STUDIO_VCTOOLS_VERSION} CACHE PATH "Visual Studio VC Tools version")
-find_program(DUMPBIN_EXECUTABLE dumpbin HINTS
-    "${VISUAL_STUDIO_PATH}/VC/Tools/MSVC/${VISUAL_STUDIO_VCTOOLS_VERSION}/bin/Hostx64/x64"
-)
+find_program(DUMPBIN_EXECUTABLE dumpbin HINTS ${DUMPBIN_PATH})
 if(NOT DUMPBIN_EXECUTABLE)
     message(
         FATAL_ERROR
-        "dumpbin not found. Make sure you are running in a Visual Studio Developer Command Prompt."
+        "dumpbin not found. Make sure you are running in a Visual Studio Developer Command Prompt. Hint Path: ${DUMPBIN_PATH}"
     )
 endif()
 
