@@ -5,7 +5,8 @@ if(SLANG_ENABLE_SLANGC)
     # it as a custom command.
     add_custom_command(
         OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/shader.o
-        COMMAND slangc -target shader-object-code -emit-cpu-via-llvm -O3 -g0 ${CMAKE_CURRENT_SOURCE_DIR}/shader.slang -o ${CMAKE_CURRENT_BINARY_DIR}/shader.o
+        COMMAND ${CMAKE_COMMAND} -E copy -t $<TARGET_FILE_DIR:slangc> $<TARGET_RUNTIME_DLLS:slangc>
+        COMMAND $<TARGET_FILE:slangc> -target shader-object-code -emit-cpu-via-llvm -O3 -g0 ${CMAKE_CURRENT_SOURCE_DIR}/shader.slang -o ${CMAKE_CURRENT_BINARY_DIR}/shader.o
         COMMAND_EXPAND_LISTS
         MAIN_DEPENDENCY ${CMAKE_CURRENT_SOURCE_DIR}/shader.slang
         VERBATIM
